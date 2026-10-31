@@ -186,6 +186,8 @@ public:
     void FlushGpuWrittenCommands(GPUVAddr address, size_t size);
     /// Whether a page of the range was ever written by the GPU (Tegra::Nx2IsGpuWritten).
     bool IsGpuWrittenRange(GPUVAddr address, size_t size) const;
+    /// Downloads GPU-written macro parameters, with the records around them (one GPU wait).
+    void FlushParameterWindow(GPUVAddr address, size_t size);
 
 private:
 

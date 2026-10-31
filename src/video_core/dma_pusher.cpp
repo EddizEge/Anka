@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
@@ -138,7 +139,7 @@ bool DmaPusher::Step() {
                         }
                         back_idle = true;
                         if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
-                            memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
+                            FlushParameterWindow(address, bytes);
                             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushes, 1);
                             flushed_parameters = true;
                             static std::atomic<u32> flush_logs{};
@@ -489,6 +490,27 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
     }
+}
+
+void DmaPusher::FlushParameterWindow(GPUVAddr address, size_t size) {
+    // Each flush waits for the host GPU to finish everything (Scheduler::Finish). The culling
+    // pass writes many records next to each other, and the colour pass reads them one by one:
+    // flushing only the record made one full GPU wait per record (~1,000 a second in Donkey
+    // Kong Bananza's open areas). Download the aligned window around it at once instead.
+    // EDEN_NX2_PBFLUSH_WINDOW_KIB=0 flushes the record alone.
+    static const u64 window = [] {
+        const char* value = std::getenv("EDEN_NX2_PBFLUSH_WINDOW_KIB");
+        const u64 kib = value != nullptr ? std::strtoull(value, nullptr, 10) : 256;
+        return kib == 0 ? u64{0} : std::bit_ceil(kib) * 1024;
+    }();
+    VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::ParameterFlush};
+    if (window == 0) {
+        memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
+        return;
+    }
+    const GPUVAddr begin = address & ~(window - 1);
+    const GPUVAddr end = (address + size + window - 1) & ~(window - 1);
+    memory_manager.FlushRegion(begin, end - begin, VideoCommon::CacheType::BufferCache);
 }
 
 bool DmaPusher::IsGpuWrittenRange(GPUVAddr address, size_t size) const {
