@@ -132,11 +132,12 @@ bool DmaPusher::Step() {
                     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterBlocks, 1);
                     if (flush_all_parameters || IsGpuWrittenRange(address, bytes)) {
                         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushChecks, 1);
-                        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-                            split.Drain();
+                        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active() && split.Drain()) {
+                            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterDrainWaits, 1);
                         }
                         if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
                             memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
+                            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushes, 1);
                             flushed_parameters = true;
                             static std::atomic<u32> flush_logs{};
                             if (flush_logs.fetch_add(1) < 20) {
@@ -506,8 +507,12 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     }
     // The caches belong to the split's back: it first runs what the front queued (the dispatch
     // that writes these words among it).
-    VideoCommon::GpuSplit::Get().Drain();
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListChecks, 1);
+    if (VideoCommon::GpuSplit::Get().Drain()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListDrainWaits, 1);
+    }
     if (memory_manager.IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListFlushes, 1);
         memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
     }
 }

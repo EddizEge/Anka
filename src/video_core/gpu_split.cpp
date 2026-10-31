@@ -193,10 +193,10 @@ void GpuSplit::Publish() {
     }
 }
 
-void GpuSplit::Drain() {
+bool GpuSplit::Drain() {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
-        return;
+        return false;
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
@@ -204,7 +204,7 @@ void GpuSplit::Drain() {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
             publish_every = 8;
-            return;
+            return true;
         }
         if (spins < 16384) {
             Pause();

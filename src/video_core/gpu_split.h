@@ -97,8 +97,8 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
-    /// Waits until the back executed everything sent so far.
-    void Drain();
+    /// Waits until the back executed everything sent so far. Returns whether it had to wait.
+    bool Drain();
 
 private:
     enum class Kind : u64 {

@@ -80,7 +80,7 @@ inline u64 Now() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 10> counters{}; ///< See Counter
+    std::array<u64, 16> counters{}; ///< See Counter
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
 };
@@ -132,6 +132,11 @@ enum class Counter : u32 {
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
     ParameterBlocks, ///< Small macro/inline parameter blocks starting a GP entry
     ParameterFlushChecks, ///< Of ParameterBlocks: on GPU-written pages (the front drains)
+    ParameterFlushes, ///< Of ParameterFlushChecks: dirty in the buffer cache (downloaded)
+    ParameterDrainWaits, ///< Of ParameterFlushChecks: the drain had to wait for the back
+    CommandListChecks, ///< GP entries on GPU-written pages (FlushGpuWrittenCommands drains)
+    CommandListFlushes, ///< Of CommandListChecks: dirty in the buffer cache (downloaded)
+    CommandListDrainWaits, ///< Of CommandListChecks: the drain had to wait for the back
 };
 
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
@@ -192,9 +197,11 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
-    line += fmt::format(" | parameter blocks {:.0f} ({:.0f} drained)",
-                        static_cast<double>(data.counters[8]) * 1e9 / window,
-                        static_cast<double>(data.counters[9]) * 1e9 / window);
+    const auto rate = [&](size_t i) { return static_cast<double>(data.counters[i]) * 1e9 / window; };
+    line += fmt::format(" | parameter blocks {:.0f} ({:.0f} on written pages, {:.0f} waited, {:.0f} flushed)",
+                        rate(8), rate(9), rate(11), rate(10));
+    line += fmt::format(" | written command lists {:.0f} ({:.0f} waited, {:.0f} flushed)", rate(12),
+                        rate(14), rate(13));
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
