@@ -118,20 +118,31 @@ bool DmaPusher::Step() {
                     const char* value = std::getenv("EDEN_NX2_PBFLUSH");
                     return value == nullptr || value[0] != '0';
                 }();
+                // Only blocks on pages the GPU has ever written can hold such arguments; draining
+                // the split's back for every block (tens of thousands a second in its open areas)
+                // left both halves waiting on each other. EDEN_NX2_PBFLUSH=2 drains for all.
+                static const bool flush_all_parameters = [] {
+                    const char* value = std::getenv("EDEN_NX2_PBFLUSH");
+                    return value != nullptr && value[0] == '2';
+                }();
                 bool flushed_parameters = false;
+                const GPUVAddr address = dma_state.dma_get;
+                const size_t bytes = words * sizeof(u32);
                 if (flush_parameters && words <= 64) {
-                    if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-                        split.Drain();
-                    }
-                    const GPUVAddr address = dma_state.dma_get;
-                    const size_t bytes = words * sizeof(u32);
-                    if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
-                        memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
-                        flushed_parameters = true;
-                        static std::atomic<u32> flush_logs{};
-                        if (flush_logs.fetch_add(1) < 20) {
-                            LOG_INFO(HW_GPU, "Macro parameters at {:#x} ({} words) were written by the GPU: flushed",
-                                     address, words);
+                    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterBlocks, 1);
+                    if (flush_all_parameters || IsGpuWrittenRange(address, bytes)) {
+                        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushChecks, 1);
+                        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                            split.Drain();
+                        }
+                        if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
+                            memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
+                            flushed_parameters = true;
+                            static std::atomic<u32> flush_logs{};
+                            if (flush_logs.fetch_add(1) < 20) {
+                                LOG_INFO(HW_GPU, "Macro parameters at {:#x} ({} words) were written by the GPU: flushed",
+                                         address, words);
+                            }
                         }
                     }
                 }
@@ -139,8 +150,7 @@ bool DmaPusher::Step() {
                     engine_state->current_dirty = false;
                 } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
-                    split.Defer([engine_state, memory = &memory_manager, address = GPUVAddr{dma_state.dma_get},
-                                 bytes = words * sizeof(u32)] {
+                    split.Defer([engine_state, memory = &memory_manager, address, bytes] {
                         engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
                     });
                 } else {
@@ -474,6 +484,16 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
     }
 }
 
+bool DmaPusher::IsGpuWrittenRange(GPUVAddr address, size_t size) const {
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        if (const auto device = memory_manager.GpuToCpuAddress(page);
+            device && Tegra::Nx2IsGpuWritten(*device)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     // Title 1 runs small command lists its culling dispatches fill in each frame. Accurate GPU
     // mode reads every command list through the caches (safe reads); here only the ones on pages
@@ -481,15 +501,7 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || size == 0) {
         return;
     }
-    bool written = false;
-    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
-        if (const auto device = memory_manager.GpuToCpuAddress(page);
-            device && Tegra::Nx2IsGpuWritten(*device)) {
-            written = true;
-            break;
-        }
-    }
-    if (!written) {
+    if (!IsGpuWrittenRange(address, size)) {
         return;
     }
     // The caches belong to the split's back: it first runs what the front queued (the dispatch
