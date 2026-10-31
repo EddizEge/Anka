@@ -647,6 +647,22 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 void RasterizerVulkan::DrawIndirect() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
+    // The arguments may be what a dispatch or draw just wrote (Donkey Kong Bananza's terrain
+    // records, Maxwell3D::BackDrawIndexedIndirect): the indirect read must wait for it.
+    if (buffer_cache.TakeIndirectBarrier()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::IndirectBarriers, 1);
+        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            static constexpr VkMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, barrier);
+        });
+    }
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, [this, &params] {
         const auto indirect_buffer = buffer_cache.GetDrawIndirectBuffer();

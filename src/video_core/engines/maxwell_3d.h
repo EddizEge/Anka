@@ -3180,6 +3180,12 @@ public:
                          u32 argument, bool is_last_call);
     void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
                               const u32* base_start, u32 amount, u32 methods_pending);
+    /// Split GPU thread's front (DmaPusher): the macro being called continues with `method` and
+    /// five words at `record`, on a page the GPU wrote. When the macro is NVN's indexed indirect
+    /// draw (checked on its first calls), returns true: the front then does not need the words,
+    /// the GPU reads the record itself (BackDrawIndexedIndirect) and nothing waits for it.
+    [[nodiscard]] bool FrontTakeIndirectRecord(Core::System& system, VideoCommon::GpuSplit& split,
+                                               u32 method, GPUVAddr record);
 
     bool ShouldExecute() const {
         return execute_on;
@@ -3353,6 +3359,9 @@ private:
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 count);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
+    void FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state,
+                           GPUVAddr record);
+    void BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record);
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,

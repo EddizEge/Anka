@@ -988,6 +988,8 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+        // Later uploads to the arguments then stay in the stream, after this draw reads them.
+        buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
     };
     if (current_draw_indirect->include_count) {
         bind_buffer(channel_state->count_buffer_binding);
@@ -1625,6 +1627,7 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
     }
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);
+    written_since_indirect = true;
     QueueDownload(device_addr, size);
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
         Tegra::Nx2MarkGpuWritten(device_addr, size);

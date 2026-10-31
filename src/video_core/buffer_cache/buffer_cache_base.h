@@ -335,6 +335,12 @@ public:
         current_draw_indirect = current_draw_indirect_;
     }
 
+    /// Whether a draw or dispatch has written buffers (MarkWrittenBuffer) since the last call:
+    /// an indirect draw must then wait for those writes before it reads its arguments.
+    [[nodiscard]] bool TakeIndirectBarrier() {
+        return std::exchange(written_since_indirect, false);
+    }
+
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectCount();
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
@@ -350,6 +356,7 @@ public:
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
     bool any_buffer_uploaded = false;
+    bool written_since_indirect = false; ///< See TakeIndirectBarrier
 
 private:
     template <typename Func>

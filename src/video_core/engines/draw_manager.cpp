@@ -4,11 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <cstring>
 
 #include "common/settings.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -302,6 +304,20 @@ void Maxwell3D::DrawManager::UpdateTopology(Maxwell3D& maxwell3d) {
 
 void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count) {
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
+    // A draw without indices, vertices or instances changes nothing on the GPU, but the
+    // rasterizer still binds its buffers, textures and pipeline. EDEN_NX2_SKIP_EMPTY_DRAWS=1
+    // skips them (off by default for now: counted first).
+    if ((draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count) == 0 ||
+        instance_count == 0) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::EmptyDraws, 1);
+        static const bool skip_empty = [] {
+            const char* value = std::getenv("EDEN_NX2_SKIP_EMPTY_DRAWS");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (skip_empty) {
+            return;
+        }
+    }
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);

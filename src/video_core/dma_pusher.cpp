@@ -103,6 +103,7 @@ bool DmaPusher::Step() {
     }
 
     if (header.size > 0) {
+        bool indirect_record = false; ///< The GPU reads this entry itself (see below)
         if (subchannels[dma_state.subchannel] && dma_state.method_count) {
             const auto engine = subchannel_type[dma_state.subchannel];
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;
@@ -130,7 +131,17 @@ bool DmaPusher::Step() {
                 bool back_idle = false;
                 const GPUVAddr address = dma_state.dma_get;
                 const size_t bytes = words * sizeof(u32);
-                if (flush_parameters && words <= 64) {
+                // NVN's indexed indirect draw macro, continued by a record the GPU wrote: the
+                // host GPU reads the record itself (Maxwell3D::FrontTakeIndirectRecord).
+                if (macro_payload && words == 5 && dma_state.method_count == 5 &&
+                    header.size == 5 && VideoCommon::GpuSplit::Get().Active() &&
+                    IsGpuWrittenRange(address, bytes)) {
+                    indirect_record =
+                        static_cast<Engines::Maxwell3D*>(engine_state)
+                            ->FrontTakeIndirectRecord(system, VideoCommon::GpuSplit::Get(),
+                                                      dma_state.method, address);
+                }
+                if (flush_parameters && words <= 64 && !indirect_record) {
                     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterBlocks, 1);
                     if (flush_all_parameters || IsGpuWrittenRange(address, bytes)) {
                         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushChecks, 1);
@@ -150,7 +161,9 @@ bool DmaPusher::Step() {
                         }
                     }
                 }
-                if (flushed_parameters) {
+                if (indirect_record) {
+                    // Only macros running on the back read current_dirty.
+                } else if (flushed_parameters) {
                     engine_state->current_dirty = false;
                 } else if (back_idle) {
                     // Drained just above: the back is idle. Deferring this as well made the
@@ -208,7 +221,9 @@ bool DmaPusher::Step() {
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else {
-            FlushGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            if (!indirect_record) {
+                FlushGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            }
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::UnsafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);

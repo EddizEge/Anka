@@ -9,6 +9,8 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <unordered_map>
+#include <utility>
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/scope_exit.h"
@@ -811,6 +813,18 @@ struct Maxwell3D::FrontState {
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
+    /// FrontTakeIndirectRecord: the GPU address of the current call's record (0: none).
+    GPUVAddr indirect_record{};
+    /// Per macro start: how many calls made exactly NVN's indexed indirect draw writes
+    /// (IndirectDrawWrites), or whether one did not. Cleared when the macro code changes.
+    struct IndirectCheck {
+        static constexpr u32 Needed = 16;
+        u32 matches{};
+        bool failed{};
+    };
+    std::unordered_map<u32, IndirectCheck> indirect_checks;
+    u64 indirect_generation{~0ULL};
+    std::vector<std::pair<u32, u32>> checked_writes; ///< The writes of a call being checked
 };
 
 namespace {
@@ -820,6 +834,32 @@ namespace {
 bool FrontVerifyEnabled() {
     static const bool verify = std::getenv("EDEN_NX2_SPLIT_VERIFY") != nullptr;
     return verify;
+}
+
+// EDEN_NX2_HLE_INDIRECT=0: run NVN's indexed indirect draw macro as it is, with its record read
+// back from the GPU (DmaPusher drains the back and downloads it).
+bool HleIndirectEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_HLE_INDIRECT");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+// Topologies an indirect draw takes as they are (HLE_DrawIndexedIndirect's IsTopologySafe).
+bool IndirectTopologySafe(u32 topology) {
+    return topology <= 6 || (topology >= 0xa && topology <= 0xe);
+}
+
+// The writes NVN's indexed indirect draw macro makes for its parameters {topology, index count,
+// instance count 1, first index, base vertex, base instance}: index_buffer.first, vertex_id_base,
+// global_base_vertex_index and global_base_instance_index, the base vertex and instance into
+// c[0][0x640] (CB_OFFSET and two CB_DATA), draw begin, index_buffer.count, draw end; then it
+// resets the base registers and c[0][0x640].
+std::array<std::pair<u32, u32>, 16> IndirectDrawWrites(std::span<const u32> p) {
+    return {{{0x5f7, p[3]}, {0x446, p[4]}, {0x50d, p[4]}, {0x50e, p[5]}, {0x8e3, 0x640},
+             {0x8e4, p[4]}, {0x8e5, p[5]}, {0x586, p[0]}, {0x5f8, p[1]}, {0x585, 0},
+             {0x446, 0}, {0x50d, 0}, {0x50e, 0}, {0x8e3, 0x640}, {0x8e4, 0}, {0x8e5, 0}}};
 }
 
 // Executable methods ProcessMethodCall handles itself; the rest go to the draw manager.
@@ -1073,6 +1113,30 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
+    if (fs.indirect_record != 0) {
+        const GPUVAddr record = std::exchange(fs.indirect_record, GPUVAddr{0});
+        if (fs.parameters.size() == 6) {
+            FrontIndirectDraw(system, split, fs, record);
+            fs.parameters.clear();
+            return;
+        }
+        LOG_ERROR(HW_GPU, "Indirect draw macro {:#x} got {} parameters, not 6", method,
+                  fs.parameters.size());
+    }
+    // Whether the macro is NVN's indexed indirect draw (FrontTakeIndirectRecord): compare its
+    // writes on its first calls with one instance.
+    if (fs.indirect_generation != engine.native_code_generation) {
+        fs.indirect_checks.clear();
+        fs.indirect_generation = engine.native_code_generation;
+    }
+    FrontState::IndirectCheck* check = nullptr;
+    if (HleIndirectEnabled() && fs.parameters.size() == 6 && fs.parameters[2] == 1) {
+        auto& entry = fs.indirect_checks[start];
+        if (!entry.failed && entry.matches < FrontState::IndirectCheck::Needed) {
+            check = &entry;
+            fs.checked_writes.clear();
+        }
+    }
     {
         VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
         engine.native_interpreter.active_dram = &native_data_ram;
@@ -1088,6 +1152,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                 if (address >= MacroRegistersStart) {
                     return false;
                 }
+                if (check != nullptr && fs.checked_writes.size() < 32) [[unlikely]] {
+                    fs.checked_writes.emplace_back(address, value);
+                }
                 FrontWrite(split, fs, address, value, true, true);
                 // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
                 if (address == 0x157 || address == 0x158) {
@@ -1099,6 +1166,24 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             engine.native_execution_failed = true;
             LOG_ERROR(HW_GPU, "Native MME (JIT, split front) failed: start={:#x}, consumed={}/{}, error={}",
                       start, result.consumed, fs.parameters.size(), result.error);
+        }
+        if (check != nullptr) {
+            const auto expected = IndirectDrawWrites(fs.parameters);
+            if (result.success && std::ranges::equal(fs.checked_writes, expected)) {
+                if (++check->matches == FrontState::IndirectCheck::Needed) {
+                    LOG_INFO(HW_GPU,
+                             "Macro at {:#x} is NVN's indexed indirect draw: the GPU reads the "
+                             "records it gets from GPU memory (EDEN_NX2_HLE_INDIRECT=0 turns "
+                             "this off)",
+                             start);
+                }
+            } else {
+                check->failed = true;
+                LOG_INFO(HW_GPU,
+                         "Macro at {:#x} takes 6 parameters but is not NVN's indexed indirect "
+                         "draw ({} writes)",
+                         start, fs.checked_writes.size());
+            }
         }
     }
     fs.parameters.clear();
@@ -1196,6 +1281,81 @@ void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
     if ((checks & 63) == 1) {
         LOG_INFO(HW_GPU, "Split front register checks: {} done, {} differences", checks, differences);
     }
+}
+
+bool Maxwell3D::FrontTakeIndirectRecord(Core::System& system, VideoCommon::GpuSplit& split,
+                                        u32 method, GPUVAddr record) {
+    // Donkey Kong Bananza draws its terrain with NVN's indexed indirect draw macro: a culling
+    // dispatch fills in a 5-word record per piece and the macro's parameters continue with the
+    // record itself (a GP entry pointing at it). Reading the record on the CPU meant draining
+    // the split's back and downloading it from the host GPU (~20,000 times a second, the main
+    // cost in its open areas). The host GPU reads it instead, as HLE_DrawIndexedIndirect does
+    // for the first console's macro.
+    if (!HleIndirectEnabled() || !split.FrontMacros() || !GetNativeMacroEngine().native_turing) {
+        return false;
+    }
+    auto& fs = Front(system, split);
+    if (fs.executing_macro == 0 || (method & ~1U) != fs.executing_macro ||
+        fs.parameters.size() != 1 || !IndirectTopologySafe(fs.parameters[0]) ||
+        fs.control == Regs::ShadowRamControl::Replay ||
+        fs.indirect_generation != GetNativeMacroEngine().native_code_generation) {
+        return false;
+    }
+    const auto positions = GetNativeMacroPositions();
+    const u32 start =
+        positions[((fs.executing_macro - MacroRegistersStart) >> 1) % positions.size()];
+    const auto it = fs.indirect_checks.find(start);
+    if (it == fs.indirect_checks.end() || it->second.failed ||
+        it->second.matches < FrontState::IndirectCheck::Needed) {
+        return false;
+    }
+    fs.indirect_record = record;
+    return true;
+}
+
+void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& split,
+                                  FrontState& fs, GPUVAddr record) {
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::HleIndirectDraws, 1);
+    const u32 topology = fs.parameters[0];
+    split.Defer([this, system_ptr = &system, topology, record] {
+        BackDrawIndexedIndirect(*system_ptr, topology, record);
+    });
+    fs.draw_pending = false;
+    // The state the macro leaves behind (the end of IndirectDrawWrites). index_buffer.first and
+    // index_buffer.count keep their values: the macro would leave the record's in them.
+    static constexpr std::array<std::pair<u32, u32>, 6> resets{
+        {{0x446, 0}, {0x50d, 0}, {0x50e, 0}, {0x8e3, 0x640}, {0x8e4, 0}, {0x8e5, 0}}};
+    for (const auto& [address, value] : resets) {
+        FrontWrite(split, fs, address, value, true, true);
+    }
+}
+
+void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record) {
+    // What CallMacroMethod does around a macro.
+    ConsumeSink(system);
+    draw_manager.DrawDeferred(*this);
+    // As HLE_DrawIndexedIndirect does: the GPU takes the index count, instance count, first
+    // index, base vertex and base instance from the record. The shaders read the base vertex
+    // and instance from c[0][0x640] and c[0][0x644], which the macro fills in from the record:
+    // they read the draw's own instead.
+    const u32 estimate = static_cast<u32>(EstimateIndexBufferSize());
+    dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    engine_state = EngineHint::OnHLEMacro;
+    SetHLEReplacementAttributeType(0, 0x640, HLEReplacementAttributeType::BaseVertex);
+    SetHLEReplacementAttributeType(0, 0x644, HLEReplacementAttributeType::BaseInstance);
+    auto& params = draw_manager.indirect_state;
+    params.is_byte_count = false;
+    params.is_indexed = true;
+    params.include_count = false;
+    params.count_start_address = 0;
+    params.indirect_start_address = record;
+    params.buffer_size = 5 * sizeof(u32);
+    params.max_draw_counts = 1;
+    params.stride = 0;
+    draw_manager.DrawIndexedIndirect(*this, static_cast<Regs::PrimitiveTopology>(topology), 0,
+                                     estimate);
+    engine_state = EngineHint::None;
+    replace_table.clear();
 }
 
 void Maxwell3D::FinishFrontMacro(Core::System& system) {
