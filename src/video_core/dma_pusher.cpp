@@ -126,6 +126,7 @@ bool DmaPusher::Step() {
                     return value != nullptr && value[0] == '2';
                 }();
                 bool flushed_parameters = false;
+                bool back_idle = false;
                 const GPUVAddr address = dma_state.dma_get;
                 const size_t bytes = words * sizeof(u32);
                 if (flush_parameters && words <= 64) {
@@ -135,6 +136,7 @@ bool DmaPusher::Step() {
                         if (auto& split = VideoCommon::GpuSplit::Get(); split.Active() && split.Drain()) {
                             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterDrainWaits, 1);
                         }
+                        back_idle = true;
                         if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
                             memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
                             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushes, 1);
@@ -149,6 +151,10 @@ bool DmaPusher::Step() {
                 }
                 if (flushed_parameters) {
                     engine_state->current_dirty = false;
+                } else if (back_idle) {
+                    // Drained just above: the back is idle. Deferring this as well made the
+                    // command list check below drain a second time, for this one entry.
+                    engine_state->current_dirty = memory_manager.IsMemoryDirty(address, bytes);
                 } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
                     split.Defer([engine_state, memory = &memory_manager, address, bytes] {
