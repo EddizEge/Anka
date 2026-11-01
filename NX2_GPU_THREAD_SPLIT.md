@@ -341,3 +341,17 @@ placement (N samples, back pinned): back on logical processors ...; front last w
 back on the front's core X% of samples"; pinned, X should be 0); `=3` only logs (where Windows
 puts them unpinned). The switch is read at first use. Built; not measured yet
 (src/video_core/nx2_back_cpu.h).
+
+## Smaller trims on the back (2026-11-01)
+
+Each has its own switch (default on, `=0` as before; NX2_NOTES.md) so a profile run per switch
+shows what it took: `EDEN_NX2_MARK_WORDS` (GPU-written page bits 64 at a time: written storage
+buffers are marked whole on every draw that binds them, up to 2,048 pages; profile "bind stage
+buffers" and "light draw"; `=2` compares with page by page), `EDEN_NX2_BATCH_DIRECT` (Batch
+entries through Maxwell3D::CallMethodBatch, CallMethod inlined; "method"), `EDEN_NX2_TICK_SKIP`
+(TickWork without its lock when no sync request is pending; "draw"), `EDEN_NX2_LAYOUT_MEMO`
+(indirect draws' index buffer layout size kept until MappingEpoch changes; "other"),
+`EDEN_NX2_RESET_LAST` (last reset program answer kept; "draw", below a millisecond a second). The
+per-write and per-draw switch functions read their variable into an atomic at first use instead
+of a guarded static checked on each call (no switch; "method", "draw", "bind stage buffers").
+Built; not measured yet.
