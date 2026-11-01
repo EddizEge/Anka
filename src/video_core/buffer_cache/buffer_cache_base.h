@@ -317,6 +317,16 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainCPUBuffer(DAddr gpu_addr, u32 size,
                                                           ObtainBufferSynchronize sync_info,
                                                           ObtainBufferOperation post_op);
+
+    /// Profiling: the buffer of vertex stream `index`'s current binding (32: the index buffer).
+    [[nodiscard]] BufferId BoundGeometryBuffer(u32 index) const noexcept {
+        if (index == 32) {
+            return channel_state->index_buffer.buffer_id;
+        }
+        return index < NUM_VERTEX_BUFFERS ? channel_state->vertex_buffers[index].buffer_id
+                                          : NULL_BUFFER_ID;
+    }
+
     void FlushCachedWrites();
 
     /// Return true when there are uncommitted buffers to be downloaded

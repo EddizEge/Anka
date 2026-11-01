@@ -125,6 +125,12 @@ public:
         return std::nullopt;
     }
 
+    /// EDEN_NX2_GPU_PROFILE: the buffer cache buffer the last draw bound for vertex stream
+    /// `index` (32: the index buffer); 0 for none.
+    virtual u32 BoundGeometryBuffer(u32 index) {
+        return 0;
+    }
+
     virtual bool TryCacheInvalidation(DAddr addr, u64 size) {
         if (MustFlushRegion(addr, size, VideoCommon::CacheType::BufferCache)) return false;
         OnCacheInvalidation(addr, size);

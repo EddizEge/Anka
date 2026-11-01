@@ -23,6 +23,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_indirect_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
@@ -1517,6 +1518,7 @@ void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUV
     params.stride = count > 1 ? stride : 0;
     draw_manager.DrawIndexedIndirect(*this, static_cast<Regs::PrimitiveTopology>(topology), 0,
                                      estimate);
+    VideoCommon::Nx2IndirectDiag::Note(*this, topology, record, count);
     engine_state = EngineHint::None;
     replace_table.clear();
 }
