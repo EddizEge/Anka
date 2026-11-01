@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <cmath>
@@ -3228,14 +3229,24 @@ public:
             Command = 1 << 9,       ///< Memory writes (inline, DMA, semaphores), clears, barriers
             /// What a light draw sets up again or no draw reads.
             Light = VertexStreams | IndexBuffer | DrawParams | UniformSelect | UniformSame,
+            /// What a light draw with uniform buffers (EDEN_NX2_LIGHT_UNIFORM) sets up again.
+            Uniform = Light | UniformData | UniformBind,
         };
     };
     struct LightTracking {
         u32 changes{};        ///< LightChange bits since the last draw
         u32 first_blocking{}; ///< First register written outside LightChange::Light, plus 1
+        u32 first_blocking_uniform{}; ///< First register written outside LightChange::Uniform, plus 1
         /// Constant buffer writes of the bytes guest memory held, over memory no cache holds
         /// GPU-written data for (they change nothing a draw sees). Counted only while `armed`.
         u64 same_writes{};
+        u64 cb_writes{}; ///< Constant buffer data writes (ProcessCBMultiData), each one cached write
+        /// The GPU ranges they wrote since the last draw, adjacent ones merged; written_count
+        /// past the array's size: more ranges than it keeps.
+        std::array<std::pair<GPUVAddr, u32>, 8> written{};
+        u32 written_count{};
+        /// Constant buffer slots bound since the last draw, per stage (ProcessCBBind).
+        std::array<u32, Regs::MaxShaderStage> rebound{};
         bool armed{}; ///< The rasterizer may set up the next draw the light way
     } light;
 
@@ -3293,7 +3304,25 @@ private:
         if ((kind & ~LightChange::Light) != 0 && light.first_blocking == 0) {
             light.first_blocking = method + 1;
         }
+        if ((kind & ~LightChange::Uniform) != 0 && light.first_blocking_uniform == 0) {
+            light.first_blocking_uniform = method + 1;
+        }
         light.changes |= kind;
+    }
+    void NoteLightWrite(GPUVAddr address, u32 size) {
+        ++light.cb_writes;
+        auto& written = light.written;
+        if (light.written_count != 0 && light.written_count <= written.size()) {
+            auto& [last_address, last_size] = written[light.written_count - 1];
+            if (last_address + last_size == address) {
+                last_size += size;
+                return;
+            }
+        }
+        if (light.written_count < written.size()) {
+            written[light.written_count] = {address, size};
+        }
+        light.written_count = (std::min)(light.written_count + 1, static_cast<u32>(written.size()) + 1);
     }
     /// Whether a constant buffer write of `data` at `address` changes nothing a draw sees.
     bool IsLightSameWrite(GPUVAddr address, const u32* data, size_t size);

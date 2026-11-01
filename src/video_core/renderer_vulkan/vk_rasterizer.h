@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
@@ -171,20 +172,31 @@ private:
 
     // EDEN_NX2_LIGHT_DRAW (PrepareDraw): a draw that changed only vertex/index buffer addresses
     // and draw parameters since the last one binds those buffers and draws; the rest of the last
-    // draw's setup is still in the command buffer.
+    // draw's setup is still in the command buffer. EDEN_NX2_LIGHT_UNIFORM: one that also changed
+    // constant buffer data or binds sets up its buffers and descriptors again, nothing else.
+    /// What may follow a draw (LightFollowable).
+    enum class LightLevel : u8 {
+        None,    ///< A full setup only
+        Uniform, ///< A light draw with uniforms (its pipeline writes memory)
+        Full,    ///< A light draw of either kind
+    };
     /// What a draw left behind, for the next one.
     struct LightAnchor {
         Tegra::Engines::Maxwell3D* maxwell3d{};
         Tegra::MemoryManager* gpu_memory{};
+        GraphicsPipeline* pipeline{}; ///< What it drew with (set up in full by it or before)
         u64 record_count{};  ///< Scheduler::RecordCount once it was recorded
         u64 epoch{};         ///< light_epoch when its setup began
         u64 cached_writes{}; ///< gpu_memory->CachedWrites() when its setup began
         u64 same_writes{};   ///< maxwell3d->light.same_writes when its setup began
+        u64 cb_writes{};     ///< maxwell3d->light.cb_writes when its setup began
+        u64 image_hits{};    ///< texture_cache.WriteHits() when its setup began
+        u64 shader_hits{};   ///< pipeline_cache.InvalidationHits() when its setup began
         Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology topology{};
         Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format{};
         bool is_indexed{};
         bool indirect{};
-        bool armed{}; ///< Set up in full or light with a shape a light draw can follow
+        LightLevel level{}; ///< Set up in full or light with a shape a light draw can follow
     };
     /// Draw / DrawIndirect for PrepareDraw.
     struct LightEntry {
@@ -194,9 +206,14 @@ private:
     void BeginLightDraw(bool indirect, bool shape_ok);
     template <typename Func>
     bool TryLightDraw(bool is_indexed, bool indirect, bool invalidated, Func& draw_func);
+    /// TryLightDraw: whether nothing a full setup reads changed but constant buffer data the
+    /// uniform way sets up again (counts why not, profiling).
+    [[nodiscard]] bool LightUniformOk(GraphicsPipeline& pipeline, bool invalidated);
     [[nodiscard]] bool LightFeedbackOff() const;
-    /// Whether a light draw may follow this fully set up draw (counts why not, profiling).
-    [[nodiscard]] bool LightFollowable(const GraphicsPipeline& pipeline);
+    /// What may follow this fully set up draw (counts why not a plain light draw, profiling).
+    [[nodiscard]] LightLevel LightFollowable(const GraphicsPipeline& pipeline);
+    /// EDEN_NX2_LIGHT_UNIFORM=2: compares a full setup with what TryLightDraw decided.
+    void CheckLightVerify(GraphicsPipeline& pipeline, u64 render_pass_begins, u64 dynamic_records);
     /// Work outside draws that may change what the next draw would bind (any thread).
     void NoteLightWork() noexcept {
         light_epoch.fetch_add(1, std::memory_order_seq_cst);
@@ -278,6 +295,13 @@ private:
     LightAnchor light_anchor;
     LightEntry light_entry;
     std::atomic<u64> light_epoch{};
+    /// EDEN_NX2_LIGHT_UNIFORM=2: a draw decided light with uniforms, then set up in full.
+    struct LightVerify {
+        bool active{};
+        GraphicsPipeline* pipeline{};
+        std::vector<DescriptorUpdateEntry> payload; ///< What ConfigureUniforms built
+    };
+    LightVerify light_verify;
 };
 
 } // namespace Vulkan

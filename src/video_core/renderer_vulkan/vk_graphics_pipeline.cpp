@@ -194,15 +194,21 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
 
 using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
 
+struct ConfigureFuncs {
+    ConfigureFuncPtr configure;
+    ConfigureFuncPtr uniforms; ///< GraphicsPipeline::ConfigureUniforms
+};
+
 template <typename Spec, typename... Specs>
-ConfigureFuncPtr FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
-                          const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
+ConfigureFuncs FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+                        const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
     if constexpr (sizeof...(Specs) > 0) {
         if (!Passes<Spec>(modules, stage_infos)) {
             return FindSpec<Specs...>(modules, stage_infos);
         }
     }
-    return GraphicsPipeline::MakeConfigureSpecFunc<Spec>();
+    return {GraphicsPipeline::MakeConfigureSpecFunc<Spec>(),
+            GraphicsPipeline::MakeConfigureUniformsSpecFunc<Spec>()};
 }
 
 struct SimpleVertexFragmentSpec {
@@ -245,12 +251,44 @@ struct DefaultSpec {
     static constexpr bool has_images = true;
 };
 
-ConfigureFuncPtr ConfigureFunc(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
-                               const std::array<Shader::Info, NUM_STAGES>& infos) {
+ConfigureFuncs ConfigureFunc(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+                             const std::array<Shader::Info, NUM_STAGES>& infos) {
     return FindSpec<SimpleVertexSpec, SimpleVertexFragmentSpec, SimpleStorageSpec, SimpleImageSpec,
                     DefaultSpec>(modules, infos);
 }
+
+// EDEN_NX2_DESC_REUSE=0: every stage's image descriptors are made again each draw.
+bool DescriptorReuseEnabled() {
+    static const bool reuse = [] {
+        const char* value = std::getenv("EDEN_NX2_DESC_REUSE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return reuse;
+}
 } // Anonymous namespace
+
+bool LightDrawOn() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+u32 LightUniformMode() {
+    static const u32 mode = [] {
+        // Image descriptors come from the last draw's (DescriptorReuseEnabled).
+        if (!LightDrawOn() || !DescriptorReuseEnabled()) {
+            return 0U;
+        }
+        const char* value = std::getenv("EDEN_NX2_LIGHT_UNIFORM");
+        if (value == nullptr) {
+            return 1U;
+        }
+        return value[0] == '0' ? 0U : value[0] == '2' ? 2U : 1U;
+    }();
+    return mode;
+}
 
 // TODO(crueter): This is the worst-formatted code I have EVER seen
 GraphicsPipeline::GraphicsPipeline(
@@ -291,6 +329,39 @@ GraphicsPipeline::GraphicsPipeline(
                          any_written(info->storage_buffers_descriptors) ||
                          any_written(info->image_buffer_descriptors) ||
                          any_written(info->image_descriptors);
+        // What config_stage reads from constant buffers (ConfigureImpl): storage buffer
+        // descriptors (address and size, 16 bytes) and texture handles (read_handle).
+        const auto add_read = [&](u32 slot, u32 begin, u32 end) {
+            descriptor_slots[stage] |= 1U << slot;
+            for (DescriptorRead& read : descriptor_reads) {
+                if (read.stage == stage && read.slot == slot) {
+                    read.begin = (std::min)(read.begin, begin);
+                    read.end = (std::max)(read.end, end);
+                    return;
+                }
+            }
+            descriptor_reads.push_back({static_cast<u32>(stage), slot, begin, end});
+        };
+        for (const auto& desc : info->storage_buffers_descriptors) {
+            add_read(desc.cbuf_index, desc.cbuf_offset,
+                     desc.cbuf_offset + 16 * (std::max)(desc.count, 1U));
+        }
+        const auto add_handles = [&](const auto& descriptors) {
+            for (const auto& desc : descriptors) {
+                const u32 span = ((std::max)(desc.count, 1U) - 1) << desc.size_shift;
+                add_read(desc.cbuf_index, desc.cbuf_offset, desc.cbuf_offset + span + 4);
+                if constexpr (requires { desc.has_secondary; }) {
+                    if (desc.has_secondary) {
+                        add_read(desc.secondary_cbuf_index, desc.secondary_cbuf_offset,
+                                 desc.secondary_cbuf_offset + span + 4);
+                    }
+                }
+            }
+        };
+        add_handles(info->texture_buffer_descriptors);
+        add_handles(info->image_buffer_descriptors);
+        add_handles(info->texture_descriptors);
+        add_handles(info->image_descriptors);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 
@@ -361,7 +432,9 @@ GraphicsPipeline::GraphicsPipeline(
     } else {
         func();
     }
-    configure_func = ConfigureFunc(*spv_modules, stage_infos);
+    const ConfigureFuncs funcs = ConfigureFunc(*spv_modules, stage_infos);
+    configure_func = funcs.configure;
+    configure_uniforms_func = funcs.uniforms;
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -610,8 +683,149 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     if (IsBuilt() && !pipeline) {
         return false;
     }
+    // Read after every image was prepared and marked (the render targets above).
+    views_repeat = LightDrawOn() &&
+                   texture_cache.ViewsNeedRepeat(
+                       std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+template <typename Spec>
+bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed) {
+    // The image descriptors each stage pushed last (the previous draw's: it used this pipeline)
+    // are what ConfigureImpl would push again: the caller checked that no handle, descriptor
+    // table or image changed, and they are kept while no image view was freed, no image changed
+    // its rescale state and no sampler made a variant (as in PushStageImageDescriptors).
+    const u64 texture_epoch = texture_cache.ImageViewEpoch();
+    const u64 sampler_generation = Sampler::VariantGeneration();
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const Shader::Info& info{stage_infos[stage]};
+        if (!Spec::enabled_stages[stage] || Shader::NumDescriptors(info.texture_descriptors) +
+                                                    Shader::NumDescriptors(info.image_descriptors) ==
+                                                0) {
+            continue;
+        }
+        const ImageDescriptorMemo& memo{image_descriptor_memos[stage]};
+        if (!DescriptorReuseEnabled() || !memo.valid || memo.texture_epoch != texture_epoch ||
+            memo.sampler_generation != sampler_generation) {
+            return false;
+        }
+    }
+    // The buffers as ConfigureImpl binds them: storage and texture buffer bindings are the
+    // previous draw's (their descriptors in constant buffers and the views did not change),
+    // uniform buffers are resolved and uploaded or streamed again.
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    buffer_cache.UpdateGraphicsBuffers(is_indexed);
+    buffer_cache.BindHostGeometryBuffers(is_indexed);
+    guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        buffer_cache.BindHostStageBuffers(stage);
+        const Shader::Info& info{stage_infos[stage]};
+        const u32 stage_textures = Shader::NumDescriptors(info.texture_descriptors);
+        if (stage_textures + Shader::NumDescriptors(info.image_descriptors) == 0) {
+            return;
+        }
+        const ImageDescriptorMemo& memo{image_descriptor_memos[stage]};
+        guest_descriptor_queue.AddEntries(memo.entries.data(), memo.entries.size());
+        // Written storage images are marked modified, as PushStageImageDescriptors does.
+        const u32* image_id = memo.ids.data() + stage_textures;
+        for (const auto& desc : info.image_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index, ++image_id) {
+                if (desc.is_written) {
+                    texture_cache.MarkModification(
+                        texture_cache.GetImageView(VideoCommon::ImageViewId{*image_id}).image_id);
+                }
+            }
+        }
+    }};
+    if constexpr (Spec::enabled_stages[0]) {
+        prepare_stage(0);
+    }
+    if constexpr (Spec::enabled_stages[1]) {
+        prepare_stage(1);
+    }
+    if constexpr (Spec::enabled_stages[2]) {
+        prepare_stage(2);
+    }
+    if constexpr (Spec::enabled_stages[3]) {
+        prepare_stage(3);
+    }
+    if constexpr (Spec::enabled_stages[4]) {
+        prepare_stage(4);
+    }
+    // An upload needs ConfigureImpl's barrier, which ends the render pass.
+    if (buffer_cache.any_buffer_uploaded || !scheduler.IsRenderPassActive()) {
+        return false;
+    }
+    return RecordDescriptors();
+}
+
+bool GraphicsPipeline::DescriptorReadsMiss(
+    std::span<const std::pair<GPUVAddr, u32>> written) const {
+    const auto& stages = maxwell3d->state.shader_stages;
+    for (const DescriptorRead& read : descriptor_reads) {
+        const GPUVAddr base = stages[read.stage].const_buffers[read.slot].address;
+        const GPUVAddr begin = base + read.begin;
+        const GPUVAddr end = base + read.end;
+        for (const auto& [address, size] : written) {
+            if (address < end && begin < address + size) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+u32 GraphicsPipeline::FirstPayloadDifference(const DescriptorUpdateEntry* a,
+                                             const DescriptorUpdateEntry* b) const {
+    // Entries are compared by the member each was written through (their unions' other bytes
+    // are undefined): per stage uniform and storage buffers, texture and image buffers, then
+    // texture and image descriptors (DescriptorLayoutBuilder's order).
+    u32 entry = 0;
+    const auto buffers = [&](u32 count, bool texel) {
+        for (u32 i = 0; i < count; ++i, ++entry) {
+            const DescriptorUpdateEntry& lhs = a[entry];
+            const DescriptorUpdateEntry& rhs = b[entry];
+            bool same;
+            if (uses_descriptor_buffer) {
+                same = lhs.address.address == rhs.address.address &&
+                       lhs.address.range == rhs.address.range &&
+                       lhs.address.format == rhs.address.format;
+            } else if (texel) {
+                same = lhs.texel_buffer == rhs.texel_buffer;
+            } else {
+                same = lhs.buffer.buffer == rhs.buffer.buffer &&
+                       lhs.buffer.offset == rhs.buffer.offset && lhs.buffer.range == rhs.buffer.range;
+            }
+            if (!same) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto images = [&](u32 count) {
+        for (u32 i = 0; i < count; ++i, ++entry) {
+            const VkDescriptorImageInfo& lhs = a[entry].image;
+            const VkDescriptorImageInfo& rhs = b[entry].image;
+            if (lhs.sampler != rhs.sampler || lhs.imageView != rhs.imageView ||
+                lhs.imageLayout != rhs.imageLayout) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (const Shader::Info& info : stage_infos) {
+        if (!buffers(Shader::NumDescriptors(info.constant_buffer_descriptors), false) ||
+            !buffers(Shader::NumDescriptors(info.storage_buffers_descriptors), false) ||
+            !buffers(Shader::NumDescriptors(info.texture_buffer_descriptors), true) ||
+            !buffers(Shader::NumDescriptors(info.image_buffer_descriptors), true) ||
+            !images(Shader::NumDescriptors(info.texture_descriptors) +
+                    Shader::NumDescriptors(info.image_descriptors))) {
+            return entry;
+        }
+    }
+    return entry;
 }
 
 void GraphicsPipeline::PushStageImageDescriptors(size_t stage, RescalingPushConstant& rescaling,
@@ -624,10 +838,7 @@ void GraphicsPipeline::PushStageImageDescriptors(size_t stage, RescalingPushCons
     // rescale state (TextureCache::ImageViewEpoch) and no sampler made a variant
     // (Sampler::VariantGeneration). Written storage images are still marked modified.
     // EDEN_NX2_DESC_REUSE=0 turns it off.
-    static const bool reuse = [] {
-        const char* value = std::getenv("EDEN_NX2_DESC_REUSE");
-        return value == nullptr || value[0] != '0';
-    }();
+    const bool reuse = DescriptorReuseEnabled();
     const Shader::Info& info{stage_infos[stage]};
     const u32 stage_textures = Shader::NumDescriptors(info.texture_descriptors);
     const u32 stage_images = Shader::NumDescriptors(info.image_descriptors);
@@ -703,32 +914,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
 
     VkDeviceSize descriptor_buffer_offset{};
     u32 descriptor_buffer_chunk{};
-    if (descriptor_set_layout && uses_descriptor_buffer) {
-        const auto* const entries = static_cast<const DescriptorUpdateEntry*>(descriptor_data);
-        const bool reuse_allocation =
-            last_descriptor_buffer_generation == descriptor_buffer_ring.CurrentGeneration() &&
-            last_descriptor_payload.size() == num_descriptor_entries &&
-            std::memcmp(last_descriptor_payload.data(), entries,
-                        num_descriptor_entries * sizeof(DescriptorUpdateEntry)) == 0;
-        if (reuse_allocation) {
-            descriptor_buffer_offset = last_descriptor_buffer_offset;
-            descriptor_buffer_chunk = last_descriptor_buffer_chunk;
-            descriptor_buffer_ring.TouchFrame(scheduler);
-        } else {
-            const DescriptorBufferRing::Allocation alloc{
-                descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
-            if (!alloc.host) {
-                LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping draw");
-                return false;
-            }
-            WriteDescriptorBuffer(device, descriptor_buffer_layout, entries, alloc.host);
-            descriptor_buffer_offset = alloc.offset;
-            descriptor_buffer_chunk = alloc.chunk;
-            last_descriptor_buffer_offset = alloc.offset;
-            last_descriptor_buffer_chunk = alloc.chunk;
-            last_descriptor_buffer_generation = alloc.generation;
-            last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
-        }
+    if (descriptor_set_layout && uses_descriptor_buffer &&
+        !PrepareDescriptorBuffer(static_cast<const DescriptorUpdateEntry*>(descriptor_data),
+                                 descriptor_buffer_offset, descriptor_buffer_chunk)) {
+        return false;
     }
 
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
@@ -755,14 +944,21 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
 
     bool update_descriptors = true;
     if (descriptor_set_layout && !uses_push_descriptor && !uses_descriptor_buffer) {
-        const auto* const entries = static_cast<const DescriptorUpdateEntry*>(descriptor_data);
-        update_descriptors =
-            bind_pipeline || last_descriptor_payload.size() != num_descriptor_entries ||
-            std::memcmp(last_descriptor_payload.data(), entries,
-                        num_descriptor_entries * sizeof(DescriptorUpdateEntry)) != 0;
-        if (update_descriptors) {
-            last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
-        }
+        update_descriptors = UpdateDescriptorPayload(
+            static_cast<const DescriptorUpdateEntry*>(descriptor_data), bind_pipeline);
+    }
+    if (LightUniformMode() == 2) {
+        // What a light draw with uniforms would not do again (RasterizerVulkan::TryLightDraw).
+        last_draw_changes = (bind_pipeline ? 1U : 0U) |
+                            (update_rescaling || rescaling.Data() != last_rescaling ? 2U : 0U) |
+                            (render_area.uses_render_area != last_uses_render_area ||
+                                     (render_area.uses_render_area &&
+                                      render_area.words != last_render_area)
+                                 ? 4U
+                                 : 0U);
+        last_rescaling = rescaling.Data();
+        last_render_area = render_area.words;
+        last_uses_render_area = render_area.uses_render_area;
     }
     scheduler.Record([this, descriptor_data, bind_pipeline, update_descriptors,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
@@ -806,6 +1002,92 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);
         } else if (update_descriptors) {
+            const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
+            const vk::Device& dev{device.GetLogical()};
+            dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
+            cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout, 0,
+                                      descriptor_set, nullptr);
+        }
+    });
+    return true;
+}
+
+bool GraphicsPipeline::PrepareDescriptorBuffer(const DescriptorUpdateEntry* entries,
+                                               VkDeviceSize& offset, u32& chunk) {
+    const bool reuse_allocation =
+        last_descriptor_buffer_generation == descriptor_buffer_ring.CurrentGeneration() &&
+        last_descriptor_payload.size() == num_descriptor_entries &&
+        std::memcmp(last_descriptor_payload.data(), entries,
+                    num_descriptor_entries * sizeof(DescriptorUpdateEntry)) == 0;
+    if (reuse_allocation) {
+        offset = last_descriptor_buffer_offset;
+        chunk = last_descriptor_buffer_chunk;
+        descriptor_buffer_ring.TouchFrame(scheduler);
+        return true;
+    }
+    const DescriptorBufferRing::Allocation alloc{
+        descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
+    if (!alloc.host) {
+        LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping draw");
+        return false;
+    }
+    WriteDescriptorBuffer(device, descriptor_buffer_layout, entries, alloc.host);
+    offset = alloc.offset;
+    chunk = alloc.chunk;
+    last_descriptor_buffer_offset = alloc.offset;
+    last_descriptor_buffer_chunk = alloc.chunk;
+    last_descriptor_buffer_generation = alloc.generation;
+    last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
+    return true;
+}
+
+bool GraphicsPipeline::UpdateDescriptorPayload(const DescriptorUpdateEntry* entries,
+                                               bool bind_pipeline) {
+    const bool update =
+        bind_pipeline || last_descriptor_payload.size() != num_descriptor_entries ||
+        std::memcmp(last_descriptor_payload.data(), entries,
+                    num_descriptor_entries * sizeof(DescriptorUpdateEntry)) != 0;
+    if (update) {
+        last_descriptor_payload.assign(entries, entries + num_descriptor_entries);
+    }
+    return update;
+}
+
+bool GraphicsPipeline::RecordDescriptors() {
+    // ConfigureDraw's descriptor steps with the pipeline, push constants and render pass left
+    // as the previous draw recorded them.
+    if (!descriptor_set_layout) {
+        return true;
+    }
+    const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
+    const auto* const entries = static_cast<const DescriptorUpdateEntry*>(descriptor_data);
+    VkDeviceSize descriptor_buffer_offset{};
+    u32 descriptor_buffer_chunk{};
+    if (uses_descriptor_buffer &&
+        !PrepareDescriptorBuffer(entries, descriptor_buffer_offset, descriptor_buffer_chunk)) {
+        return false;
+    }
+    const bool bind_descriptor_buffer =
+        uses_descriptor_buffer && scheduler.UpdateDescriptorBufferChunk(descriptor_buffer_chunk);
+    if (!uses_push_descriptor && !uses_descriptor_buffer &&
+        !UpdateDescriptorPayload(entries, false)) {
+        return true; // The set bound last holds these descriptors
+    }
+    scheduler.Record([this, descriptor_data, descriptor_buffer_offset, descriptor_buffer_chunk,
+                      bind_descriptor_buffer](vk::CommandBuffer cmdbuf) {
+        if (bind_descriptor_buffer) {
+            const VkDescriptorBufferBindingInfoEXT binding_info{
+                descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
+            cmdbuf.BindDescriptorBuffersEXT(binding_info);
+        }
+        if (uses_descriptor_buffer) {
+            const u32 buffer_index{};
+            cmdbuf.SetDescriptorBufferOffsetsEXT(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout,
+                                                 0, buffer_index, descriptor_buffer_offset);
+        } else if (uses_push_descriptor) {
+            cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
+                                                    0, descriptor_data);
+        } else {
             const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
             const vk::Device& dev{device.GetLogical()};
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);

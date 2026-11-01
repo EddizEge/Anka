@@ -9,6 +9,8 @@
 #include <memory>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <tuple>
 #include <set>
 #include <fstream>
@@ -50,6 +52,7 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -289,28 +292,38 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         .epoch = light_epoch.load(std::memory_order_seq_cst),
         .cached_writes = gpu_memory->CachedWrites(),
         .same_writes = maxwell3d->light.same_writes,
+        .cb_writes = maxwell3d->light.cb_writes,
+        .image_hits = texture_cache.WriteHits(),
+        .shader_hits = pipeline_cache.InvalidationHits(),
         .topology = maxwell3d->draw_manager.draw_state.topology,
         .index_format = maxwell3d->draw_manager.draw_state.index_buffer.format,
         .is_indexed = is_indexed,
         .indirect = indirect,
     };
-    bool light_follows = false;
+    LightLevel light_follows = LightLevel::None;
     bool set_up = false;
     SCOPE_EXIT {
-        if (!light_follows && !set_up && LightDrawEnabled()) {
+        if (light_follows == LightLevel::None && !set_up && LightDrawEnabled()) {
             Profile::Add(Profile::Counter::LightRefusedCutShort, 1);
         }
         anchor.record_count = scheduler.RecordCount();
-        anchor.armed = light_follows;
+        anchor.level = light_follows;
         light_anchor = anchor;
+        light_verify.active = false;
         auto& light = maxwell3d->light;
         light.changes = 0;
         light.first_blocking = 0;
-        light.armed = light_follows;
+        light.first_blocking_uniform = 0;
+        light.written_count = 0;
+        light.rebound.fill(0);
+        // Same-value constant buffer writes matter to a plain light draw only.
+        light.armed = light_follows == LightLevel::Full;
     };
     if (LightDrawEnabled() && TryLightDraw(is_indexed, indirect, invalidated, draw_func)) {
+        // A light draw leaves the setup it followed: what may follow that may follow it.
         submitted = true;
-        light_follows = true;
+        anchor.pipeline = light_anchor.pipeline;
+        light_follows = light_anchor.level;
         return;
     }
 
@@ -474,14 +487,20 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
     }
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
+    const u64 render_pass_begins = scheduler.RenderPassBegins();
     if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
         report_failure("configure failed");
         return;
     }
 
+    const u64 records_before_dynamic = scheduler.RecordCount();
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
         UpdateDynamicStates();
+    }
+    if (light_verify.active) {
+        CheckLightVerify(*pipeline, scheduler.RenderPassBegins() - render_pass_begins,
+                         scheduler.RecordCount() - records_before_dynamic);
     }
 
     query_cache.NotifySegment(true);
@@ -493,7 +512,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
     }
     submitted = true;
     set_up = true;
-    light_follows = LightDrawEnabled() && LightFollowable(*pipeline);
+    anchor.pipeline = pipeline;
+    light_follows = LightDrawEnabled() ? LightFollowable(*pipeline) : LightLevel::None;
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
@@ -573,31 +593,155 @@ void RasterizerVulkan::BeginLightDraw(bool indirect, bool shape_ok) {
     if ((changes & ~LightChange::Light) != 0 && first_blocking != 0) {
         Profile::Note(Profile::Histogram::LightBlocking, s64{first_blocking} - 1);
     }
+    // And the first outside what a light draw with uniforms sets up again.
+    const u32 first_blocking_uniform = maxwell3d->light.first_blocking_uniform;
+    if ((changes & ~LightChange::Uniform) != 0 && first_blocking_uniform != 0) {
+        Profile::Note(Profile::Histogram::LightUniformBlocking, s64{first_blocking_uniform} - 1);
+    }
 }
 
 bool RasterizerVulkan::LightFeedbackOff() const {
     return maxwell3d->regs.transform_feedback_enabled == 0;
 }
 
-bool RasterizerVulkan::LightFollowable(const GraphicsPipeline& pipeline) {
+RasterizerVulkan::LightLevel RasterizerVulkan::LightFollowable(const GraphicsPipeline& pipeline) {
     // A light draw repeats none of this draw's setup: it must have left nothing a full setup
     // would do again for the same registers and memory.
     namespace Profile = VideoCommon::Nx2Profile;
     Profile::Counter refused;
     if (!light_entry.shape_ok) {
         refused = Profile::Counter::LightRefusedShape;
-    } else if (pipeline.WritesMemory()) {
-        // Each draw marks what it writes (buffer ranges, images) and orders it with barriers.
-        refused = Profile::Counter::LightRefusedWrites;
     } else if (!LightFeedbackOff()) {
         refused = Profile::Counter::LightRefusedFeedback;
-    } else if (texture_cache.RenderTargetsNeedRepeat()) {
+    } else if (texture_cache.RenderTargetsNeedRepeat() || pipeline.ViewsNeedRepeat()) {
+        // Also sampled or stored images (an alias written after them is copied in first).
         refused = Profile::Counter::LightRefusedTargets;
+    } else if (pipeline.WritesMemory()) {
+        // Each draw marks what it writes (buffer ranges, storage images): a light draw with
+        // uniforms does that as the full setup does (GraphicsPipeline::ConfigureUniforms).
+        Profile::Add(Profile::Counter::LightRefusedWrites, 1);
+        return LightUniformMode() != 0 ? LightLevel::Uniform : LightLevel::None;
     } else {
-        return true;
+        return LightLevel::Full;
     }
     Profile::Add(refused, 1);
-    return false;
+    return LightLevel::None;
+}
+
+bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidated) {
+    // The full setup reads, besides what TryLightDraw checked: the shaders (their memory), the
+    // texture header and sampler pools, texture handles and storage buffer descriptors in
+    // constant buffers, the images it samples, stores to and renders to, and buffers through the
+    // buffer cache. Since the anchor began, memory changed only by constant buffer data
+    // (Maxwell3D::ProcessCBMultiData, every cached write); FlushCaching handed those ranges to
+    // every cache as it does before any draw. The buffer cache's work (uniform buffers streamed
+    // or uploaded, storage and texture buffers synchronized, GPU-written ranges) the uniform way
+    // repeats as it is; the rest must not have seen the writes.
+    namespace Profile = VideoCommon::Nx2Profile;
+    const LightAnchor& last = light_anchor;
+    const auto& light = maxwell3d->light;
+    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
+    const u32 ranges = light.written_count;
+    if (cached_writes != light.cb_writes - last.cb_writes || ranges > light.written.size() ||
+        (invalidated && cached_writes == 0)) {
+        // Other writes (inline, DMA, query reports) or too many ranges to check.
+        Profile::Add(Profile::Counter::LightUniformMemory, 1);
+        return false;
+    }
+    const std::span<const std::pair<GPUVAddr, u32>> written{light.written.data(), ranges};
+    const u64 sparse_low = Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed);
+    const u64 sparse_high = Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed);
+    for (const auto& [address, size] : written) {
+        // A sparse region's first write gives it memory (Nx2BackSparseWrite): mappings change.
+        if (address + size > sparse_low && address < sparse_high) {
+            Profile::Add(Profile::Counter::LightUniformMemory, 1);
+            return false;
+        }
+    }
+    // An image found in a written range is marked CPU-modified (uploaded at its next use); a
+    // shader found there is removed and its pipelines looked up again. Checked before the
+    // anchor's pipeline is used.
+    if (texture_cache.WriteHits() != last.image_hits ||
+        pipeline_cache.InvalidationHits() != last.shader_hits) {
+        Profile::Add(Profile::Counter::LightUniformCaches, 1);
+        return false;
+    }
+    // A constant buffer the pipeline reads handles or storage buffer descriptors from now lies
+    // elsewhere (a bind that changed its address, size or enable).
+    for (size_t stage = 0; stage < light.rebound.size(); ++stage) {
+        if ((light.rebound[stage] & pipeline.DescriptorSlots(stage)) != 0) {
+            Profile::Add(Profile::Counter::LightUniformBinds, 1);
+            return false;
+        }
+    }
+    // The data written over handles, storage buffer descriptors or the pools they index.
+    const auto& regs = maxwell3d->regs;
+    const auto pool_written = [&](GPUVAddr pool, u32 limit) {
+        const GPUVAddr end = pool + (u64{limit} + 1) * 32; // TIC and TSC entries: 32 bytes
+        for (const auto& [address, size] : written) {
+            if (address < end && pool < address + size) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!pipeline.DescriptorReadsMiss(written) ||
+        pool_written(regs.tex_header.Address(), regs.tex_header.limit) ||
+        pool_written(regs.tex_sampler.Address(), regs.tex_sampler.limit)) {
+        Profile::Add(Profile::Counter::LightUniformDescriptors, 1);
+        return false;
+    }
+    return true;
+}
+
+void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_pass_begins,
+                                        u64 dynamic_records) {
+    // The full setup must bind what the light one did and change nothing else: the same
+    // pipeline (not bound again), push constants, render pass and dynamic state, and the same
+    // descriptors (uniform buffer slices are the same with EDEN_NX2_UBO_REUSE: the bytes were
+    // just streamed for the same ranges).
+    namespace Profile = VideoCommon::Nx2Profile;
+    Profile::Add(Profile::Counter::LightUniformVerified, 1);
+    std::string mismatch;
+    if (&pipeline != light_verify.pipeline) {
+        mismatch = fmt::format("pipeline {:#x} instead of {:#x}", pipeline.KeyHash(),
+                               light_verify.pipeline->KeyHash());
+    } else {
+        const auto* const full = guest_descriptor_queue.UpdateData();
+        const u32 entries = pipeline.DescriptorEntryCount();
+        const u32 entry = pipeline.FirstPayloadDifference(light_verify.payload.data(), full);
+        if (entry != entries) {
+            std::array<u64, 3> light_words{};
+            std::array<u64, 3> full_words{};
+            std::memcpy(light_words.data(), &light_verify.payload[entry], sizeof(light_words));
+            std::memcpy(full_words.data(), &full[entry], sizeof(full_words));
+            mismatch = fmt::format("descriptor {} of {}: light {:016x} full {:016x}", entry,
+                                   entries, fmt::join(light_words, " "),
+                                   fmt::join(full_words, " "));
+        }
+        if (const u32 changes = pipeline.LastDrawChanges(); changes != 0) {
+            mismatch += fmt::format("{}draw changes {:#x} (1 pipeline, 2 rescaling, 4 render area)",
+                                    mismatch.empty() ? "" : "; ", changes);
+        }
+    }
+    if (render_pass_begins != 0) {
+        mismatch += fmt::format("{}{} render passes begun", mismatch.empty() ? "" : "; ",
+                                render_pass_begins);
+    }
+    if (dynamic_records != 0) {
+        mismatch += fmt::format("{}{} dynamic state records", mismatch.empty() ? "" : "; ",
+                                dynamic_records);
+    }
+    if (mismatch.empty()) {
+        return;
+    }
+    Profile::Add(Profile::Counter::LightUniformMismatches, 1);
+    static u32 logged{};
+    if (logged < 64) {
+        ++logged;
+        LOG_WARNING(Render_Vulkan, "Light uniform draw differs from its full setup (pipeline {:#x}): {}",
+                    light_verify.pipeline->KeyHash(), mismatch);
+    }
 }
 
 template <typename Func>
@@ -630,27 +774,36 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     // What a full setup would do differently is then the vertex/index/indirect buffers, done
     // here as it does them. Anything else falls back to the full setup (also from the middle:
     // what was bound so far stays valid and the full setup repeats it).
+    //
+    // EDEN_NX2_LIGHT_UNIFORM, the uniform way: constant buffer data and binds may change too,
+    // and the anchor's pipeline may write memory (LightLevel::Uniform). A full setup would then
+    // differ in its buffers only: GraphicsPipeline::ConfigureUniforms sets them up as it does
+    // (uniform buffers resolved and streamed or uploaded, storage and texture buffers kept as
+    // bound and synchronized, written ranges marked) and pushes each stage's image descriptors as
+    // it last did, while the data written lies outside handles, storage buffer descriptors and
+    // the texture pools, no constant buffer they are read from moved, and no image or shader saw
+    // the writes (LightUniformOk). Pipeline, images, render targets, push constants and dynamic
+    // state stay the anchor's, as above.
     namespace Profile = VideoCommon::Nx2Profile;
     using LightChange = Tegra::Engines::Maxwell3D::LightChange;
     const LightAnchor& last = light_anchor;
     const auto& light = maxwell3d->light;
-    if (!last.armed) {
+    if (last.level == LightLevel::None) {
         Profile::Add(Profile::Counter::LightNotArmed, 1);
         return false;
     }
-    if ((light.changes & ~LightChange::Light) != 0) {
+    const u32 uniform_mode = LightUniformMode();
+    const u32 allowed = uniform_mode != 0 ? LightChange::Uniform : LightChange::Light;
+    if ((light.changes & ~allowed) != 0) {
         Profile::Add((light.changes & LightChange::Command) != 0 ? Profile::Counter::LightOtherWork
                                                                  : Profile::Counter::LightStateChanged,
                      1);
         return false;
     }
-    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
-    const u64 same_writes = light.same_writes - last.same_writes;
     if (last.maxwell3d != maxwell3d || last.gpu_memory != gpu_memory ||
         last.record_count != light_entry.record_count ||
         scheduler.RecordCount() != light_entry.record_count ||
-        last.epoch != light_epoch.load(std::memory_order_seq_cst) ||
-        cached_writes != same_writes || (invalidated && cached_writes == 0)) {
+        last.epoch != light_epoch.load(std::memory_order_seq_cst)) {
         Profile::Add(Profile::Counter::LightOtherWork, 1);
         return false;
     }
@@ -661,6 +814,48 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         !LightFeedbackOff()) {
         Profile::Add(Profile::Counter::LightShape, 1);
         return false;
+    }
+    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
+    const u64 same_writes = light.same_writes - last.same_writes;
+    const bool plain = last.level == LightLevel::Full &&
+                       (light.changes & ~LightChange::Light) == 0 &&
+                       cached_writes == same_writes && !(invalidated && cached_writes == 0);
+    if (!plain) {
+        if (uniform_mode == 0) {
+            Profile::Add(Profile::Counter::LightOtherWork, 1);
+            return false;
+        }
+        GraphicsPipeline& pipeline = *last.pipeline;
+        if (!LightUniformOk(pipeline, invalidated)) {
+            return false;
+        }
+        Profile::Scope scope{Profile::Zone::LightDraw};
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        if (!pipeline.ConfigureUniforms(is_indexed)) {
+            Profile::Add(Profile::Counter::LightUniformFellBack, 1);
+            return false;
+        }
+        if (uniform_mode == 2) {
+            // Set up in full after all (PrepareDraw), then compared (CheckLightVerify).
+            const DescriptorUpdateEntry* const payload = guest_descriptor_queue.UpdateData();
+            light_verify.payload.assign(payload, payload + pipeline.DescriptorEntryCount());
+            light_verify.pipeline = &pipeline;
+            light_verify.active = true;
+            return false;
+        }
+        query_cache.NotifySegment(true);
+        HandleTransformFeedback();
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                  maxwell3d->regs.zpass_pixel_count_enable);
+        {
+            Profile::Scope draw_scope{Profile::Zone::DrawRecord};
+            draw_func();
+        }
+        Profile::Add(Profile::Counter::LightUniformDraws, 1);
+        if (indirect) {
+            Profile::Add(Profile::Counter::LightUniformIndirectDraws, 1);
+        }
+        return true;
     }
     Profile::Scope scope{Profile::Zone::LightDraw};
     std::scoped_lock lock{buffer_cache.mutex};

@@ -142,6 +142,11 @@ public:
         return record_count;
     }
 
+    /// Render passes begun so far (EDEN_NX2_LIGHT_UNIFORM=2 checks a full setup began none).
+    [[nodiscard]] u64 RenderPassBegins() const noexcept {
+        return render_pass_begins;
+    }
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore->CurrentTick();
@@ -337,6 +342,7 @@ private:
 
     std::unique_ptr<CommandChunk> chunk;
     u64 record_count{}; ///< See RecordCount
+    u64 render_pass_begins{}; ///< See RenderPassBegins
     std::function<void()> on_submit;
 
     State state;

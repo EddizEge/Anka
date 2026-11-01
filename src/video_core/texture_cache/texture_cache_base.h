@@ -301,6 +301,15 @@ public:
     /// CPU-modified contents, sparse binding, or a copy from an alias written after one of them.
     [[nodiscard]] bool RenderTargetsNeedRepeat() const;
 
+    /// EDEN_NX2_LIGHT_DRAW: the same for the images a draw samples or stores to (FillImageViews):
+    /// CPU-modified contents or an alias written after one of them.
+    [[nodiscard]] bool ViewsNeedRepeat(std::span<const ImageViewInOut> views) const;
+
+    /// EDEN_NX2_LIGHT_UNIFORM: how many times a memory write found an image (WriteMemory) so far.
+    [[nodiscard]] u64 WriteHits() const noexcept {
+        return write_hits.load(std::memory_order_relaxed);
+    }
+
     [[nodiscard]] bool IsRescaling() const noexcept;
 
     [[nodiscard]] bool IsRescaling(const ImageViewBase& image_view) const noexcept;
@@ -586,6 +595,7 @@ private:
     u64 modification_tick = 0;
     u64 frame_tick = 0;
     u64 image_view_epoch = 0; ///< See ImageViewEpoch
+    std::atomic<u64> write_hits{}; ///< See WriteHits
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};

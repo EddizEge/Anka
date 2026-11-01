@@ -131,4 +131,35 @@ conditional rendering (the light setup makes the per-draw query calls the full o
 any alias of a render target (only an alias written later gets copied). The back's line now
 also counts why a full setup could not be followed ("not followable: shape, memory writes,
 transform feedback, render targets, cut short") and names the registers that first kept
-draws off the light path, armed or not ("first blocking register"). Built; not measured yet.
+draws off the light path, armed or not ("first blocking register"). Measured (a14f540ce, same
+area): 29.7 FPS with light draws, 23.0 without, no visible difference; 100,563 of 187,178 draws a
+second went light (59,841 indirect).
+
+### Light draws with uniforms (EDEN_NX2_LIGHT_UNIFORM)
+
+That run's direct draws mostly changed constant buffer data too ("+ uniforms" 68,693 a second),
+and 61,883 a second were "not after one" because the draw before them wrote memory. Neither needs
+the pipeline, image, render target or dynamic state setup again. `EDEN_NX2_LIGHT_UNIFORM` (on with
+light draws; `=0` off, `=2` verify) sets up such a draw's buffers and descriptors only
+(GraphicsPipeline::ConfigureUniforms): uniform buffers resolved and streamed or uploaded as the
+full setup does, storage and texture buffers kept as last bound and synchronized, written ranges
+and storage images marked, each stage's image descriptors as it last pushed them
+(`EDEN_NX2_DESC_REUSE`, required), the descriptor set, and the draw. It applies where a plain light
+draw does not, when besides the conditions above:
+- the changes since the previous draw are also constant buffer data and binds; its pipeline may
+  write memory (a full setup ending with one gives "memory writes (uniform way only)"); the images
+  it samples or stores to need no upload or alias copy (also checked for plain light draws now);
+- every cached write since was constant buffer data (at most 8 merged ranges, none in a lazily
+  backed sparse region), none of it reached an image (TextureCache::WriteHits) or a shader
+  (ShaderCache::InvalidationHits, also counting removals), none overlaps the texture handles or
+  storage buffer descriptors the pipeline reads (at the bound constant buffers' addresses) or the
+  texture header and sampler pools, and no constant buffer it reads them from was bound elsewhere;
+- the image descriptors kept are still valid (no image view freed, no rescale change, no new
+  sampler variant), nothing was uploaded and the render pass is still active.
+`=2` decides as above, sets up the buffers the uniform way, then sets the draw up in full and
+compares: the same pipeline, not bound again; the same descriptors (uniform buffer slices match
+with `EDEN_NX2_UBO_REUSE` on, the default); the same push constants; no render pass begun; no
+dynamic state recorded. Differences go to the log ("Light uniform draw differs from its full
+setup", first 64). The back's profile line adds "light uniform draws N (M indirect); full: memory,
+caches, binds, descriptors, fell back; verified V (W mismatches)" and the registers that first
+kept draws off this way. Built; not measured yet.

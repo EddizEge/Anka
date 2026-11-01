@@ -747,6 +747,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
+        write_hits.fetch_add(1, std::memory_order_relaxed);
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -1266,6 +1267,29 @@ bool TextureCache<P>::RenderTargetsNeedRepeat() const {
         }
     }
     return (rt_active_mask & (1u << NUM_RT)) != 0 && repeats(rt_depth_image_id);
+}
+
+template <class P>
+bool TextureCache<P>::ViewsNeedRepeat(std::span<const ImageViewInOut> views) const {
+    for (const ImageViewInOut& view : views) {
+        if (!view.id) {
+            continue;
+        }
+        const ImageViewBase& image_view = slot_image_views[view.id];
+        if (image_view.IsBuffer()) {
+            continue;
+        }
+        const ImageBase& image = slot_images[image_view.image_id];
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
+            return true;
+        }
+        for (const AliasedImage& alias : image.aliased_images) {
+            if (slot_images[alias.id].modification_tick > image.modification_tick) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 template <class P>

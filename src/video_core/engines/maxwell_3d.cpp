@@ -869,6 +869,10 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
         return; // slot field is 5 bits; the state array holds 18
     }
     auto& buffer = state.shader_stages[stage_index].const_buffers[bind_data.shader_slot];
+    if (buffer.enabled != (bind_data.valid.Value() != 0) ||
+        buffer.address != regs.const_buffer.Address() || buffer.size != regs.const_buffer.size) {
+        light.rebound[stage_index] |= 1u << bind_data.shader_slot;
+    }
     buffer.enabled = bind_data.valid.Value() != 0;
     buffer.address = regs.const_buffer.Address();
     buffer.size = regs.const_buffer.size;
@@ -897,6 +901,7 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
         NoteLightChange(IsLightSameWrite(address, start_base, copy_size) ? LightChange::UniformSame
                                                                          : LightChange::UniformData,
                         MAXWELL3D_REG_INDEX(const_buffer.buffer));
+        NoteLightWrite(address, static_cast<u32>(copy_size));
     }
     memory_manager.WriteBlockCached(address, start_base, copy_size);
 

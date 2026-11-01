@@ -75,6 +75,12 @@ public:
     /// @brief Flushes delayed removal operations
     void SyncGuestHost();
 
+    /// EDEN_NX2_LIGHT_UNIFORM: how many times a write found a program or rejected address so far
+    /// (its pipelines are then removed or looked up again).
+    [[nodiscard]] u64 InvalidationHits() const noexcept {
+        return invalidation_hits.load(std::memory_order_relaxed);
+    }
+
 protected:
     struct GraphicsEnvironments {
         std::array<GraphicsEnvironment, NUM_PROGRAMS> envs;
@@ -178,6 +184,7 @@ private:
     std::atomic<VAddr> registered_highest{};
     /// Whether marked_for_removal has entries, readable without invalidation_mutex.
     std::atomic<bool> removal_pending{};
+    std::atomic<u64> invalidation_hits{}; ///< See InvalidationHits
 };
 
 } // namespace VideoCommon

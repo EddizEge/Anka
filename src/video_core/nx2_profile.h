@@ -89,6 +89,7 @@ enum class Histogram : u32 {
     IndirectGroupStride, ///< Stride of the group a step did not match
     IndirectGapMethods,  ///< Methods written between two indirect draws (the first 16 of each gap)
     LightBlocking,       ///< First register that kept a draw off the light path (EDEN_NX2_LIGHT_DRAW)
+    LightUniformBlocking, ///< First register outside what a light draw with uniforms sets up again
     Count,
 };
 
@@ -101,7 +102,7 @@ struct HistogramData {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 64> counters{}; ///< See Counter
+    std::array<u64, 96> counters{}; ///< See Counter
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
@@ -189,10 +190,21 @@ enum class Counter : u32 {
     LightFellBack,       ///< Buffers deleted, uploaded or the render pass ended on the way
     // Draws set up in full that a light draw may not follow, why (the first reason that applies):
     LightRefusedShape,    ///< Instances, inline indices, quads, 8-bit indices, count buffer, byte count
-    LightRefusedWrites,   ///< Its pipeline writes memory (storage buffers, images, global stores)
+    LightRefusedWrites,   ///< Its pipeline writes memory: only a light draw with uniforms may follow
     LightRefusedFeedback, ///< Transform feedback on
-    LightRefusedTargets,  ///< Render targets: feedback loop barrier, newer alias, CPU-modified, sparse
+    LightRefusedTargets,  ///< Render targets or sampled images: feedback loop, newer alias, CPU-modified
     LightRefusedCutShort, ///< The setup ended early (no pipeline, configure failed, reset fix)
+    // EDEN_NX2_LIGHT_UNIFORM: draws set up the light way with their uniform buffers and descriptors
+    LightUniformDraws,
+    LightUniformIndirectDraws, ///< Of LightUniformDraws: indirect draws
+    // Draws that could only go the uniform way but were set up in full, why:
+    LightUniformMemory,      ///< Cached writes other than constant buffer data, or too many ranges
+    LightUniformCaches,      ///< A write reached an image or a shader
+    LightUniformBinds,       ///< A constant buffer slot the draw reads handles or storage buffers from was bound
+    LightUniformDescriptors, ///< Constant buffer data over handles, storage buffer descriptors or TIC/TSC
+    LightUniformFellBack,    ///< Image descriptors not kept, buffers uploaded or the render pass ended
+    LightUniformVerified,    ///< EDEN_NX2_LIGHT_UNIFORM=2: decided light, set up in full and compared
+    LightUniformMismatches,  ///< Of LightUniformVerified: the full setup differed (logged)
     Count,
 };
 
@@ -358,8 +370,9 @@ inline void Report(const char* thread_name = "GPU thread") {
                                       method, 6));
         line += fmt::format(" | light draws {:.0f} ({:.0f} indirect); full: {:.0f} not after one, "
                             "{:.0f} state, {:.0f} other work, {:.0f} draw kind, {:.0f} fell back; "
-                            "not followable: {:.0f} shape, {:.0f} memory writes, {:.0f} transform "
-                            "feedback, {:.0f} render targets, {:.0f} cut short",
+                            "not followable: {:.0f} shape, {:.0f} memory writes (uniform way only), "
+                            "{:.0f} transform feedback, {:.0f} render targets or images, {:.0f} cut "
+                            "short",
                             counter(Counter::LightDraws), counter(Counter::LightIndirectDraws),
                             counter(Counter::LightNotArmed), counter(Counter::LightStateChanged),
                             counter(Counter::LightOtherWork), counter(Counter::LightShape),
@@ -368,6 +381,19 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::LightRefusedFeedback),
                             counter(Counter::LightRefusedTargets),
                             counter(Counter::LightRefusedCutShort));
+        line += fmt::format(" | light uniform draws {:.0f} ({:.0f} indirect); full: {:.0f} memory, "
+                            "{:.0f} caches, {:.0f} binds, {:.0f} descriptors, {:.0f} fell back; "
+                            "verified {:.0f} ({:.0f} mismatches) (first register outside: {})",
+                            counter(Counter::LightUniformDraws),
+                            counter(Counter::LightUniformIndirectDraws),
+                            counter(Counter::LightUniformMemory), counter(Counter::LightUniformCaches),
+                            counter(Counter::LightUniformBinds),
+                            counter(Counter::LightUniformDescriptors),
+                            counter(Counter::LightUniformFellBack),
+                            counter(Counter::LightUniformVerified),
+                            counter(Counter::LightUniformMismatches),
+                            TopValues(histograms[static_cast<size_t>(Histogram::LightUniformBlocking)],
+                                      method, 6));
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",
