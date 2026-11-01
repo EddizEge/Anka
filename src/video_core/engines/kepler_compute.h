@@ -266,7 +266,11 @@ private:
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     void ProcessNativeReportSemaphore(u32 argument);
     void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
-    bool UpscaleInsteadOfNativeProgram();
+    void DescribeUpscaleInputs(const NativeQmdScheduler::Descriptor& qmd);
+    bool UpscaleInsteadOfNativeProgram(const NativeQmdScheduler::Descriptor& qmd);
+    bool UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd);
+    /// The words of a bound constant bank of the current launch, at most max_bytes of them.
+    std::vector<u32> ReadNativeBank(u32 slot, u32 max_bytes);
     bool ProcessNativeMethod(Core::System& system, u32 method, u32 argument, bool is_last_call);
     NativeQmdScheduler native_qmd;
     std::array<u32, 0xc00>* native_data_ram{};

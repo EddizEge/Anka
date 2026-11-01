@@ -58,6 +58,7 @@ add_library(video_core STATIC
     engines/maxwell_3d.h
     engines/maxwell_dma.cpp
     engines/maxwell_dma.h
+    engines/nx2_upscale_pick.h
     engines/puller.cpp
     engines/puller.h
     framebuffer_config.cpp

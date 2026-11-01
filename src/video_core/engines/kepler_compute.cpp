@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,6 +24,7 @@
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
+#include "video_core/engines/nx2_upscale_pick.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
@@ -564,7 +566,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         if (std::string_view{error.what()}.find("matrix multiply") != std::string_view::npos) {
             DescribeNativeResources(qmd);
             // The console runs this on tensor cores; stand in with a plain upscale of its input.
-            return UpscaleInsteadOfNativeProgram();
+            return UpscaleInsteadOfNativeProgram(qmd);
         }
         return false;
     }
@@ -574,6 +576,14 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a
 // substitute (e.g. an upscale blit for a tensor-core pass) can find its inputs and output.
 void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd) {
+    static const bool upscale_diag = [] {
+        const char* text = std::getenv("EDEN_NX2_UPSCALE_DIAG");
+        return text != nullptr && text[0] != '0';
+    }();
+    if (upscale_diag) {
+        DescribeUpscaleInputs(qmd);
+        return;
+    }
     static u32 described{};
     if (described++ >= 2) return;
     const auto& cbuf = launch_description.const_buffer_config[0];
@@ -597,11 +607,93 @@ void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor
 
 std::atomic<u32> g_nx2_trace_draws_after_upscale{};
 
+namespace {
+/// The render target format the upscale blit uses for a texture format, if it takes it.
+std::optional<Tegra::RenderTargetFormat> BlitFormat(Texture::TextureFormat format) {
+    using RTFormat = Tegra::RenderTargetFormat;
+    switch (format) {
+    case Texture::TextureFormat::A2B10G10R10: return RTFormat::A2B10G10R10_UNORM;
+    case Texture::TextureFormat::A8B8G8R8: return RTFormat::A8B8G8R8_UNORM;
+    case Texture::TextureFormat::B10G11R11: return RTFormat::B10G11R11_FLOAT;
+    case Texture::TextureFormat::R16G16B16A16: return RTFormat::R16G16B16A16_FLOAT;
+    default: return std::nullopt;
+    }
+}
+
+Fermi2D::Surface BlitSurface(const Texture::TICEntry& tic, Tegra::RenderTargetFormat format) {
+    Fermi2D::Surface result{};
+    result.format = format;
+    result.linear = Fermi2D::MemoryLayout::BlockLinear;
+    result.block_width.Assign(tic.block_width);
+    result.block_height.Assign(tic.block_height);
+    result.block_depth.Assign(tic.block_depth);
+    result.depth = 1;
+    result.width = tic.Width();
+    result.height = tic.Height();
+    result.addr_upper = static_cast<u32>(tic.Address() >> 32);
+    result.addr_lower = static_cast<u32>(tic.Address());
+    return result;
+}
+
+/// BlitFormat for an image the size-matched stand-in found by scanning words: only with the
+/// component type the blit's format stands for (the texture cache keeps e.g. R16G16B16A16 UNORM
+/// and FLOAT apart, and a blit in the wrong one would write an alias, not the image) and no sRGB.
+std::optional<Tegra::RenderTargetFormat> ScannedBlitFormat(const Texture::TICEntry& tic) {
+    using RTFormat = Tegra::RenderTargetFormat;
+    using Type = Texture::ComponentType;
+    const std::optional<RTFormat> format = BlitFormat(tic.format.Value());
+    if (!format || tic.srgb_conversion != 0) {
+        return std::nullopt;
+    }
+    const Type type = *format == RTFormat::R16G16B16A16_FLOAT || *format == RTFormat::B10G11R11_FLOAT
+                          ? Type::FLOAT
+                          : Type::UNORM;
+    if (tic.r_type.Value() != type || tic.g_type.Value() != type || tic.b_type.Value() != type) {
+        return std::nullopt;
+    }
+    return format;
+}
+
+struct UpscaleOptions {
+    bool scan{true};
+    std::optional<Nx2UpscalePick::Location> input_at;
+    std::optional<Nx2UpscalePick::Location> output_at;
+};
+
+const UpscaleOptions& GetUpscaleOptions() {
+    static const UpscaleOptions options = [] {
+        UpscaleOptions o;
+        const char* scan = std::getenv("EDEN_NX2_UPSCALE_SCAN");
+        o.scan = scan == nullptr || scan[0] != '0';
+        o.input_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_IN"));
+        o.output_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_OUT"));
+        return o;
+    }();
+    return options;
+}
+
+/// Input formats of the size-matched stand-in, most likely first (HDR colour).
+constexpr std::array<u32, 4> UpscaleFormats{
+    static_cast<u32>(Texture::TextureFormat::R16G16B16A16),
+    static_cast<u32>(Texture::TextureFormat::B10G11R11),
+    static_cast<u32>(Texture::TextureFormat::A2B10G10R10),
+    static_cast<u32>(Texture::TextureFormat::A8B8G8R8),
+};
+} // Anonymous namespace
+
 // Title 4's upscaler reads the tonemapped frame through the texture handle at cbuf0+0x90 and
 // writes the output resolution image through the surface handle at cbuf0+0xa0 (from its
 // TLD/SUST operands). Blit one to the other with bilinear filtering when both are plain 2D images
 // of the same format and the output is larger.
-bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
+bool KeplerCompute::UpscaleInsteadOfNativeProgram(const NativeQmdScheduler::Descriptor& qmd) {
+    // Bananza's upscalers (their bank 0 holds their sizes) have buffer addresses at 0x90 / 0xa0,
+    // not handles: only the size-matched stand-in, never a blit between what those words name.
+    if (GetUpscaleOptions().scan &&
+        Nx2UpscalePick::SizesFromBank0(ReadNativeBank(0, 0x100),
+                                       launch_description.block_dim_x.Value(), qmd[12],
+                                       qmd[13] & 0xffff)) {
+        return UpscaleBySizes(qmd);
+    }
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
@@ -613,30 +705,13 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     if (!input || !output || input->format != output->format || input->Address() == 0 ||
         output->Address() == 0 || output->Width() <= input->Width() || !input->IsBlockLinear() ||
         !output->IsBlockLinear())
-        return false;
+        return UpscaleBySizes(qmd);
     using RTFormat = Tegra::RenderTargetFormat;
-    RTFormat format{};
-    switch (input->format) {
-    case Texture::TextureFormat::A2B10G10R10: format = RTFormat::A2B10G10R10_UNORM; break;
-    case Texture::TextureFormat::A8B8G8R8: format = RTFormat::A8B8G8R8_UNORM; break;
-    case Texture::TextureFormat::B10G11R11: format = RTFormat::B10G11R11_FLOAT; break;
-    case Texture::TextureFormat::R16G16B16A16: format = RTFormat::R16G16B16A16_FLOAT; break;
-    default: return false;
+    const std::optional<RTFormat> format = BlitFormat(input->format);
+    if (!format) {
+        return false;
     }
-    const auto surface = [&](const Texture::TICEntry& tic) {
-        Fermi2D::Surface result{};
-        result.format = format;
-        result.linear = Fermi2D::MemoryLayout::BlockLinear;
-        result.block_width.Assign(tic.block_width);
-        result.block_height.Assign(tic.block_height);
-        result.block_depth.Assign(tic.block_depth);
-        result.depth = 1;
-        result.width = tic.Width();
-        result.height = tic.Height();
-        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
-        result.addr_lower = static_cast<u32>(tic.Address());
-        return result;
-    };
+    const auto surface = [&](const Texture::TICEntry& tic) { return BlitSurface(tic, *format); };
     const Fermi2D::Config config{
         .operation = Fermi2D::Operation::SrcCopy,
         .filter = Fermi2D::Filter::Bilinear,
@@ -742,6 +817,289 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                  done ? "blitted" : "not accelerated");
     }
     return done;
+}
+
+std::vector<u32> KeplerCompute::ReadNativeBank(u32 slot, u32 max_bytes) {
+    const auto& bank = launch_description.const_buffer_config[slot];
+    const GPUVAddr address = (GPUVAddr{bank.address_high} << 32) | bank.address_low;
+    const u32 bytes = (std::min)(static_cast<u32>(bank.size.Value()), max_bytes) & ~3U;
+    if (address == 0 || bytes == 0 || !memory_manager.IsFullyMappedRange(address, bytes)) {
+        return {};
+    }
+    std::vector<u32> words(bytes / 4);
+    memory_manager.ReadBlockUnsafe(address, words.data(), bytes);
+    return words;
+}
+
+// Bananza's upscalers (nx2_upscale_pick.h): the input and the output are the images of the sizes
+// in constant bank 0 that words of the bound banks name; the input is blitted (bilinear) to each
+// output. The words found are kept per program and read again first. EDEN_NX2_UPSCALE_SCAN=0
+// leaves the outputs unwritten as before; EDEN_NX2_UPSCALE_IN / EDEN_NX2_UPSCALE_OUT=<bank>:<offset>
+// (hex, from EDEN_NX2_UPSCALE_DIAG) take only that word.
+bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
+    namespace Up = Nx2UpscalePick;
+    const UpscaleOptions& options = GetUpscaleOptions();
+    if (!options.scan) {
+        return false;
+    }
+    struct Memo {
+        Up::Sizes sizes;
+        std::vector<Up::Location> words;
+        u32 failed{};  ///< scans in a row that found no pair
+        u32 skipped{}; ///< dispatches since: once 3 failed, scanned again every 60th
+        u32 warnings{};
+        u32 blitted{};
+        bool warned{};
+    };
+    static std::unordered_map<u64, Memo> memos;
+    const u64 program = regs.code_loc.Address();
+    Memo& memo = memos[program];
+    const auto bank0 = ReadNativeBank(0, 0x100);
+    const auto sizes = Up::SizesFromBank0(bank0, launch_description.block_dim_x.Value(), qmd[12],
+                                          qmd[13] & 0xffff);
+    if (!sizes) {
+        if (!memo.warned) {
+            memo.warned = true;
+            LOG_WARNING(HW_GPU, "Tensor upscale stand-in: program {:#x} has no input and output "
+                                "sizes in constant bank 0", program);
+        }
+        return false;
+    }
+    // A full scan reads up to 8 banks of 16 KB: after 3 that found nothing, only every 60th
+    // dispatch (each one is frame time the game's resolution scaling would see).
+    if (memo.words.empty() && memo.failed >= 3 && ++memo.skipped % 60 != 0) {
+        return false;
+    }
+    std::vector<Up::Candidate> candidates;
+    std::unordered_map<u32, Texture::TICEntry> tics;
+    const auto consider = [&](u32 slot, u32 offset, u32 word) {
+        const u32 index = word & 0xfffff;
+        if (word == 0 || index > regs.tic.limit) {
+            return;
+        }
+        auto it = tics.find(index);
+        if (it == tics.end()) {
+            it = tics.emplace(index, GetTICEntry(index)).first;
+        }
+        const Texture::TICEntry& tic = it->second;
+        const u32 width = tic.Width();
+        const u32 height = tic.Height();
+        const bool in_size = width == sizes->in_w && height == sizes->in_h;
+        const bool out_size = width == sizes->out_w && height == sizes->out_h;
+        if (tic.Address() == 0 || (!in_size && !out_size)) {
+            return;
+        }
+        const auto type = tic.texture_type.Value();
+        candidates.push_back({
+            .slot = slot,
+            .offset = offset,
+            .index = index,
+            .address = tic.Address(),
+            .width = width,
+            .height = height,
+            .format = static_cast<u32>(tic.format.Value()),
+            .usable = tic.IsBlockLinear() && ScannedBlitFormat(tic).has_value() &&
+                      (type == Texture::TextureType::Texture2D ||
+                       type == Texture::TextureType::Texture2DNoMipmap),
+        });
+    };
+    const auto choose = [&] {
+        return Up::Choose(*sizes, candidates, UpscaleFormats, options.input_at, options.output_at);
+    };
+    Up::Pick chosen;
+    if (memo.sizes == *sizes && !memo.words.empty()) {
+        const u32 mask = launch_description.const_buffer_enable_mask.Value();
+        for (const auto& [slot, offset] : memo.words) {
+            const auto& bank = launch_description.const_buffer_config[slot];
+            if (((mask >> slot) & 1) != 0 && offset + 4 <= bank.size.Value()) {
+                const GPUVAddr address = (GPUVAddr{bank.address_high} << 32) | bank.address_low;
+                consider(slot, offset, memory_manager.Read<u32>(address + offset));
+            }
+        }
+        chosen = choose();
+    }
+    if (!chosen.input || chosen.output_count == 0 || chosen.Ambiguous()) {
+        candidates.clear();
+        const u32 mask = launch_description.const_buffer_enable_mask.Value();
+        for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+            if (((mask >> slot) & 1) == 0) {
+                continue;
+            }
+            const auto words = ReadNativeBank(slot, 0x4000);
+            for (u32 i = 0; i < words.size(); ++i) {
+                consider(slot, i * 4, words[i]);
+            }
+        }
+        chosen = choose();
+        memo.sizes = *sizes;
+        memo.words.clear();
+        if (chosen.input && chosen.output_count != 0 && !chosen.Ambiguous()) {
+            memo.words.emplace_back(candidates[*chosen.input].slot, candidates[*chosen.input].offset);
+        }
+        for (std::size_t k = 0; k < chosen.output_count; ++k) {
+            const auto& output = candidates[chosen.outputs[k]];
+            memo.words.emplace_back(output.slot, output.offset);
+        }
+    }
+    if (!chosen.input || chosen.output_count == 0 || chosen.Ambiguous()) {
+        ++memo.failed;
+        if (memo.warnings++ < 2) {
+            if (chosen.Ambiguous()) {
+                LOG_WARNING(HW_GPU,
+                            "Tensor upscale stand-in: program {:#x} ({}x{} -> {}x{}): its constant "
+                            "banks name {} images of the output size in the input's format, more "
+                            "than {}: not blitted, it could hit another pass's image "
+                            "(EDEN_NX2_UPSCALE_OUT=<bank>:<offset> picks one; "
+                            "EDEN_NX2_UPSCALE_DIAG=1 lists them)",
+                            program, sizes->in_w, sizes->in_h, sizes->out_w, sizes->out_h,
+                            chosen.output_total, chosen.outputs.size());
+            } else {
+                LOG_WARNING(HW_GPU,
+                            "Tensor upscale stand-in: program {:#x} ({}x{} -> {}x{}): {} images of "
+                            "those sizes named in its constant banks, no input and output pair "
+                            "(EDEN_NX2_UPSCALE_DIAG=1 lists them)",
+                            program, sizes->in_w, sizes->in_h, sizes->out_w, sizes->out_h,
+                            candidates.size());
+            }
+        }
+        memo.words.clear();
+        return false;
+    }
+    memo.failed = 0;
+    memo.skipped = 0;
+    const Up::Candidate& input = candidates[*chosen.input];
+    const auto format = ScannedBlitFormat(tics.at(input.index));
+    const Fermi2D::Surface source = BlitSurface(tics.at(input.index), *format);
+    bool done = false;
+    for (std::size_t k = 0; k < chosen.output_count; ++k) {
+        const Up::Candidate& output = candidates[chosen.outputs[k]];
+        const Fermi2D::Config config{
+            .operation = Fermi2D::Operation::SrcCopy,
+            .filter = Fermi2D::Filter::Bilinear,
+            .must_accelerate = true,
+            .dst_x0 = 0,
+            .dst_y0 = 0,
+            .dst_x1 = static_cast<s32>(output.width),
+            .dst_y1 = static_cast<s32>(output.height),
+            .src_x0 = 0,
+            .src_y0 = 0,
+            .src_x1 = static_cast<s32>(input.width),
+            .src_y1 = static_cast<s32>(input.height),
+        };
+        done |= rasterizer->AccelerateSurfaceCopy(source, BlitSurface(tics.at(output.index), *format),
+                                                  config);
+    }
+    if (memo.blitted++ < 3) {
+        const Up::Candidate& first = candidates[chosen.outputs[0]];
+        LOG_INFO(HW_GPU,
+                 "Tensor upscale stand-in (EDEN_NX2_UPSCALE_SCAN): program {:#x} {}x{} -> {}x{}, "
+                 "bilinear from bank {} +{:#x} ({:#x}, format {:#x}) to {} image(s), the first at "
+                 "bank {} +{:#x} ({:#x}): {}",
+                 program, sizes->in_w, sizes->in_h, sizes->out_w, sizes->out_h, input.slot,
+                 input.offset, input.address, input.format, chosen.output_count, first.slot,
+                 first.offset, first.address, done ? "blitted" : "not accelerated");
+    }
+    return done;
+}
+
+// EDEN_NX2_UPSCALE_DIAG=1 (DescribeNativeResources, instead of its two lines): for the first two
+// dispatches of each rejected tensor program and the 600th to the 2400th (at most six dumps a
+// program, each at most 48 named images a bank), constant bank 0 word by word,
+// the bound banks (those up to 0x600 bytes word by word too), every bank word that names an image
+// with its size and format, the texture pool's images of the input and output sizes (first
+// dispatch only), and then the next 24 draws' targets and textures ("after upscale",
+// vk_rasterizer.cpp). EDEN_NX2_RT_TRACE=1 adds the colour targets drawn before.
+void KeplerCompute::DescribeUpscaleInputs(const NativeQmdScheduler::Descriptor& qmd) {
+    const u64 program = regs.code_loc.Address();
+    static std::unordered_map<u64, u32> calls;
+    const u32 call = calls[program]++;
+    if (call >= 2 && (call % 600 != 0 || call / 600 > 4)) {
+        return;
+    }
+    const auto bank0 = ReadNativeBank(0, 0x100);
+    const auto sizes = Nx2UpscalePick::SizesFromBank0(bank0, launch_description.block_dim_x.Value(),
+                                                      qmd[12], qmd[13] & 0xffff);
+    const u32 mask = launch_description.const_buffer_enable_mask.Value();
+    LOG_INFO(HW_GPU,
+             "Tensor upscale diag: program {:#x} dispatch {}: grid {}x{}x{}, block {}x{}x{}, banks "
+             "{:#04x}, texture pool {:#x} limit {}, {}",
+             program, call, qmd[12], qmd[13] & 0xffff, qmd[14] & 0xffff,
+             launch_description.block_dim_x.Value(), launch_description.block_dim_y.Value(),
+             launch_description.block_dim_z.Value(), mask, regs.tic.Address(), regs.tic.limit,
+             sizes ? fmt::format("{}x{} -> {}x{}", sizes->in_w, sizes->in_h, sizes->out_w,
+                                 sizes->out_h)
+                   : std::string{"no sizes in bank 0"});
+    const auto role = [&](const Texture::TICEntry& tic) -> const char* {
+        if (!sizes) {
+            return "";
+        }
+        if (tic.Width() == sizes->in_w && tic.Height() == sizes->in_h) {
+            return ", input size";
+        }
+        return tic.Width() == sizes->out_w && tic.Height() == sizes->out_h ? ", output size" : "";
+    };
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+        if (((mask >> slot) & 1) == 0) {
+            continue;
+        }
+        const auto& bank = launch_description.const_buffer_config[slot];
+        const auto words = ReadNativeBank(slot, 0x4000);
+        LOG_INFO(HW_GPU, "  bank {} at {:#x}, {:#x} bytes{}", slot,
+                 (GPUVAddr{bank.address_high} << 32) | bank.address_low, bank.size.Value(),
+                 words.empty() ? " (not mapped)" : "");
+        if (words.size() * 4 <= 0x600) {
+            const std::span<const u32> all{words};
+            for (std::size_t i = 0; i < all.size(); i += 8) {
+                LOG_INFO(HW_GPU, "  bank {} +{:#05x}: {:08x}", slot, i * 4,
+                         fmt::join(all.subspan(i, (std::min<std::size_t>)(8, all.size() - i)), " "));
+            }
+        }
+        u32 named = 0;
+        for (std::size_t i = 0; i < words.size() && named < 48; ++i) {
+            const u32 index = words[i] & 0xfffff;
+            if (words[i] == 0 || index > regs.tic.limit) {
+                continue;
+            }
+            const auto tic = GetTICEntry(index);
+            if (tic.Address() == 0 || tic.Width() < 16 || tic.Height() < 16) {
+                continue;
+            }
+            ++named;
+            LOG_INFO(HW_GPU,
+                     "  bank {} +{:#x} = {:#x}: texture {} at {:#x}, {}x{}, format {:#x}, type {}, "
+                     "{}{}",
+                     slot, i * 4, words[i], index, tic.Address(), tic.Width(), tic.Height(),
+                     static_cast<u32>(tic.format.Value()), static_cast<u32>(tic.texture_type.Value()),
+                     tic.IsBlockLinear() ? "block linear" : "pitch", role(tic));
+        }
+    }
+    if (call != 0 || !sizes) {
+        return;
+    }
+    // The texture pool's images of the two sizes, whatever names them.
+    u32 count = regs.tic.limit < 65536 ? regs.tic.limit + 1 : 65536;
+    if (!memory_manager.IsFullyMappedRange(regs.tic.Address(), u64{count} * sizeof(Texture::TICEntry))) {
+        count = 0;
+    }
+    std::vector<Texture::TICEntry> pool(count);
+    if (count != 0) {
+        memory_manager.ReadBlockUnsafe(regs.tic.Address(), pool.data(),
+                                       pool.size() * sizeof(Texture::TICEntry));
+    }
+    u32 listed = 0;
+    for (u32 index = 0; index < count && listed < 32; ++index) {
+        const auto& tic = pool[index];
+        const char* const size = role(tic);
+        if (tic.Address() == 0 || size[0] == '\0') {
+            continue;
+        }
+        ++listed;
+        LOG_INFO(HW_GPU, "  texture pool {}: {:#x}, {}x{}, format {:#x}, type {}, {}{}", index,
+                 tic.Address(), tic.Width(), tic.Height(), static_cast<u32>(tic.format.Value()),
+                 static_cast<u32>(tic.texture_type.Value()),
+                 tic.IsBlockLinear() ? "block linear" : "pitch", size);
+    }
+    g_nx2_trace_draws_after_upscale = 24;
 }
 
 void KeplerCompute::ProcessLaunch() {
