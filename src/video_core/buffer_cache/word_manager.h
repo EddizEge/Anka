@@ -36,6 +36,19 @@ enum class Type {
     Max
 };
 
+// EDEN_NX2_SYNC_SKIP (WordManager::SyncSkipMode) and EDEN_NX2_SYNC_EXACT (MayHaveCpuDirtyWords),
+// read once at startup like Nx2Profile::g_enabled: as function-local statics every query paid a
+// thread-safe initialization check (SyncSkipMode alone ~0.5% of the split back thread).
+inline const int g_nx2_sync_skip_mode = [] {
+    const char* value = std::getenv("EDEN_NX2_SYNC_SKIP");
+    return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));
+}();
+/// EDEN_NX2_SYNC_EXACT=0: MayHaveCpuDirtyWords tests whole words only, as before.
+inline const bool g_nx2_sync_exact = [] {
+    const char* value = std::getenv("EDEN_NX2_SYNC_EXACT");
+    return value == nullptr || value[0] != '0';
+}();
+
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
@@ -120,11 +133,7 @@ struct WordManager {
         if constexpr (num_words > 64) {
             return 0;
         } else {
-            static const int mode = [] {
-                const char* value = std::getenv("EDEN_NX2_SYNC_SKIP");
-                return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));
-            }();
-            return mode;
+            return g_nx2_sync_skip_mode;
         }
     }
 
@@ -162,6 +171,13 @@ struct WordManager {
 
     /// False when ForEachModifiedRange(Type::CPU, ...) over [offset, offset + size) would do
     /// nothing: no covered word holds CPU or Untracked bits. Always true with EDEN_NX2_SYNC_SKIP=0.
+    /// EDEN_NX2_SYNC_EXACT: also false when the words that hold such bits hold none on the
+    /// range's own pages. ForEachModifiedRange then finds an empty word and no untracked bit in
+    /// each of them: it clears no bit, retracks no page and passes no range, so skipping it is
+    /// exact. A word is 64 pages (256 KiB); vertex, index and storage ranges often share one with
+    /// pages no synchronization covers (CPU-modified since the region was made, or streamed
+    /// uniform data the CPU keeps writing), and every draw walked such a range to find nothing
+    /// (~7.6% of the split back on the wide view, while uploads were ~0.2%).
     [[nodiscard]] bool MayHaveCpuDirtyWords(size_t offset, size_t size) const {
         const int skip_mode = SyncSkipMode();
         if (skip_mode == 0) {
@@ -170,7 +186,22 @@ struct WordManager {
         if (skip_mode == 2) {
             CheckDirtyWords();
         }
-        return (cpu_dirty_words & WordRangeBits(GetWordRange(offset, size))) != 0;
+        const WordRange range = GetWordRange(offset, size);
+        u64 candidates = cpu_dirty_words & WordRangeBits(range);
+        if (candidates == 0 || !g_nx2_sync_exact) {
+            return candidates != 0;
+        }
+        const std::span<const u64> cpu_words = Span(Type::CPU);
+        const std::span<const u64> untracked_words = Span(Type::Untracked);
+        while (candidates != 0) {
+            const size_t index = size_t(std::countr_zero(candidates));
+            candidates &= candidates - 1;
+            // The mask IterateWords passes for this word, as ForEachModifiedRange uses it.
+            if (((cpu_words[index] | untracked_words[index]) & WordPageMask(range, index)) != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     template <typename Func>
@@ -247,6 +278,10 @@ struct WordManager {
             if (TouchesCpuWords(type))
                 RefreshDirtyWord(index);
         });
+        // After the bits (EDEN_NX2_SYNC_MEMO reads the generation before its walk).
+        if (enable && TouchesCpuWords(type)) {
+            ++cpu_set_generation;
+        }
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, (!enable) ? 1 : -1);
         }
@@ -391,6 +426,7 @@ struct WordManager {
             cached_words[word_index] = 0;
             RefreshDirtyWord(word_index);
         }
+        ++cpu_set_generation;
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, -1);
         }
@@ -460,6 +496,11 @@ struct WordManager {
     VAddr cpu_addr = 0;
     /// Bit i is set exactly while word i of CPU or Untracked is non-zero (EDEN_NX2_SYNC_SKIP).
     u64 cpu_dirty_words = 0;
+    /// Bumped by every call that may set a CPU, CachedCPU or Untracked bit here (ChangeRegionState
+    /// enabling one of them, FlushCachedWrites); a new region starts with all of them set and
+    /// nothing remembered about it. While it holds, pages found without those bits keep none
+    /// (EDEN_NX2_SYNC_MEMO).
+    u64 cpu_set_generation = 0;
 };
 
 } // namespace VideoCommon

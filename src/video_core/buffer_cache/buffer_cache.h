@@ -15,6 +15,7 @@
 
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
+#include "video_core/buffer_cache/word_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
@@ -2052,6 +2053,32 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 #endif
 
     if (use_optimized_vertex_buffers) {
+        // EDEN_NX2_SYNC_MEMO: every draw synchronizes each vertex stream, the index buffer and
+        // each storage buffer again (~12.8% of the split back on the wide view, uploads ~0.2%).
+        // A range this call left clean stays clean until its region's CPU-set generation moves
+        // (any CPU-modified marking there, DeleteBuffer's included); until then the walk below
+        // would find nothing, and true is what it returns then.
+        SyncMemo* memo = nullptr;
+        u64 generation = 0;
+        // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
+        bool memo_hit = false;
+        if (g_nx2_sync_memo && memory_tracker.CpuSetGeneration(device_addr, size, generation)) {
+            static u64 syncs{};
+            static u64 skipped{};
+            if ((++syncs & ((u64{1} << 22) - 1)) == 0) {
+                LOG_INFO(HW_GPU, "Buffer sync memo: {} of {} synchronizations skipped", skipped,
+                         syncs);
+            }
+            memo = &sync_memo[((device_addr >> 8) ^ (device_addr >> 20)) & (SYNC_MEMO_SIZE - 1)];
+            if (memo->generation == generation && memo->begin <= device_addr &&
+                device_addr + size <= memo->end) {
+                ++skipped;
+                if (g_nx2_sync_skip_mode != 2) {
+                    return true;
+                }
+                memo_hit = true;
+            }
+        }
         upload_copies.clear();
         u64 total_size_bytes = 0;
         u64 largest_copy = 0;
@@ -2075,6 +2102,22 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             });
             add_upload(upload_start, device_addr_out + range_size);
         });
+        if (memo != nullptr) {
+            // ForEachUploadRange cleared the CPU and untracked bits of every page in the range.
+            *memo = SyncMemo{
+                .begin = device_addr,
+                .end = device_addr + size,
+                .generation = generation,
+            };
+        }
+        if (memo_hit && total_size_bytes != 0) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                LOG_ERROR(HW_GPU, "EDEN_NX2_SYNC_MEMO: remembered range {:#x}+{:#x} uploads {:#x} bytes",
+                          device_addr, size, total_size_bytes);
+            }
+        }
         if (total_size_bytes == 0) {
             return true;
         }

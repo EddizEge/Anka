@@ -45,6 +45,19 @@
 
 namespace VideoCommon {
 
+// EDEN_NX2_VERTEX_SKIP (BufferCache::VertexSkipEnabled) and EDEN_NX2_SYNC_MEMO (SynchronizeBuffer),
+// read once at startup: as function-local statics every per-draw query paid a thread-safe
+// initialization check (VertexSkipEnabled alone ~0.8% of the split back thread).
+inline const bool g_nx2_vertex_skip = [] {
+    const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
+    return value == nullptr || value[0] != '0';
+}();
+/// EDEN_NX2_SYNC_MEMO=0 synchronizes every range as before.
+inline const bool g_nx2_sync_memo = [] {
+    const char* value = std::getenv("EDEN_NX2_SYNC_MEMO");
+    return value == nullptr || value[0] != '0';
+}();
+
 using BufferId = Common::SlotId;
 
 using VideoCore::Surface::PixelFormat;
@@ -582,14 +595,22 @@ private:
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.
     static bool VertexSkipEnabled() {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        return g_nx2_vertex_skip;
     }
 
     boost::container::small_vector<BufferCopy, 4> upload_copies;
+
+    /// EDEN_NX2_SYNC_MEMO (SynchronizeBuffer): ranges left synchronized (no CPU-modified or
+    /// untracked page) within one memory tracker region, with that region's CPU-set generation
+    /// read before, direct-mapped by address. A range inside one whose generation still holds has
+    /// no page to upload, clear or retrack, whichever buffer holds it: the call does nothing.
+    struct SyncMemo {
+        DAddr begin;
+        DAddr end;
+        u64 generation;
+    };
+    static constexpr size_t SYNC_MEMO_SIZE = 1024;
+    std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
 
     MemoryTracker memory_tracker;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;

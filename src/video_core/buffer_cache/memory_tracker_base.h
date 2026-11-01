@@ -70,6 +70,29 @@ public:
         });
     }
 
+    /// EDEN_NX2_SYNC_MEMO: the CPU-set generation of the region holding [query_cpu_addr,
+    /// query_cpu_addr + query_size); false when the range is empty, crosses a region boundary or
+    /// its region does not exist yet. While the generation is unchanged no CPU, CachedCPU or
+    /// Untracked bit was set in that region, so a range ForEachUploadRange left clean is clean.
+    [[nodiscard]] bool CpuSetGeneration(VAddr query_cpu_addr, u64 query_size,
+                                        u64& generation) const noexcept {
+        if (query_size == 0) {
+            return false;
+        }
+        const size_t page_index = static_cast<size_t>(query_cpu_addr >> HIGHER_PAGE_BITS);
+        const size_t last_page_index =
+            static_cast<size_t>((query_cpu_addr + query_size - 1) >> HIGHER_PAGE_BITS);
+        if (page_index >= NUM_HIGH_PAGES || last_page_index != page_index) {
+            return false;
+        }
+        const Manager* const manager = top_tier[page_index];
+        if (manager == nullptr) {
+            return false;
+        }
+        generation = manager->cpu_set_generation;
+        return true;
+    }
+
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
