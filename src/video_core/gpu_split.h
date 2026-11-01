@@ -73,12 +73,14 @@ public:
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
         if (batch_writes) {
             // EDEN_NX2_WRITE_BATCH: held, then sent with the macro writes after it to the same
-            // engine as one entry (WritePending) before anything else enters the ring.
+            // engine as one entry (WritePending) before anything else enters the ring, and
+            // published where its own entry would have been (Count).
             if (engine != front_engine || pending_count == MaxPending) [[unlikely]] {
                 FlushPending();
                 SelectEngine(engine);
             }
             pending[pending_count++] = (u64{argument} << 32) | (method & 0xffff);
+            Count(1);
             return;
         }
         SelectEngine(engine);
@@ -135,7 +137,7 @@ public:
     static inline bool check_owner{};
     static void CheckOwner(const char* where);
 
-    /// Makes what was sent visible to the back.
+    /// Makes what was sent visible to the back (macro writes held too).
     void Publish();
     /// Waits until the back executed everything sent so far. Returns whether it had to wait.
     bool Drain();
@@ -177,10 +179,30 @@ private:
     u64* ReserveSlow(size_t words);
     void Commit(size_t words) {
         write_position += words;
-        if (write_position - published_local >= publish_every) {
+        if (batch_writes) {
+            Count(words);
+        } else if (write_position - published_local >= publish_every) {
             Publish();
         }
     }
+    /// EDEN_NX2_WRITE_BATCH: counts an entry's words as the ring would hold them without
+    /// batching (each macro write an entry of one word; a skip to the ring's start where that
+    /// ring would skip) and publishes where that ring would have been published: every write
+    /// reaches the back no later than its own entry did (a batch's header word, and the ring's
+    /// own skips, which come elsewhere, are not counted).
+    void Count(size_t words) {
+        const size_t index = unbatched_position & RingMask;
+        if (index + words > RingWords) {
+            unbatched_position += RingWords - index;
+        }
+        unbatched_position += words;
+        if (unbatched_position - unbatched_published >= publish_every) {
+            Publish();
+        }
+    }
+    /// Publish without the held writes or the count (WaitForSpace: a full ring, which the
+    /// ring without batching filled elsewhere).
+    void PublishRing();
     /// Room for any entry but a batch: the macro writes held so far go before it.
     u64* ReserveEntry(size_t words) {
         FlushPending();
@@ -222,6 +244,9 @@ private:
     std::array<u64, MaxPending> pending{};
     u32 pending_count{};
     bool batch_writes{};
+    /// See Count: the write position and the last published one without batching.
+    u64 unbatched_position{};
+    u64 unbatched_published{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};

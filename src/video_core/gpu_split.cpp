@@ -149,6 +149,8 @@ void GpuSplit::Stop() {
     publish_every = PublishEvery;
     front_engine = nullptr;
     pending_count = 0;
+    unbatched_position = 0;
+    unbatched_published = 0;
     back_engine = nullptr;
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
@@ -174,7 +176,8 @@ void GpuSplit::WaitForSpace(size_t words) {
     if (write_position + words - consumed_cache <= RingWords) {
         return;
     }
-    Publish();
+    // Reserve runs with no macro write held (ReserveEntry, WritePending, MacroWrite unbatched).
+    PublishRing();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
@@ -191,6 +194,11 @@ void GpuSplit::WaitForSpace(size_t words) {
 
 void GpuSplit::Publish() {
     FlushPending();
+    unbatched_published = unbatched_position;
+    PublishRing();
+}
+
+void GpuSplit::PublishRing() {
     if (published_local == write_position) {
         return;
     }
@@ -266,7 +274,8 @@ void GpuSplit::WritePending() {
     u64* const entry = Reserve(1 + size_t{count});
     entry[0] = static_cast<u64>(Kind::Batch) | (u64{count} << 32);
     std::memcpy(entry + 1, pending.data(), size_t{count} * sizeof(u64));
-    Commit(1 + size_t{count});
+    // Counted as they were held (Count): no publish here.
+    write_position += 1 + size_t{count};
 }
 
 void GpuSplit::DeferFunction(std::function<void()>&& func) {
