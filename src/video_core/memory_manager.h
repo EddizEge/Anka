@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -118,7 +119,13 @@ public:
      * being flushed.
      */
     void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
-    void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+    /// `caches_told`: the caller hands the range to every cache itself (else its pages count as
+    /// written around the caches, Tegra::Nx2MarkUntrackedWrite).
+    void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size,
+                          bool caches_told = false);
+
+    /// Notes the device pages of a GPU range written around the caches (Tegra::Nx2UntrackedWritten).
+    void MarkUntracked(GPUVAddr gpu_addr, std::size_t size) const;
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 
     /**
@@ -171,6 +178,12 @@ public:
 
     /// Hands the ranges written since the last call to the caches. Returns whether there were any.
     bool FlushCaching();
+
+    /// EDEN_NX2_SAME_SKIP (Maxwell3D::ProcessCBMultiData): a constant buffer write of the bytes
+    /// memory holds, within one 4 KiB page at `device_addr`, left unmade. False: it must be made
+    /// (too many left since the last FlushCaching). The next FlushCaching invalidates it as if it
+    /// had been made where that could matter by then (ReviewSkippedWrites).
+    bool NoteSkippedWrite(GPUVAddr gpu_addr, DAddr device_addr, u32 size);
 
     /// Leaves the caches' invalidation of a range already written for the next FlushCaching
     /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
@@ -272,6 +285,18 @@ private:
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
     u64 cached_writes{};
+
+    /// See NoteSkippedWrite.
+    struct SkippedWrite {
+        GPUVAddr gpu_addr;
+        DAddr device_addr;
+        u32 size;
+    };
+    std::array<SkippedWrite, 16> skipped_writes{};
+    u32 skipped_count{};
+    u64 skipped_epoch{};   ///< The rasterizer's WorkEpoch at the first of them
+    u64 skipped_flushes{}; ///< Tegra::g_nx2_flushes then
+    void ReviewSkippedWrites();
 
     static std::atomic<size_t> unique_identifier_generator;
 

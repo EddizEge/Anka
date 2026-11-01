@@ -112,6 +112,9 @@ public:
     void NoteEngineWork() override {
         NoteLightWork();
     }
+    [[nodiscard]] u64 WorkEpoch() const noexcept override {
+        return light_epoch.load(std::memory_order_seq_cst);
+    }
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;

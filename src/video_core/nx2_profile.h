@@ -241,6 +241,9 @@ enum class Counter : u32 {
     LightUniformMismatches,  ///< Of LightUniformVerified: the full setup differed (logged)
     LightUniformSlicesSame,  ///< Uniform buffers the full setup streamed elsewhere, same bytes
     SameWritesSkipped, ///< Constant buffer writes of held bytes not made (EDEN_NX2_SAME_SKIP)
+    SameWritesMade,    ///< Counted ones made all the same: across pages, or too many held
+    SameWritesInvalidatedLater, ///< Skipped, then invalidated at FlushCaching (work in between)
+    SameWritesUntracked, ///< Held bytes not counted: a page written around the caches
     Count,
 };
 
@@ -449,8 +452,13 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::LightUniformSlicesSame),
                             TopValues(histograms[static_cast<size_t>(Histogram::LightUniformBlocking)],
                                       method, 6));
-        line += fmt::format(" | constant buffer writes of held bytes skipped {:.0f}",
-                            counter(Counter::SameWritesSkipped));
+        line += fmt::format(" | constant buffer writes of held bytes skipped {:.0f} (invalidated "
+                            "later {:.0f}), made {:.0f}, not counted (pages written around the "
+                            "caches) {:.0f}",
+                            counter(Counter::SameWritesSkipped),
+                            counter(Counter::SameWritesInvalidatedLater),
+                            counter(Counter::SameWritesMade),
+                            counter(Counter::SameWritesUntracked));
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",

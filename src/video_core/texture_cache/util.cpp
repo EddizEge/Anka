@@ -570,6 +570,8 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
             SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
                            num_tiles.depth, block.height, block.depth, 1, gpu_memory.UsesNativeTiling());
         }
+        // Written in place, past the buffer cache.
+        gpu_memory.MarkUntracked(gpu_addr + guest_offset, subresource_size);
 
         host_offset += host_bytes_per_layer;
         guest_offset += layer_stride;

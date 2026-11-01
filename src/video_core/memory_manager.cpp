@@ -17,6 +17,7 @@
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
@@ -362,6 +363,8 @@ T MemoryManager::Read(GPUVAddr addr) const {
 
 template <typename T>
 void MemoryManager::Write(GPUVAddr addr, T data) {
+    // Semaphore and report words: no cache is told.
+    MarkUntracked(addr, sizeof(T));
     if (auto page_pointer{GetPointer(addr)}; page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
         std::memcpy(page_pointer, &data, sizeof(T));
@@ -596,7 +599,22 @@ void MemoryManager::WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, s
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, which, false);
 }
 
-void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
+void MemoryManager::MarkUntracked(GPUVAddr gpu_addr, std::size_t size) const {
+    if (size == 0) {
+        return;
+    }
+    for (GPUVAddr page = gpu_addr & ~GPUVAddr{0xfff}; page < gpu_addr + size; page += 0x1000) {
+        if (const std::optional<DAddr> device = GpuToCpuAddress(page)) {
+            Tegra::Nx2MarkUntrackedWrite(*device, 1);
+        }
+    }
+}
+
+void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size,
+                                     bool caches_told) {
+    if (!caches_told) {
+        MarkUntracked(gpu_dest_addr, size);
+    }
     if (WriteSmall(gpu_dest_addr, src_buffer, size)) {
         return;
     }
@@ -880,7 +898,47 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
     split(0, 0, 0);
 }
 
+bool MemoryManager::NoteSkippedWrite(GPUVAddr gpu_addr, DAddr device_addr, u32 size) {
+    if (skipped_count == skipped_writes.size()) {
+        return false;
+    }
+    if (skipped_count == 0) {
+        skipped_epoch = rasterizer->WorkEpoch();
+        skipped_flushes = Tegra::g_nx2_flushes.load(std::memory_order_relaxed);
+    }
+    skipped_writes[skipped_count++] = {gpu_addr, device_addr, size};
+    return true;
+}
+
+void MemoryManager::ReviewSkippedWrites() {
+    // A skipped write's invalidation would run now. When it was skipped it would have changed
+    // nothing (Maxwell3D::IsLightSameWrite: the bytes memory held, on pages not written around
+    // the caches, no cache holding GPU-written data or a query result there). What could change
+    // that since is work: what writes through the caches does so only after a FlushCaching (draws
+    // and everything else run here or in another address space) or bumps the rasterizer's
+    // WorkEpoch (CPU writes, flushes, unmaps, fences, clears, dispatches, copies, queries), and
+    // what writes around them marks its pages (semaphores too, which bump nothing). If either
+    // counter moved since the first skip, every skipped write is invalidated as if it had been
+    // made: what happened before. Otherwise only those on pages written around the caches since.
+    // Each counts as a cached write that is no same write, so no light draw follows it.
+    const bool work = rasterizer->WorkEpoch() != skipped_epoch ||
+                      Tegra::g_nx2_flushes.load(std::memory_order_relaxed) != skipped_flushes;
+    for (u32 i = 0; i < skipped_count; ++i) {
+        const SkippedWrite& write = skipped_writes[i];
+        if (work || Tegra::Nx2UntrackedWritten(write.device_addr, write.size)) {
+            ++cached_writes;
+            accumulator.Add(write.gpu_addr, write.size);
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesInvalidatedLater, 1);
+        }
+    }
+    skipped_count = 0;
+}
+
 bool MemoryManager::FlushCaching() {
+    if (skipped_count != 0) [[unlikely]] {
+        ReviewSkippedWrites();
+    }
+    Tegra::g_nx2_flushes.fetch_add(1, std::memory_order_relaxed);
     // EDEN_NX2_INVAL_SKIP=0: every accumulated range translated page by page and handed to the
     // caches as collected.
     static const bool merge_ranges = [] {

@@ -59,9 +59,54 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     }
 }
 
+// Device pages written around the caches: semaphore and query results, unsafe block writes
+// (cache downloads, DMA fills), DMA copies through the buffer cache, in-place texture swizzles. A
+// cache may hold older bytes there, which an invalidation of the page brings up to date. The
+// light path counts no constant buffer write there as a same write (Maxwell3D::IsLightSameWrite),
+// and EDEN_NX2_SAME_SKIP invalidates a skipped one if its page gets written so before the next
+// FlushCaching (MemoryManager::ReviewSkippedWrites). Same layout as the GPU-written bits; the
+// bits never clear within a session.
+inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64>
+    g_nx2_untracked_pages{};
+
+inline void Nx2MarkUntrackedWrite(u64 device_address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    const u64 last = (std::min)((device_address + size - 1) >> Nx2WrittenPageBits,
+                                u64{g_nx2_untracked_pages.size() * 64 - 1});
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
+        auto& word = g_nx2_untracked_pages[page / 64];
+        const u64 bit = u64{1} << (page % 64);
+        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
+            word.fetch_or(bit, std::memory_order_relaxed);
+        }
+    }
+}
+
+[[nodiscard]] inline bool Nx2UntrackedWritten(u64 device_address, u64 size) {
+    const u64 first = device_address >> Nx2WrittenPageBits;
+    const u64 last = (device_address + (std::max)(size, u64{1}) - 1) >> Nx2WrittenPageBits;
+    for (u64 page = first; page <= last; ++page) {
+        if (page >= g_nx2_untracked_pages.size() * 64) {
+            return true;
+        }
+        if ((g_nx2_untracked_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// FlushCaching calls so far, of every GPU address space (EDEN_NX2_SAME_SKIP).
+inline std::atomic<u64> g_nx2_flushes{};
+
 /// A new emulation session starts: no page has been written by its GPU yet.
 inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
+        word.store(0, std::memory_order_relaxed);
+    }
+    for (auto& word : g_nx2_untracked_pages) {
         word.store(0, std::memory_order_relaxed);
     }
 }

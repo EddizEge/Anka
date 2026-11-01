@@ -336,6 +336,8 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
         tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
     tmp.SetAddressAndSize(*cpu_dest_address, amount);
+    // Guest memory written past the texture cache.
+    Tegra::Nx2MarkUntrackedWrite(*cpu_dest_address, amount);
     return true;
 }
 
@@ -808,6 +810,7 @@ void BufferCache<P>::PopAsyncBuffers() {
         const u64 dst_offset = copy.dst_offset - base_offset;
         const u8* read_mapped_memory = base + dst_offset;
         async_downloads.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end, s32) {
+            Tegra::Nx2MarkUntrackedWrite(start, end - start);
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
         });
@@ -2378,6 +2381,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
+        Tegra::Nx2MarkUntrackedWrite(device_addr, download.copy.size);
         device_memory.WriteBlockUnsafe(
             device_addr, mapped_memory + (download.copy.dst_offset - download_staging.offset),
             download.copy.size);
@@ -2431,6 +2435,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             // Undo the modified offset
             const u64 dst_offset = copy.dst_offset - download_staging.offset;
             const u8* copy_mapped_memory = mapped_memory + dst_offset;
+            Tegra::Nx2MarkUntrackedWrite(copy_device_addr, copy.size);
             device_memory.WriteBlockUnsafe(copy_device_addr, copy_mapped_memory, copy.size);
         }
     } else {
@@ -2438,6 +2443,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
         for (const BufferCopy& copy : copies) {
             buffer.ImmediateDownload(copy.src_offset, immediate_buffer.subspan(0, copy.size));
             const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
+            Tegra::Nx2MarkUntrackedWrite(copy_device_addr, copy.size);
             device_memory.WriteBlockUnsafe(copy_device_addr, immediate_buffer.data(), copy.size);
         }
     }

@@ -3241,6 +3241,7 @@ public:
         /// GPU-written data for (they change nothing a draw sees). Counted only while `armed`.
         u64 same_writes{};
         u64 cb_writes{}; ///< Constant buffer data writes (ProcessCBMultiData), each one cached write
+        u64 same_device{}; ///< Device address of the last same write counted (EDEN_NX2_SAME_SKIP)
         /// The GPU ranges they wrote since the last draw, adjacent ones merged; written_count
         /// past the array's size: more ranges than it keeps.
         std::array<std::pair<GPUVAddr, u32>, 8> written{};

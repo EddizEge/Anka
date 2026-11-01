@@ -108,6 +108,14 @@ public:
     /// reach no cache).
     virtual void NoteEngineWork() {}
 
+    /// EDEN_NX2_SAME_SKIP: changes with any work but draws that may change what a cache holds
+    /// (CPU writes, flushes, unmaps, fences, frames, channel changes, clears, dispatches, copies,
+    /// queries). A rasterizer without the light path counts no same write (Maxwell3D::
+    /// LightTracking stays unarmed), so no write is skipped there.
+    [[nodiscard]] virtual u64 WorkEpoch() const noexcept {
+        return 0;
+    }
+
     virtual RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
