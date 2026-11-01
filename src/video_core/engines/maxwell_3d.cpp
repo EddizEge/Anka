@@ -422,7 +422,39 @@ size_t Maxwell3D::EstimateIndexBufferSize() {
     auto const max_size = 1ull << (byte_size * CHAR_BIT);
     auto const upper_cap = GetMaxCurrentVertices() * 4 * byte_size;
     auto const lower_cap = std::min<size_t>(size_t(end_address - start_address), upper_cap);
-    return std::min<size_t>(memory_manager.GetMemoryLayoutSize(start_address, byte_size * max_size) / byte_size, lower_cap);
+    // EDEN_NX2_LAYOUT_MEMO=0: the layout size is looked up every time (a lock and a range map
+    // walk, once per indirect draw: ~70,000 a second on Donkey Kong Bananza's wide views). It
+    // depends only on the start and the GPU mappings (kind_map, which only PageTableOp and
+    // BigPageTableOp change, each bumping MappingEpoch); max_size is not read. The epoch is read
+    // before the lookup, so a change meanwhile leaves a memo no later call matches.
+    static const bool layout_memo = [] {
+        const char* value = std::getenv("EDEN_NX2_LAYOUT_MEMO");
+        return value == nullptr || value[0] != '0';
+    }();
+    size_t layout_size;
+    if (layout_memo) {
+        struct LayoutMemo {
+            size_t owner = ~size_t{0};
+            GPUVAddr address{};
+            u64 epoch{};
+            size_t size{};
+        };
+        thread_local LayoutMemo memo;
+        const u64 epoch = memory_manager.MappingEpoch();
+        if (memo.owner != memory_manager.GetID() || memo.address != start_address ||
+            memo.epoch != epoch) {
+            memo = LayoutMemo{
+                .owner = memory_manager.GetID(),
+                .address = start_address,
+                .epoch = epoch,
+                .size = memory_manager.GetMemoryLayoutSize(start_address, byte_size * max_size),
+            };
+        }
+        layout_size = memo.size;
+    } else {
+        layout_size = memory_manager.GetMemoryLayoutSize(start_address, byte_size * max_size);
+    }
+    return std::min<size_t>(layout_size / byte_size, lower_cap);
 }
 
 u32 Maxwell3D::ProcessShadowRam(u32 method, u32 argument) {
