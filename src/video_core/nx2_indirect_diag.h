@@ -24,8 +24,9 @@
 // differs from the one before it in its vertex streams, attribute formats, index buffer and the
 // rest of the registers. Draws whose streams only start elsewhere in the same buffers, all by the
 // same whole number of vertices, could share one binding with the difference added to each
-// record's base vertex. Observes only; every 10 s logs one line. EDEN_NX2_INDIRECT_DIAG=0 turns
-// it off (it copies and compares the register file per draw).
+// record's base vertex. Observes only; every 10 s logs one line. Off unless EDEN_NX2_INDIRECT_DIAG
+// is set (not to 0): it copies and compares the register file per draw (~1-1.5 us each, a large
+// share of the profile's own cost).
 namespace VideoCommon::Nx2IndirectDiag {
 
 using Maxwell3D = Tegra::Engines::Maxwell3D;
@@ -43,7 +44,7 @@ inline constexpr u32 InstancedBase = offsetof(Regs, vertex_stream_instances) / s
 inline bool Enabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_INDIRECT_DIAG");
-        return Nx2Profile::Enabled() && (value == nullptr || value[0] != '0');
+        return Nx2Profile::Enabled() && value != nullptr && value[0] != '0';
     }();
     return enabled;
 }

@@ -16,6 +16,14 @@
 #include "common/logging.h"
 #include "common/cpu_features.h"
 
+#ifdef ARCHITECTURE_x86_64
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+#endif
+
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
 namespace VideoCommon::Nx2Profile {
@@ -82,6 +90,25 @@ inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
 }
 
+// What zones are timed in: the time stamp counter, read without fences or conversion (Now's
+// fenced read and multiply cost several times as much, at ~150,000 zones a second and more on
+// the split's back). Report turns them into nanoseconds by the wall clock over its window; the
+// counter is invariant and shared by the cores where the wall clock reads it. Without it, or with
+// EDEN_NX2_PROFILE_TSC=0: Now().
+inline const bool g_tsc = [] {
+    const char* value = std::getenv("EDEN_NX2_PROFILE_TSC");
+    return value == nullptr || value[0] != '0';
+}();
+
+inline u64 Ticks() {
+#ifdef ARCHITECTURE_x86_64
+    if (g_tsc) {
+        return __rdtsc();
+    }
+#endif
+    return Now();
+}
+
 /// Values noted on the GPU thread, logged per window as the most frequent ones.
 enum class Histogram : u32 {
     IndirectInterposer,  ///< First entry after an unmerged indirect draw (see FrontIndirectDraw)
@@ -100,12 +127,13 @@ struct HistogramData {
 };
 
 struct ThreadData {
-    std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
+    std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ticks{}; ///< See Ticks
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
     std::array<u64, 96> counters{}; ///< See Counter
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
-    u64 child_ns{};    ///< Time of the zones nested in the current one
-    u64 window_start{};
+    u64 child_ticks{}; ///< Time of the zones nested in the current one
+    u64 window_start{};       ///< Now() when the window began
+    u64 window_start_ticks{}; ///< Ticks() then
 };
 
 inline thread_local ThreadData t_data;
@@ -116,21 +144,21 @@ public:
         if (!enabled) {
             return;
         }
-        parent_child_ns = t_data.child_ns;
-        t_data.child_ns = 0;
-        start = Now();
+        parent_child_ticks = t_data.child_ticks;
+        t_data.child_ticks = 0;
+        start = Ticks();
     }
 
     ~Scope() {
         if (!enabled) {
             return;
         }
-        const u64 elapsed = Now() - start;
+        const u64 elapsed = Ticks() - start;
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
-        data.exclusive_ns[index] += elapsed - data.child_ns;
+        data.exclusive_ticks[index] += elapsed - data.child_ticks;
         ++data.count[index];
-        data.child_ns = parent_child_ns + elapsed;
+        data.child_ticks = parent_child_ticks + elapsed;
     }
 
     Scope(const Scope&) = delete;
@@ -140,7 +168,7 @@ private:
     Zone zone;
     bool enabled;
     u64 start{};
-    u64 parent_child_ns{};
+    u64 parent_child_ticks{};
 };
 
 /// Amounts counted on the GPU thread, logged per second with the zones.
@@ -284,28 +312,39 @@ inline void Report(const char* thread_name = "GPU thread") {
     }
     auto& data = t_data;
     const u64 now = Now();
+    const u64 now_ticks = Ticks();
     if (data.window_start == 0) {
         data.window_start = now;
-        data.child_ns = 0;
+        data.window_start_ticks = now_ticks;
+        data.child_ticks = 0;
         return;
     }
     const u64 window = now - data.window_start;
     if (window < 10'000'000'000ULL) {
         return;
     }
+    // The zones' ticks in nanoseconds, by the window measured both ways.
+    const u64 window_ticks = now_ticks - data.window_start_ticks;
+    const double ns_per_tick =
+        window_ticks != 0 ? static_cast<double>(window) / static_cast<double>(window_ticks) : 0.0;
+    std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
+    for (size_t i = 1; i < exclusive_ns.size(); ++i) {
+        exclusive_ns[i] =
+            static_cast<u64>(static_cast<double>(data.exclusive_ticks[i]) * ns_per_tick);
+    }
     // Time in no zone at all is the wall time minus the zones' totals.
     u64 zoned{};
-    for (size_t i = 1; i < data.exclusive_ns.size(); ++i) {
-        zoned += data.exclusive_ns[i];
+    for (size_t i = 1; i < exclusive_ns.size(); ++i) {
+        zoned += exclusive_ns[i];
     }
-    data.exclusive_ns[0] = window > zoned ? window - zoned : 0;
+    exclusive_ns[0] = window > zoned ? window - zoned : 0;
     std::string line;
-    for (size_t i = 0; i < data.exclusive_ns.size(); ++i) {
-        if (data.exclusive_ns[i] == 0 && data.count[i] == 0) {
+    for (size_t i = 0; i < exclusive_ns.size(); ++i) {
+        if (exclusive_ns[i] == 0 && data.count[i] == 0) {
             continue;
         }
         // Per second of wall time: milliseconds spent and calls made.
-        const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / window;
+        const double ms = static_cast<double>(exclusive_ns[i]) * 1000.0 / window;
         const double calls = static_cast<double>(data.count[i]) * 1e9 / window;
         line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
     }
@@ -421,6 +460,7 @@ inline void Report(const char* thread_name = "GPU thread") {
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
+    data.window_start_ticks = now_ticks;
 }
 
 } // namespace VideoCommon::Nx2Profile
