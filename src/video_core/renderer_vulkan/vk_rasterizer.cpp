@@ -334,17 +334,51 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
                 }
                 std::vector<u64> pointers(count);
                 gpu_memory->ReadBlockUnsafe(list_begin, pointers.data(), list_bytes);
-                static constexpr std::array<u32, 5> record{0, 1, 0, 0, 0};
-                const std::span<const u8> bytes{reinterpret_cast<const u8*>(record.data()),
-                                                sizeof(record)};
+                // Records the list points at one after another within a 4 KiB page are reset
+                // with one inline write (the caches see the same bytes, in the same order).
+                // EDEN_NX2_RESET_RUNS=0: one write per record.
+                static const bool runs_enabled = [] {
+                    const char* value = std::getenv("EDEN_NX2_RESET_RUNS");
+                    return value == nullptr || value[0] != '0';
+                }();
+                static constexpr u32 RecordSize = 5 * sizeof(u32);
+                static constexpr u32 MaxRun = 4096 / RecordSize;
+                static const auto run_words = [] {
+                    std::array<u32, 5 * MaxRun> words{};
+                    for (u32 i = 0; i < MaxRun; ++i) {
+                        words[i * 5 + 1] = 1;
+                    }
+                    return words;
+                }();
+                GPUVAddr run_start = 0;
+                u32 run_records = 0;
+                const auto write_run = [&] {
+                    if (run_records == 0) {
+                        return;
+                    }
+                    const size_t run_bytes = size_t{run_records} * RecordSize;
+                    AccelerateInlineToMemory(
+                        run_start, run_bytes,
+                        {reinterpret_cast<const u8*>(run_words.data()), run_bytes});
+                    run_records = 0;
+                };
                 u32 written = 0;
                 for (const u64 pointer : pointers) {
-                    if (pointer == 0 || !gpu_memory->IsFullyMappedRange(pointer, sizeof(record))) {
+                    if (pointer == 0 || !gpu_memory->IsFullyMappedRange(pointer, RecordSize)) {
                         continue;
                     }
-                    AccelerateInlineToMemory(pointer, sizeof(record), bytes);
                     ++written;
+                    if (runs_enabled && run_records != 0 && run_records < MaxRun &&
+                        pointer == run_start + u64{run_records} * RecordSize &&
+                        (run_start >> 12) == ((pointer + RecordSize - 1) >> 12)) {
+                        ++run_records;
+                        continue;
+                    }
+                    write_run();
+                    run_start = pointer;
+                    run_records = 1;
                 }
+                write_run();
                 static u32 reset_logs{};
                 if (reset_logs < 5) {
                     ++reset_logs;

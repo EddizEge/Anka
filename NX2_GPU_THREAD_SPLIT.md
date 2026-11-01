@@ -61,3 +61,16 @@ with stage 2, 50,000-66,500 with stage 3. The front waits ~4,000-5,000 times a s
 acquires, MME DMA reads); the back still spends ~200 ms a second outside its zones (ring dispatch,
 method sink). Clean A/B (NX2_NOTES row 145): 1.46x throughput, frames 17% shorter; on by
 default since. The back is ~92% busy, ~53% of it draw setup: the next step is there, not the ring.
+
+## Fewer draw setups on the back (2026-11-01, Donkey Kong Bananza)
+
+A sampling profile of the back (far view, before fbedc9a07) put ~80% of it in draw setup, spread
+over a dozen steps of a few percent each; no single step left to cache. The terrain's indexed
+indirect draws (Maxwell3D::FrontIndirectDraw, one per 5-word record) were ~22% of the back.
+NVN draws several records with one macro call each and nothing in between, so the front now
+merges a call into the previous one's entry while that entry is unpublished and only its own
+resets followed it: the back sets up once and records one vkCmdDrawIndexedIndirect with a draw
+count and stride (multiDrawIndirect is mandatory). Records must follow at one stride (20-256
+bytes), up to 256 a batch. `EDEN_NX2_INDIRECT_BATCH=0` turns it off; the profile line counts
+merged calls. The reset fix's records (vk_rasterizer.cpp) are written in runs of adjacent
+records within a page instead of one inline write each (`EDEN_NX2_RESET_RUNS=0`).

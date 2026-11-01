@@ -90,6 +90,34 @@ public:
     }
     void DeferFunction(std::function<void()>&& func);
 
+    /// Defer, returning where the copy of `func` went. Until Published(start) the back cannot
+    /// see it: the front may still change the copy, e.g. merge a following draw into it.
+    template <typename Func>
+    u64* DeferEditable(const Func& func, u64& start) {
+        static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
+        constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
+        u64* const entry = Reserve(2 + payload);
+        // After a skip to the ring's start (ReserveSlow) too, the entry is at write_position.
+        start = write_position;
+        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
+        std::memcpy(entry + 2, &func, sizeof(Func));
+        Commit(2 + payload);
+        return entry + 2;
+    }
+    /// Front: the position the next entry goes to.
+    [[nodiscard]] u64 WritePosition() const {
+        return write_position;
+    }
+    /// Front: whether the entry starting at `position` may already be visible to the back.
+    [[nodiscard]] bool Published(u64 position) const {
+        return position < published_local;
+    }
+    /// Front: changes with every Stop (positions and the ring start over).
+    [[nodiscard]] u64 Session() const {
+        return session;
+    }
+
     /// EDEN_NX2_SPLIT_CHECK=1 (debug): reports, with its stack, a thread other than the back
     /// using back-owned state (the Vulkan scheduler) while the back runs entries.
     static inline bool check_owner{};
@@ -158,6 +186,7 @@ private:
     u64 write_position{};
     u64 published_local{};
     u64 consumed_cache{};
+    u64 session{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};

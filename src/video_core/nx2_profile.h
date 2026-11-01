@@ -141,6 +141,7 @@ enum class Counter : u32 {
     HleIndirectDraws, ///< NVN indexed indirect draws whose record the host GPU reads
     IndirectBarriers, ///< Barriers before indirect draws (buffers written since the last one)
     EmptyDraws,       ///< Draws with no indices, vertices or instances
+    HleIndirectMerged, ///< Of HleIndirectDraws: joined the previous call's multi-draw
 };
 
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
@@ -206,8 +207,8 @@ inline void Report(const char* thread_name = "GPU thread") {
                         rate(8), rate(9), rate(11), rate(10));
     line += fmt::format(" | written command lists {:.0f} ({:.0f} waited, {:.0f} flushed)", rate(12),
                         rate(14), rate(13));
-    line += fmt::format(" | indirect draws from GPU records {:.0f} ({:.0f} barriers) | empty draws {:.0f}",
-                        rate(15), rate(16), rate(17));
+    line += fmt::format(" | indirect draws from GPU records {:.0f} ({:.0f} merged, {:.0f} barriers) | empty draws {:.0f}",
+                        rate(15), rate(18), rate(16), rate(17));
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
