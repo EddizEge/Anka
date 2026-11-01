@@ -226,6 +226,7 @@ faulting stack as module+offset, then a minidump), `EDEN_NX2_AUTO_STUB`, `EDEN_N
 `EDEN_NX2_SKIP_SAME=0` (row 135),
 `EDEN_NX2_MME_JIT=0` (row 140),
 `EDEN_NX2_SPLIT=0/1` (default 2), `EDEN_NX2_SPLIT_VERIFY=1`, `EDEN_NX2_SPLIT_CHECK=1`, `EDEN_NX2_SPLIT_SKIP=0` (rows 142-145),
+`EDEN_NX2_PRESENT_DIAG=1` (vi2 229 request words, shown-interval histogram, vi2 call counts), `EDEN_NX2_PRESENT_INTERVAL=<n>` / `EDEN_NX2_PRESENT_INTERVAL_WORD=<word>[:<shift>[:<bits>]]` (present at most every n vblanks), `EDEN_NX2_VBLANK_GRID=1/2` (multicore only; 1: flip on the 60 Hz vsync grid, which may hold any frame up to one vblank; 2: round frame times up to 16.7/33.3 ms, slower frames unchanged; all off by default: pacing as before),
 `EDEN_NX2_FRAME_CAPTURE=<dir>` (every 120th presented frame as TGA), `EDEN_NX2_PB_CHECK`
 (pushbuffer entries changed between submit and execution), `EDEN_NX2_QUERY_TRACE` (every GPU
 report/semaphore write). `C:\dev\crashrun.sh` runs eden-cli under cdb and prints the crash stack;

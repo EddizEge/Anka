@@ -1004,6 +1004,14 @@ public:
         }
     }
 
+    // EDEN_NX2_PRESENT_DIAG: count every request and log its words the first time they are seen.
+    Result HandleSyncRequest(Kernel::KServerSession& session, HLERequestContext& ctx) override {
+        if (PresentDiagEnabled() && ctx.IsTipc()) {
+            DiagRequest(ctx);
+        }
+        return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+    }
+
 private:
     // 229(u64 client token, u32 slot, u32 image, ...fences): result, u64 mask of buffer slots the
     // client may acquire next, four zero words. Nothing is shown yet; every slot is handed back
@@ -1038,8 +1046,11 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24]);
         const auto composited = std::chrono::steady_clock::now();
-        PaceToVblank();
+        PaceToVblank(PresentInterval(w));
         const auto paced = std::chrono::steady_clock::now();
+        if (PresentDiagEnabled()) {
+            DiagPresent(w, entered, waited, composited, paced);
+        }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
         // game is blocked here while Eden's GPU thread catches up (fence) and composites.
         {
@@ -1095,19 +1106,289 @@ private:
     // next vblank instead (title 4 ran at up to 160 fps, its timing and audio with it).
     std::chrono::steady_clock::time_point m_next_vblank{};
 
-    void PaceToVblank() {
+    void PaceToVblank(u32 vblanks) {
         if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
             return;
         }
-        const auto interval = std::chrono::nanoseconds{100'000'000'000LL / 60 / Settings::SpeedLimit()};
+        const long long period = 100'000'000'000LL / 60 / Settings::SpeedLimit();
+        // The grid reads CoreTiming's clock, the wall clock only with multicore (single core: the
+        // guest's ticks, which a sleep here does not advance): otherwise the pacing below.
+        if (VblankGridMode() != 0 && Settings::values.use_multi_core.GetValue()) {
+            PaceToVblankGrid(period, vblanks);
+            return;
+        }
+        const auto interval = std::chrono::nanoseconds{period * vblanks};
         const auto now = std::chrono::steady_clock::now();
         if (now > m_next_vblank + interval) {
-            // Running slower than 60 fps: show at once and don't bank the lost time.
+            // Running slower than 60 fps (60 / vblanks): show at once and don't bank the lost time.
             m_next_vblank = now;
         } else if (now < m_next_vblank) {
             std::this_thread::sleep_until(m_next_vblank);
         }
         m_next_vblank += interval;
+    }
+
+    // EDEN_NX2_PRESENT_INTERVAL=<n> (1-4): hold each present at least n vblanks after the previous
+    // one (at most 60/n fps; 2 is the fixed 30 fps of speed limit 50 without changing the speed
+    // limit). EDEN_NX2_PRESENT_INTERVAL_WORD=<word>[:<shift>[:<bits>]]: take n from that word of
+    // the 229 request (0 counts as 1, never below EDEN_NX2_PRESENT_INTERVAL), once
+    // EDEN_NX2_PRESENT_DIAG has shown which word carries the game's swap interval. Neither set:
+    // 1, the pacing as before.
+    static u32 PresentInterval(const u32* w) {
+        struct Source {
+            u32 minimum{1};
+            u32 word{}; // 0: none
+            u32 shift{};
+            u32 mask{};
+        };
+        static const Source source = [] {
+            Source s{};
+            if (const char* text = std::getenv("EDEN_NX2_PRESENT_INTERVAL")) {
+                s.minimum = static_cast<u32>(std::clamp(std::strtol(text, nullptr, 10), 1L, 4L));
+            }
+            if (const char* text = std::getenv("EDEN_NX2_PRESENT_INTERVAL_WORD")) {
+                char* end{};
+                const unsigned long word = std::strtoul(text, &end, 10);
+                unsigned long shift = 0;
+                unsigned long bits = 32;
+                if (*end == ':') {
+                    shift = std::strtoul(end + 1, &end, 10);
+                }
+                if (*end == ':') {
+                    bits = std::strtoul(end + 1, &end, 10);
+                }
+                // Words 2-5 are the token, slot and image, 22 and 24 the fence.
+                if (word >= 6 && word <= 25 && word != 22 && word != 24 && shift < 32 &&
+                    bits >= 1 && bits <= 32 - shift) {
+                    s.word = static_cast<u32>(word);
+                    s.shift = static_cast<u32>(shift);
+                    s.mask = bits == 32 ? ~0U : (1U << bits) - 1;
+                }
+            }
+            if (s.minimum != 1 || s.word != 0) {
+                LOG_INFO(Service, "nx2:vi2 present interval: at least {} vblanks, word {} >> {} & {:#x}",
+                         s.minimum, s.word, s.shift, s.mask);
+            }
+            return s;
+        }();
+        u32 vblanks = source.minimum;
+        if (source.word != 0) {
+            const u32 value = (w[source.word] >> source.shift) & source.mask;
+            vblanks = (std::max)(vblanks, std::clamp(value, 1U, 4U));
+        }
+        return vblanks;
+    }
+
+    // EDEN_NX2_VBLANK_GRID=1: flip on a 60 Hz vblank grid like the console's double-buffered vsync:
+    // a present waits for the first vblank at least `vblanks` after the previous flip, so every
+    // frame lasts a whole number of vblanks (60, 30, 20 fps...); the grid is the vsync events'
+    // (GetVsyncEvent) when they tick at this rate. =2: round each frame's time since the previous
+    // one up to one or two vblanks (16.7 or 33.3 ms); a frame later than two vblanks is shown at
+    // once, so nothing changes below 30 fps. Like PaceToVblank this holds the guest's present call
+    // on this service thread; Eden's GPU threads go on with the work the game has already
+    // submitted (the previous frame's fence was waited for, not this one's).
+    static int VblankGridMode() {
+        static const int mode = [] {
+            const char* text = std::getenv("EDEN_NX2_VBLANK_GRID");
+            return text != nullptr ? static_cast<int>(std::clamp(std::strtol(text, nullptr, 10), 0L, 2L)) : 0;
+        }();
+        return mode;
+    }
+
+    long long m_grid_period{};        // ns per vblank the grid was set up for, 0: not yet
+    long long m_grid_origin{};        // =1: CoreTiming ns of vblank 0
+    long long m_grid_last{-1};        // =1: vblank index of the last flip, -1: none yet
+    long long m_grid_shown{-1};       // =2: CoreTiming ns the last frame was shown, -1: none yet
+    long long m_vsync_origin_ns{-1};  // CoreTiming ns when the vsync timer started, -1: no timer
+    long long m_vsync_period_ns{};
+
+    void PaceToVblankGrid(long long period, u32 vblanks) {
+        const long long now = system.CoreTiming().GetGlobalTimeNs().count();
+        if (period != m_grid_period) {
+            // First present, or the speed limit changed.
+            m_grid_period = period;
+            m_grid_origin = m_vsync_origin_ns >= 0 && m_vsync_period_ns == period ? m_vsync_origin_ns : now;
+            m_grid_last = -1;
+            m_grid_shown = -1;
+        }
+        long long target = now;
+        if (VblankGridMode() == 2) {
+            const long long elapsed = now - m_grid_shown;
+            if (m_grid_shown >= 0 && elapsed <= (std::max)(vblanks, 2U) * period) {
+                target = m_grid_shown + (std::max<long long>)(vblanks, (elapsed + period - 1) / period) * period;
+            }
+            m_grid_shown = target;
+        } else {
+            const long long since = now - m_grid_origin;
+            long long index = since <= 0 ? 0 : (since + period - 1) / period; // first vblank not before now
+            if (m_grid_last >= 0 && index < m_grid_last + vblanks) {
+                index = m_grid_last + vblanks;
+            }
+            m_grid_last = index;
+            target = m_grid_origin + index * period;
+        }
+        if (target > now) {
+            std::this_thread::sleep_for(std::chrono::nanoseconds{target - now});
+        }
+    }
+
+    // EDEN_NX2_PRESENT_DIAG=1 (off by default): what the game tells the compositor about its frame
+    // timing. Logs (a) all 24 words of a 229 request when a word other than the slot, image and
+    // fence words changed (the first 200 times; changed words marked '*'), with the time since the
+    // previous present; (b) once a second, a histogram of the shown frame intervals, the average
+    // fence and pacing waits, the vsync ticks and how often each vi2 command ran; (c) every 600
+    // presents, the values each 229 word took so far; (d) each vi2 request the first time its
+    // data words are seen (the first 256).
+    static bool PresentDiagEnabled() {
+        static const bool enabled = [] {
+            const char* text = std::getenv("EDEN_NX2_PRESENT_DIAG");
+            return text != nullptr && text[0] != '0';
+        }();
+        return enabled;
+    }
+
+    struct PresentDiag {
+        std::mutex mutex;
+        std::array<u32, 26> words{}; // the previous 229 request
+        bool have_words{};
+        u32 change_lines{};
+        std::array<std::array<u32, 6>, 26> values{}; // distinct values per 229 word
+        std::array<u8, 26> value_counts{};            // 7: more than six
+        std::chrono::steady_clock::time_point last_entered{}, last_paced{}, second{};
+        std::array<u32, 5> shown{}; // shown frame intervals: <17, 17-25, 25-34, 34-50, >50 ms
+        u32 presents{};
+        long long min_us{}, max_us{}, fence_us{}, pace_us{};
+        u32 vsync_ticks{};
+        std::map<u32, u32> calls;
+        std::set<std::vector<u32>> requests;
+    } m_diag;
+
+    void DiagRequest(HLERequestContext& ctx) {
+        const auto* w = ctx.CommandBuffer();
+        const u32 command = ctx.GetCommand();
+        std::scoped_lock lk{m_diag.mutex};
+        ++m_diag.calls[command];
+        if (command == 229 || m_diag.requests.size() >= 256) {
+            return;
+        }
+        // TIPC: data words follow the header, or its handle descriptor (word 1 bit 31).
+        const u32 data = (w[1] & 0x80000000U) == 0
+                             ? 2U
+                             : 3U + ((w[2] & 1U) ? 2U : 0U) + ((w[2] >> 1) & 0xFU) + ((w[2] >> 5) & 0xFU);
+        const u32 size = (std::min)(w[1] & 0x3FFU, 16U);
+        std::vector<u32> key{command};
+        key.insert(key.end(), w + data, w + data + size);
+        if (!m_diag.requests.insert(std::move(key)).second) {
+            return;
+        }
+        std::string text;
+        for (u32 i = 0; i < size; ++i) {
+            text += fmt::format(" [{}]={:#x}", data + i, w[data + i]);
+        }
+        LOG_INFO(Service, "nx2:vi2 diag request {} ({} data words, present #{}):{}{}", command,
+                 w[1] & 0x3FFU, m_presents, text,
+                 m_diag.requests.size() == 256 ? " (further new requests not logged)" : "");
+    }
+
+    void DiagPresent(const u32* w, std::chrono::steady_clock::time_point entered,
+                     std::chrono::steady_clock::time_point waited,
+                     std::chrono::steady_clock::time_point composited,
+                     std::chrono::steady_clock::time_point paced) {
+        const auto to_us = [](auto d) -> long long {
+            return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+        };
+        // Words that change every present: 4 the slot (only its low byte is written, the rest is
+        // stale message data), 5 the image, 22 and 24 the fence.
+        const auto per_frame = [](u32 i) { return i == 4 || i == 5 || i == 22 || i == 24; };
+        std::scoped_lock lk{m_diag.mutex};
+        auto& d = m_diag;
+        const bool first = d.last_entered == std::chrono::steady_clock::time_point{};
+        const long long interval_us = first ? 0 : to_us(entered - d.last_entered);
+        const long long shown_us = first ? 0 : to_us(paced - d.last_paced);
+        d.last_entered = entered;
+        d.last_paced = paced;
+        u32 changed = 0; // bit i: word i differs from the previous request
+        for (u32 i = 2; i < 26; ++i) {
+            if (per_frame(i)) {
+                continue;
+            }
+            if (d.have_words && w[i] != d.words[i]) {
+                changed |= 1U << i;
+            }
+            if (d.value_counts[i] <= 6) {
+                const auto seen = std::span{d.values[i]}.first((std::min<std::size_t>)(d.value_counts[i], 6));
+                if (std::ranges::find(seen, w[i]) == seen.end()) {
+                    if (d.value_counts[i] < 6) {
+                        d.values[i][d.value_counts[i]] = w[i];
+                    }
+                    ++d.value_counts[i];
+                }
+            }
+        }
+        if ((changed != 0 || !d.have_words) && d.change_lines < 200) {
+            ++d.change_lines;
+            std::string text;
+            for (u32 i = 2; i < 26; ++i) {
+                text += fmt::format(" {}[{}]={:#x}", (changed >> i) & 1 ? "*" : "", i, w[i]);
+            }
+            LOG_INFO(Service, "nx2:vi2 diag present #{}, {:.1f} ms after the previous one (shown {:.1f} ms):{}{}",
+                     m_presents, interval_us / 1000.0, shown_us / 1000.0, text,
+                     d.change_lines == 200 ? " (further changes only in the word value lists)" : "");
+        }
+        std::copy(w, w + 26, d.words.begin());
+        d.have_words = true;
+        if ((m_presents % 600) == 0) {
+            std::string text;
+            for (u32 i = 2; i < 26; ++i) {
+                if (per_frame(i) || d.value_counts[i] == 0) {
+                    continue;
+                }
+                text += fmt::format(" [{}]={{", i);
+                for (u32 j = 0; j < (std::min<u32>)(d.value_counts[i], 6); ++j) {
+                    text += fmt::format("{}{:#x}", j != 0 ? "," : "", d.values[i][j]);
+                }
+                text += d.value_counts[i] > 6 ? ",...}" : "}";
+            }
+            LOG_INFO(Service, "nx2:vi2 diag present #{} word values so far:{}", m_presents, text);
+        }
+        if (!first) {
+            const std::size_t bucket = shown_us < 17'000   ? 0
+                                       : shown_us < 25'000 ? 1
+                                       : shown_us < 34'000 ? 2
+                                       : shown_us < 50'000 ? 3
+                                                           : 4;
+            const bool none = d.shown[0] + d.shown[1] + d.shown[2] + d.shown[3] + d.shown[4] == 0;
+            ++d.shown[bucket];
+            d.min_us = none ? shown_us : (std::min)(d.min_us, shown_us);
+            d.max_us = none ? shown_us : (std::max)(d.max_us, shown_us);
+        }
+        ++d.presents;
+        d.fence_us += to_us(waited - entered);
+        d.pace_us += to_us(paced - composited);
+        if (d.second == std::chrono::steady_clock::time_point{}) {
+            d.second = paced;
+        } else if (paced - d.second >= std::chrono::seconds{1}) {
+            const u32 ticks = m_vsync->ticks.load(std::memory_order_relaxed);
+            std::string calls;
+            for (const auto& [command, count] : d.calls) {
+                calls += fmt::format(" {}x{}", command, count);
+            }
+            LOG_INFO(Service,
+                     "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
+                     ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "
+                     "vsync ticks {}, vi2 calls{}",
+                     to_us(paced - d.second) / 1e6, d.presents, d.shown[0], d.shown[1], d.shown[2],
+                     d.shown[3], d.shown[4], d.min_us / 1000.0, d.max_us / 1000.0,
+                     d.fence_us / 1000.0 / d.presents, d.pace_us / 1000.0 / d.presents,
+                     ticks - d.vsync_ticks, calls);
+            d.vsync_ticks = ticks;
+            d.second = paced;
+            d.shown = {};
+            d.presents = 0;
+            d.fence_us = 0;
+            d.pace_us = 0;
+            d.calls.clear();
+        }
     }
 
     void WaitForFrame(u32 fence_id, u32 fence_value) {
@@ -1452,6 +1733,7 @@ private:
                 [vsync_state = m_vsync, &kernel = system.Kernel()](
                     s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                     std::scoped_lock lk{vsync_state->mutex};
+                    vsync_state->ticks.fetch_add(1, std::memory_order_relaxed);
                     for (auto* vsync : vsync_state->events) {
                         vsync->Signal(kernel);
                     }
@@ -1464,6 +1746,9 @@ private:
                 const long long hz = text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 60LL;
                 return 1'000'000'000LL / hz;
             }()};
+            // The timer fires at origin + k * interval (EDEN_NX2_VBLANK_GRID flips on the same grid).
+            m_vsync_origin_ns = system.CoreTiming().GetGlobalTimeNs().count();
+            m_vsync_period_ns = VblankInterval.count();
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
         }
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
@@ -1478,6 +1763,7 @@ private:
     struct VsyncState {
         std::mutex mutex;
         std::vector<Kernel::KEvent*> events;
+        std::atomic<u32> ticks{}; // vblanks signalled (EDEN_NX2_PRESENT_DIAG)
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
