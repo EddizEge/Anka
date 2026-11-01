@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -44,13 +45,58 @@ inline bool Nx2NeedsBufferDownloads() {
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
 
+/// EDEN_NX2_MARK_WORDS=2 (Nx2MarkGpuWritten): `mask` is the bits word `index` gets 64 pages at a
+/// time, `pages` the bits worked out page by page. Logs the first 16 words where they differ and,
+/// at each power of two from 1024 on, how many words were checked and how many differed
+/// (dma_pusher.cpp).
+void Nx2CheckMarkWord(u64 index, u64 mask, u64 pages);
+
 inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
         return;
     }
+    // EDEN_NX2_MARK_WORDS=0: the bits are set a page at a time. A written storage buffer is marked
+    // whole on every draw that binds it (BufferCache::MarkWrittenBuffer; a native binding is a
+    // window of up to 8 MiB, 2,048 pages): a word of 64 pages at a time sets the same bits, each
+    // word written only if one of them is still clear, as each page was. =2: each word's bits are
+    // also worked out page by page as =0 sets them, those are set, and the two are compared
+    // (Nx2CheckMarkWord: the log names the first words that differ; none should). The switch is
+    // read at the first call, without a guarded static's check on every call.
+    static std::atomic<s8> mark_mode{-1};
+    s8 mode = mark_mode.load(std::memory_order_relaxed);
+    if (mode < 0) [[unlikely]] {
+        const char* value = std::getenv("EDEN_NX2_MARK_WORDS");
+        mode = static_cast<s8>(value == nullptr  ? 1
+                               : value[0] == '0' ? 0
+                               : value[0] == '2' ? 2
+                                                 : 1);
+        mark_mode.store(mode, std::memory_order_relaxed);
+    }
+    const u64 first = device_address >> Nx2WrittenPageBits;
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
+    if (mode != 0) {
+        for (u64 index = first / 64; first <= last && index <= last / 64; ++index) {
+            const u64 low = index == first / 64 ? first % 64 : 0;
+            const u64 high = index == last / 64 ? last % 64 : 63;
+            u64 mask = (~u64{0} >> (63 - high)) & (~u64{0} << low);
+            if (mode == 2) [[unlikely]] {
+                u64 pages = 0;
+                for (u64 page = (std::max)(first, index * 64);
+                     page <= (std::min)(last, index * 64 + 63); ++page) {
+                    pages |= u64{1} << (page % 64);
+                }
+                Nx2CheckMarkWord(index, mask, pages);
+                mask = pages;
+            }
+            auto& word = g_nx2_gpu_written_pages[index];
+            if ((word.load(std::memory_order_relaxed) & mask) != mask) {
+                word.fetch_or(mask, std::memory_order_relaxed);
+            }
+        }
+        return;
+    }
+    for (u64 page = first; page <= last; ++page) {
         auto& word = g_nx2_gpu_written_pages[page / 64];
         const u64 bit = u64{1} << (page % 64);
         if ((word.load(std::memory_order_relaxed) & bit) == 0) {

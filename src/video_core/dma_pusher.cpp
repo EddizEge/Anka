@@ -30,6 +30,27 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+void Nx2CheckMarkWord(u64 index, u64 mask, u64 pages) {
+    static std::atomic<u64> checked{};
+    static std::atomic<u64> differed{};
+    const u64 count = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+    u64 differences = differed.load(std::memory_order_relaxed);
+    if (mask != pages) {
+        differences = differed.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (differences <= 16) {
+            LOG_WARNING(HW_GPU,
+                        "GPU-written page bits differ (EDEN_NX2_MARK_WORDS=2): word {:#x} gets "
+                        "{:#018x} 64 pages at a time, {:#018x} page by page",
+                        index, mask, pages);
+        }
+    }
+    if (count >= 1024 && std::has_single_bit(count)) {
+        LOG_INFO(HW_GPU,
+                 "GPU-written page bits (EDEN_NX2_MARK_WORDS=2): {} words checked, {} differed",
+                 count, differences);
+    }
+}
+
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
     : system{system_}
     , memory_manager{memory_manager_}
