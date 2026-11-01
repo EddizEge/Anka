@@ -168,6 +168,27 @@ public:
         return ref.mapped_span;
     }
 
+    /// EDEN_NX2_UBO_REUSE (on unless =0): the buffer cache reads a streamed uniform buffer into
+    /// UniformReuseScratch, then BindMappedUniformBufferReuse binds the slice streamed for the
+    /// same guest range earlier in this scheduler tick when its size and bytes match, or streams
+    /// a new one. Returns whether a slice was reused.
+    [[nodiscard]] static bool UniformReuseEnabled() noexcept {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_UBO_REUSE");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
+    [[nodiscard]] std::span<u8> UniformReuseScratch(u32 size) {
+        if (uniform_reuse_scratch.size() < size) {
+            uniform_reuse_scratch.resize((std::max<size_t>)(size, 4096));
+        }
+        return {uniform_reuse_scratch.data(), size};
+    }
+
+    bool BindMappedUniformBufferReuse(DAddr device_addr, u32 size);
+
     [[nodiscard]] VkDeviceSize SparseAlignmentFor(bool sparse_compatible) const noexcept {
         if (!sparse_compatible || !multi_range_buffers.use_sparse) {
             return 0;
@@ -268,6 +289,21 @@ private:
     MultiRangeBufferCache multi_range_buffers;
     boost::container::small_vector<MultiRangeSource, 16> multi_range_sources;
     VkDeviceSize multi_range_total{};
+
+    /// Uniform buffer slices streamed for EDEN_NX2_UBO_REUSE, direct-mapped by guest address,
+    /// each with a copy of the bytes it holds; valid only in the tick they were streamed in.
+    struct UniformSlice {
+        DAddr device_addr{};
+        u64 tick = (std::numeric_limits<u64>::max)();
+        VkBuffer buffer{};
+        VkDeviceAddress buffer_address{};
+        u32 offset{};
+        u32 size{};
+        std::vector<u8> bytes;
+    };
+    static constexpr u32 UNIFORM_SLICE_BITS = 7;
+    std::array<UniformSlice, size_t{1} << UNIFORM_SLICE_BITS> uniform_slices{};
+    std::vector<u8> uniform_reuse_scratch;
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();

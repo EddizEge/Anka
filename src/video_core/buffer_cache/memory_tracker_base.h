@@ -140,6 +140,10 @@ public:
     template <typename Func>
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, Func&& func) {
         IteratePages<true>(query_cpu_range, query_size, [&func](Manager* manager, u64 offset, size_t size) {
+            // EDEN_NX2_SYNC_SKIP: no call when no covered word can hold CPU or Untracked bits.
+            if (!manager->MayHaveCpuDirtyWords(offset, size)) {
+                return;
+            }
             manager->ForEachModifiedRange(Type::CPU, true, manager->cpu_addr + offset, size, func);
         });
     }

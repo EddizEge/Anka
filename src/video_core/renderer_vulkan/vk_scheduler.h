@@ -344,6 +344,9 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
+    bool wake_next_dispatch{}; ///< The last dispatched chunk was a submission (recording thread)
+    u32 dispatch_count{};      ///< Dispatched chunks (recording thread, for the wake log)
+    u32 wake_count{};          ///< Worker wakes since the last wake log (recording thread)
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

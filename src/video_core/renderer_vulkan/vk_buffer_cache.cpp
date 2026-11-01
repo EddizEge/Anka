@@ -406,6 +406,35 @@ u32 BufferCacheRuntime::GetUniformBufferAlignment() const {
     return static_cast<u32>(device.GetUniformBufferAlignment());
 }
 
+bool BufferCacheRuntime::BindMappedUniformBufferReuse(DAddr device_addr, u32 size) {
+    // A slice is reused only in the tick that streamed it: the stream buffer hands a range out
+    // again once the host GPU passed the tick its region was stamped with (at least the tick it
+    // was requested in, StagingBufferPool::GetStreamBuffer), staging buffers once IsFree(tick);
+    // draws of one tick go into the same submission. Uniform buffers start on 256-byte
+    // boundaries.
+    UniformSlice& slice =
+        uniform_slices[((device_addr >> 8) * 0x9E3779B97F4A7C15ULL) >> (64 - UNIFORM_SLICE_BITS)];
+    const u8* const bytes = uniform_reuse_scratch.data();
+    if (slice.tick == scheduler.CurrentTick() && slice.device_addr == device_addr &&
+        slice.size == size && std::memcmp(slice.bytes.data(), bytes, size) == 0) {
+        guest_descriptor_queue.AddBuffer(slice.buffer, slice.buffer_address, slice.offset, size);
+        return true;
+    }
+    const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
+    guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address,
+                                     static_cast<u32>(ref.offset), size);
+    std::memcpy(ref.mapped_span.data(), bytes, size);
+    // The scratch becomes this slice's copy of the bytes; the old copy is the next scratch.
+    slice.bytes.swap(uniform_reuse_scratch);
+    slice.device_addr = device_addr;
+    slice.tick = scheduler.CurrentTick();
+    slice.buffer = ref.buffer;
+    slice.buffer_address = ref.device_address;
+    slice.offset = static_cast<u32>(ref.offset);
+    slice.size = size;
+    return false;
+}
+
 u32 BufferCacheRuntime::GetStorageBufferAlignment() const {
     return static_cast<u32>(device.GetStorageBufferAlignment());
 }

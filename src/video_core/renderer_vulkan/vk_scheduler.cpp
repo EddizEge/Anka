@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -13,6 +14,7 @@
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -26,6 +28,24 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
+
+namespace {
+
+// EDEN_NX2_NOTIFY_LAZY=0: wake the sleeping worker for every dispatched chunk, as before;
+// =<n> (2-64): wake it once n chunks are queued. Default 4.
+size_t NotifyLazyDepth() {
+    const char* const value = std::getenv("EDEN_NX2_NOTIFY_LAZY");
+    if (value != nullptr && value[0] == '0') {
+        return 1;
+    }
+    const long depth = value != nullptr ? std::strtol(value, nullptr, 10) : 0;
+    if (depth < 2) {
+        return 4;
+    }
+    return static_cast<size_t>(depth > 64 ? 64 : depth);
+}
+
+} // Anonymous namespace
 
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
                                          vk::CommandBuffer upload_cmdbuf) {
@@ -81,6 +101,10 @@ void Scheduler::WaitWorker() {
     // Ensure the queue is drained.
     {
         std::unique_lock ql{queue_mutex};
+        // DispatchWork may have left chunks queued for the sleeping worker (EDEN_NX2_NOTIFY_LAZY).
+        if (worker_waiting && !work_queue.empty()) {
+            event_cv.notify_all();
+        }
         event_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
@@ -93,16 +117,30 @@ void Scheduler::DispatchWork() {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
     if (chunk && !chunk->Empty()) {
-        // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
-        // draws): skip it while the worker is still busy, it pops the queue before waiting.
+        // Waking the worker is a system call (~2.7% of the GPU thread): skip it while the worker
+        // is still busy, it pops the queue before waiting. EDEN_NX2_NOTIFY_LAZY: while it sleeps,
+        // also let a few chunks queue up and wake it once for all of them (it is idle ~75% of
+        // the time). A submission, the chunk after one (the present hand-off) and WaitWorker
+        // always wake it, so a GPU tick or a presented frame never waits on a sleeping worker.
+        static const size_t lazy_depth = NotifyLazyDepth();
+        const bool has_submit = chunk->HasSubmit();
+        const bool urgent = has_submit || wake_next_dispatch;
+        wake_next_dispatch = has_submit;
         bool wake;
         {
             std::scoped_lock ql{queue_mutex};
             work_queue.push(std::move(chunk));
-            wake = worker_waiting;
+            wake = worker_waiting && (urgent || work_queue.size() >= lazy_depth);
         }
         if (wake) {
             event_cv.notify_all();
+        }
+        ++dispatch_count;
+        wake_count += wake ? 1 : 0;
+        if ((dispatch_count & 0xffff) == 0) {
+            LOG_INFO(Render_Vulkan, "Vulkan worker: {} wakes per 65536 chunks (lazy depth {})",
+                     wake_count, lazy_depth);
+            wake_count = 0;
         }
         AcquireNewChunk();
     }

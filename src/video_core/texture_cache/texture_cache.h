@@ -42,6 +42,18 @@ using VideoCore::Surface::PixelFormat;
 using VideoCore::Surface::SurfaceType;
 using namespace Common::Literals;
 
+// SynchronizeAliases walks an image's aliases only when one of them may have a newer tick
+// (ImageBase::alias_check). EDEN_NX2_ALIAS_LAZY=0 walks them on every use (for comparisons),
+// EDEN_NX2_ALIAS_LAZY=2 also checks every skip against the full walk.
+inline const bool g_nx2_alias_lazy = [] {
+    const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
+    return value == nullptr || value[0] != '0';
+}();
+inline const bool g_nx2_alias_verify = [] {
+    const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
+    return value != nullptr && value[0] == '2';
+}();
+
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : runtime{runtime_}, device_memory{device_memory_} {
@@ -311,6 +323,9 @@ void TextureCache<P>::TickFrame() {
         created_shapes.clear();
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: alias checks {} walked, {} skipped, {} synchronized",
+                 alias_checks_walked, alias_checks_skipped, alias_syncs);
+        alias_checks_walked = alias_checks_skipped = alias_syncs = 0;
     }
     if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
@@ -2216,6 +2231,14 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(copy_object.id);
     }
 
+    // The ticks set above may have moved either way past the aliases': check both sides on their
+    // next use (EDEN_NX2_ALIAS_LAZY; AddImageAlias flagged them too).
+    if (!new_image.aliased_images.empty()) {
+        new_image.alias_check = true;
+        for (const AliasedImage& alias : new_image.aliased_images) {
+            slot_images[alias.id].alias_check = true;
+        }
+    }
     RegisterImage(new_image_id);
     return new_image_id;
 }
@@ -3119,17 +3142,50 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+    // The aliases are now older than this image: flag them for SynchronizeAliases, once until one
+    // of them walks again (ImageBase::aliases_flagged).
+    if (g_nx2_alias_lazy && !image.aliases_flagged && !image.aliased_images.empty()) {
+        image.aliases_flagged = true;
+        for (const AliasedImage& alias : image.aliased_images) {
+            slot_images[alias.id].alias_check = true;
+        }
+    }
 }
 
 template <class P>
 void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     Image& image = slot_images[image_id];
+    if (g_nx2_alias_lazy) {
+        // No alias got a newer tick since the last walk (ImageBase::alias_check): the walk would
+        // find nothing to copy. EDEN_NX2_ALIAS_LAZY=2 checks that (logs a miss and walks).
+        if (!image.alias_check) {
+            const bool missed = g_nx2_alias_verify &&
+                                std::ranges::any_of(image.aliased_images, [&](const AliasedImage& aliased) {
+                                    return image.modification_tick <
+                                           slot_images[aliased.id].modification_tick;
+                                });
+            if (!missed) {
+                ++alias_checks_skipped;
+                return;
+            }
+            if (static u32 logged{}; logged++ < 16) {
+                LOG_ERROR(HW_GPU, "Lazy alias check missed a newer alias of image {:#x}",
+                          image.gpu_addr);
+            }
+        }
+        image.alias_check = false;
+    }
+    ++alias_checks_walked;
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     bool any_modified = True(image.flags & ImageFlagBits::GpuModified);
     u64 most_recent_tick = image.modification_tick;
     for (const AliasedImage& aliased : image.aliased_images) {
         ImageBase& aliased_image = slot_images[aliased.id];
+        if (g_nx2_alias_lazy) {
+            // This image's check is clear again: the alias flags it on its next modification.
+            aliased_image.aliases_flagged = false;
+        }
         if (image.modification_tick < aliased_image.modification_tick) {
             most_recent_tick = (std::max)(most_recent_tick, aliased_image.modification_tick);
             aliased_images.push_back(&aliased);
@@ -3149,6 +3205,17 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         }
     }
     image.modification_tick = most_recent_tick;
+    ++alias_syncs;
+    if (g_nx2_alias_lazy) {
+        // This image is now newer than the aliases it did not copy from: they copy from it on
+        // their next use, as their full walk would.
+        for (const AliasedImage& aliased : image.aliased_images) {
+            ImageBase& other_image = slot_images[aliased.id];
+            if (other_image.modification_tick < most_recent_tick) {
+                other_image.alias_check = true;
+            }
+        }
+    }
     if (any_modified) {
         image.flags |= ImageFlagBits::GpuModified;
     }

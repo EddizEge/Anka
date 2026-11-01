@@ -126,6 +126,13 @@ struct ImageBase {
 
     u64 modification_tick = 0;
     size_t lru_index = SIZE_MAX;
+    /// An alias may have a newer modification_tick: SynchronizeAliases has to walk the aliases.
+    /// Set when an alias gets newer (MarkModification, SynchronizeAliases, JoinImages,
+    /// AddImageAlias), cleared by the walk (EDEN_NX2_ALIAS_LAZY).
+    bool alias_check = true;
+    /// Every alias has alias_check set since this image's last modification flagged them; reset
+    /// by an alias's walk, so MarkModification flags the aliases once until one checks again.
+    bool aliases_flagged = false;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
 

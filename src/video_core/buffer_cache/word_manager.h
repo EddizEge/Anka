@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <limits>
 #include <span>
 #include <utility>
@@ -17,6 +18,7 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 
 namespace VideoCommon {
@@ -48,6 +50,9 @@ struct WordManager {
         u64 const last_word = (~u64{0} << shift) >> shift;
         heap[num_words * size_t(Type::CPU) + num_words - 1] = last_word;
         heap[num_words * size_t(Type::Untracked) + num_words - 1] = last_word;
+        for (size_t index = 0; index < num_words; ++index) {
+            RefreshDirtyWord(index);
+        }
     }
     explicit WordManager() = default;
 
@@ -64,6 +69,108 @@ struct WordManager {
         const size_t word_number = converted_address / BYTES_PER_WORD;
         const size_t amount_pages = converted_address % BYTES_PER_WORD;
         return std::make_pair(word_number, amount_pages / BYTES_PER_PAGE);
+    }
+
+    /// Word and page bounds IterateWords(offset, size) walks; empty when start_word == end_word.
+    struct WordRange {
+        size_t start_word = 0;
+        size_t start_page = 0;
+        size_t end_word = 0;
+        size_t end_page = 0;
+    };
+
+    static WordRange GetWordRange(size_t offset, size_t size) {
+        WordRange range{};
+        const size_t start = size_t(std::max<s64>(s64(offset), 0LL));
+        const size_t end = size_t(std::max<s64>(s64(offset + size), 0LL));
+        if (start >= size_bytes || end <= start) {
+            return range;
+        }
+        auto [start_word, start_page] = GetWordPage(start);
+        auto [end_word, end_page] = GetWordPage(end + BYTES_PER_PAGE - 1ULL);
+        start_word = (std::min)(start_word, num_words);
+        end_word = (std::min)(end_word, num_words);
+        const size_t diff = end_word - start_word;
+        end_word += (end_page + PAGES_PER_WORD - 1ULL) / PAGES_PER_WORD;
+        end_word = (std::min)(end_word, num_words);
+        end_page += diff * PAGES_PER_WORD;
+        range = {start_word, start_page, end_word, end_page};
+        return range;
+    }
+
+    /// One bit per word in [start_word, end_word).
+    static u64 WordRangeBits(const WordRange& range) {
+        const u64 below_end = range.end_word >= 64 ? ~u64{0} : (u64{1} << range.end_word) - 1;
+        const u64 below_start = range.start_word >= 64 ? ~u64{0} : (u64{1} << range.start_word) - 1;
+        return below_end & ~below_start;
+    }
+
+    /// The page mask IterateWords passes for word 'index' of the range.
+    static u64 WordPageMask(const WordRange& range, size_t index) {
+        const size_t page_begin = index == range.start_word ? range.start_page : 0;
+        const size_t page_end = range.end_page - (index - range.start_word) * PAGES_PER_WORD;
+        return ExtractBits(~0ULL, page_begin, page_end);
+    }
+
+    // EDEN_NX2_SYNC_SKIP: a CPU upload query (ForEachModifiedRange with Type::CPU) visits only the
+    // words cpu_dirty_words marks. A word whose CPU and Untracked bits are all clear yields no
+    // range, no bit change and no tracker update there, so skipping it is exact.
+    // EDEN_NX2_SYNC_SKIP=0 walks every word, as before; =2 also checks the bits on every query.
+    static int SyncSkipMode() {
+        if constexpr (num_words > 64) {
+            return 0;
+        } else {
+            static const int mode = [] {
+                const char* value = std::getenv("EDEN_NX2_SYNC_SKIP");
+                return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));
+            }();
+            return mode;
+        }
+    }
+
+    /// Types whose ChangeRegionState / ForEachModifiedRange write the CPU or Untracked words.
+    static constexpr bool TouchesCpuWords(Type type) {
+        return type == Type::CPU || type == Type::CachedCPU || type == Type::Untracked;
+    }
+
+    /// Recomputes bit 'index' of cpu_dirty_words after word 'index' of CPU or Untracked changed.
+    void RefreshDirtyWord(size_t index) noexcept {
+        if constexpr (num_words <= 64) {
+            const u64 bit = u64{1} << index;
+            const bool dirty = (heap[num_words * size_t(Type::CPU) + index] |
+                                heap[num_words * size_t(Type::Untracked) + index]) != 0;
+            cpu_dirty_words = dirty ? (cpu_dirty_words | bit) : (cpu_dirty_words & ~bit);
+        }
+    }
+
+    /// EDEN_NX2_SYNC_SKIP=2: logs (once) a word whose cpu_dirty_words bit disagrees with its words.
+    void CheckDirtyWords() const {
+        for (size_t index = 0; index < num_words; ++index) {
+            const bool dirty = (heap[num_words * size_t(Type::CPU) + index] |
+                                heap[num_words * size_t(Type::Untracked) + index]) != 0;
+            if (dirty != (((cpu_dirty_words >> index) & 1) != 0)) {
+                static bool reported = false;
+                if (!reported) {
+                    reported = true;
+                    LOG_ERROR(HW_GPU, "EDEN_NX2_SYNC_SKIP: stale dirty bit, word {} of {:#x}", index,
+                              cpu_addr);
+                }
+                return;
+            }
+        }
+    }
+
+    /// False when ForEachModifiedRange(Type::CPU, ...) over [offset, offset + size) would do
+    /// nothing: no covered word holds CPU or Untracked bits. Always true with EDEN_NX2_SYNC_SKIP=0.
+    [[nodiscard]] bool MayHaveCpuDirtyWords(size_t offset, size_t size) const {
+        const int skip_mode = SyncSkipMode();
+        if (skip_mode == 0) {
+            return true;
+        }
+        if (skip_mode == 2) {
+            CheckDirtyWords();
+        }
+        return (cpu_dirty_words & WordRangeBits(GetWordRange(offset, size))) != 0;
     }
 
     template <typename Func>
@@ -137,6 +244,8 @@ struct WordManager {
                 if (type == Type::CPU || type == Type::CachedCPU)
                     untracked_words[index] &= ~mask;
             }
+            if (TouchesCpuWords(type))
+                RefreshDirtyWord(index);
         });
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, (!enable) ? 1 : -1);
@@ -157,6 +266,18 @@ struct WordManager {
         std::span<u64> untracked_words = Span(Type::Untracked);
         std::span<u64> cached_words = Span(Type::CachedCPU);
         size_t const offset = query_cpu_range - cpu_addr;
+        // EDEN_NX2_SYNC_SKIP: a CPU query visits only the words cpu_dirty_words marks.
+        const int skip_mode = type == Type::CPU ? SyncSkipMode() : 0;
+        WordRange word_range{};
+        if (skip_mode != 0) {
+            if (skip_mode == 2) {
+                CheckDirtyWords();
+            }
+            word_range = GetWordRange(offset, size_t(size));
+            if ((cpu_dirty_words & WordRangeBits(word_range)) == 0) {
+                return;
+            }
+        }
         bool pending = false;
         size_t pending_offset{};
         size_t pending_pointer{};
@@ -165,7 +286,7 @@ struct WordManager {
                  (pending_pointer - pending_offset) * BYTES_PER_PAGE);
         };
         std::vector<std::pair<VAddr, u64>> ranges;
-        IterateWords(offset, size, [&](size_t index, u64 mask) {
+        const auto per_word = [&](size_t index, u64 mask) {
             if (type == Type::GPU)
                 mask &= ~untracked_words[index];
             const u64 word = state_words[index] & mask;
@@ -178,6 +299,8 @@ struct WordManager {
                     untracked_words[index] &= ~mask;
                 if (type == Type::CPU)
                     cached_words[index] &= ~word;
+                if (TouchesCpuWords(type))
+                    RefreshDirtyWord(index);
             }
             const size_t base_offset = index * PAGES_PER_WORD;
             IteratePages(word, [&](size_t pages_offset, size_t pages_size) {
@@ -193,7 +316,19 @@ struct WordManager {
                     pending_pointer = base_offset + pages_offset + pages_size;
                 }
             });
-        });
+        };
+        if (skip_mode != 0) {
+            // Ascending, re-reading cpu_dirty_words before each word as IterateWords would.
+            u64 remaining = WordRangeBits(word_range);
+            for (u64 candidates = cpu_dirty_words & remaining; candidates != 0;
+                 candidates = cpu_dirty_words & remaining) {
+                const size_t index = size_t(std::countr_zero(candidates));
+                remaining &= ~((u64{2} << index) - 1);
+                per_word(index, WordPageMask(word_range, index));
+            }
+        } else {
+            IterateWords(offset, size, per_word);
+        }
         if (pending) {
             release();
         }
@@ -254,6 +389,7 @@ struct WordManager {
             untracked_words[word_index] |= cached_bits;
             cpu_words[word_index] |= cached_bits;
             cached_words[word_index] = 0;
+            RefreshDirtyWord(word_index);
         }
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, -1);
@@ -322,6 +458,8 @@ struct WordManager {
     std::array<u64, size_t(Type::Max) * num_words> heap = {};
     DeviceTracker* tracker = nullptr;
     VAddr cpu_addr = 0;
+    /// Bit i is set exactly while word i of CPU or Untracked is non-zero (EDEN_NX2_SYNC_SKIP).
+    u64 cpu_dirty_words = 0;
 };
 
 } // namespace VideoCommon

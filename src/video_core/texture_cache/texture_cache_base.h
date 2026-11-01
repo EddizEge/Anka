@@ -140,6 +140,9 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 astc_alpha_images{};
     std::vector<u8> astc_scan_buffer;
     u64 images_deleted{};
+    u64 alias_checks_walked{};  ///< SynchronizeAliases walks over the aliases (last 600 frames)
+    u64 alias_checks_skipped{}; ///< Calls skipped: no alias can be newer (EDEN_NX2_ALIAS_LAZY)
+    u64 alias_syncs{};          ///< Walks that found newer aliases and copied from them
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;

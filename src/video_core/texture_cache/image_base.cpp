@@ -255,6 +255,9 @@ bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_i
     rhs.aliased_images.push_back(std::move(rhs_alias));
     lhs.flags &= ~ImageFlagBits::IsRescalable;
     rhs.flags &= ~ImageFlagBits::IsRescalable;
+    // Either side may hold newer contents than the other (EDEN_NX2_ALIAS_LAZY).
+    lhs.alias_check = true;
+    rhs.alias_check = true;
     return true;
 }
 

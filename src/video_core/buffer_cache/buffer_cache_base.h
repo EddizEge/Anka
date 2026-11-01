@@ -527,6 +527,39 @@ private:
     u64 vertex_buffers_serial = 0;
     std::array<Binding, 32> v_buffer{};
 
+    /// EDEN_NX2_VERTEX_SKIP (UpdateVertexBuffer): vertex stream address ranges and what they
+    /// resolved to, direct-mapped by address. An entry holds while its memory manager's page
+    /// table (MappingEpoch) and its buffer (vertex_memo_generations, bumped by DeleteBuffer) are
+    /// unchanged and page_table still names that buffer: then FindBuffer would return it again.
+    struct VertexBufferMemo {
+        GPUVAddr gpu_addr_begin;
+        GPUVAddr gpu_addr_end;
+        DAddr device_addr;
+        u64 map_epoch;
+        u32 size;
+        BufferId buffer_id;
+        u32 generation;
+        u32 memo_epoch;
+    };
+    static constexpr size_t VERTEX_MEMO_SIZE = 4096;
+    std::unique_ptr<VertexBufferMemo[]> vertex_memo;
+    std::vector<u32> vertex_memo_generations;
+    size_t vertex_memo_owner = ~size_t{0};
+    u32 vertex_memo_epoch = 0;
+    /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).
+    std::array<BufferId, 32> vertex_touched_ids{};
+    std::array<u64, 32> vertex_touched_ticks{};
+
+    /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
+    /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.
+    static bool VertexSkipEnabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
     MemoryTracker memory_tracker;
@@ -588,6 +621,8 @@ private:
         using TickType = u64;
     };
     Common::LeastRecentlyUsedCache<LRUItemParams> lru_cache;
+    /// Frame tick of each buffer slot's last LRU touch (TouchBuffer, EDEN_NX2_TOUCH_SKIP).
+    std::vector<u64> touch_ticks;
     VirtualRangeCache virtual_ranges;
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;

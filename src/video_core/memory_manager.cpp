@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -152,6 +153,7 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
     }
     flush_modified();
     kind_map.Map(gpu_addr, gpu_addr + size, kind);
+    mapping_epoch.fetch_add(1, std::memory_order_release);
     return gpu_addr;
 }
 
@@ -207,6 +209,7 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
         std::unique_lock<std::mutex> lock(guard);
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
     }
+    mapping_epoch.fetch_add(1, std::memory_order_release);
     return gpu_addr;
 }
 
@@ -783,10 +786,90 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
 }
 
 void MemoryManager::FlushCaching() {
-    // Flush from the invalidate accumulator
-    if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
+    // EDEN_NX2_INVAL_SKIP=0: every accumulated range translated page by page and handed to the
+    // caches as collected.
+    static const bool merge_ranges = [] {
+        const char* value = std::getenv("EDEN_NX2_INVAL_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!merge_ranges) {
+        // Flush from the invalidate accumulator
+        if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
+            GetSubmappedRangeImpl<false>(addr, size, page_stash2);
+        })) {
+            rasterizer->InnerInvalidation(page_stash2);
+            page_stash2.clear();
+        }
+        return;
+    }
+    // This runs before every draw (~5% of the GPU thread on title 1). The accumulator hands out
+    // overlapping ranges (it rounds to 32 bytes from the unaligned start, so words written one by
+    // one and 20-byte inline records come out as several ranges over the same bytes). Every
+    // cache's invalidation is a set operation on the bytes, so the sorted, merged union
+    // invalidates the same (the buffer cache clears pending downloads over the whole union when
+    // any of it is GPU-modified); ranges within one page (nearly all) are translated directly,
+    // as GetSubmappedRangeImpl would.
+    boost::container::small_vector<std::pair<GPUVAddr, std::size_t>, 16> ranges;
+    if (!accumulator.InvalidateAll([&ranges](GPUVAddr addr, size_t size) {
+            if (size != 0) {
+                ranges.emplace_back(addr, size);
+            }
+        })) {
+        return;
+    }
+    const size_t collected = ranges.size();
+    if (collected > 1) {
+        if (!std::is_sorted(ranges.begin(), ranges.end())) {
+            std::sort(ranges.begin(), ranges.end());
+        }
+        size_t last = 0;
+        for (size_t i = 1; i < collected; ++i) {
+            const auto [addr, size] = ranges[i];
+            auto& [last_addr, last_size] = ranges[last];
+            if (addr <= last_addr + last_size) {
+                last_size = (std::max)(last_size, static_cast<std::size_t>(addr + size - last_addr));
+            } else {
+                ranges[++last] = ranges[i];
+            }
+        }
+        ranges.resize(last + 1);
+    }
+    u64 direct = 0;
+    for (const auto& [addr, size] : ranges) {
+        if (IsWithinGPUAddressRange(addr) && size <= address_space_size - addr) {
+            const EntryType big_entry = GetEntry(addr, true);
+            if (big_entry == EntryType::Mapped && (addr & big_page_mask) + size <= big_page_size) {
+                page_stash2.emplace_back(
+                    (static_cast<DAddr>(big_page_table_dev[addr >> big_page_bits]) << cpu_page_bits) +
+                        (addr & big_page_mask),
+                    size);
+                ++direct;
+                continue;
+            }
+            if (big_entry == EntryType::Free && GetEntry(addr, false) == EntryType::Mapped &&
+                (addr & page_mask) + size <= page_size) {
+                page_stash2.emplace_back(
+                    (static_cast<DAddr>(page_table[addr >> page_bits]) << cpu_page_bits) +
+                        (addr & page_mask),
+                    size);
+                ++direct;
+                continue;
+            }
+        }
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);
-    })) {
+    }
+    thread_local u64 stat_calls{}, stat_collected{}, stat_merged{}, stat_direct{}, stat_device{};
+    ++stat_calls;
+    stat_collected += collected;
+    stat_merged += ranges.size();
+    stat_direct += direct;
+    stat_device += page_stash2.size();
+    if ((stat_calls & ((u64{1} << 20) - 1)) == 0) {
+        LOG_INFO(HW_GPU, "Pre-draw invalidations: {} calls, {} ranges merged to {} ({} translated directly), {} device ranges",
+                 stat_calls, stat_collected, stat_merged, stat_direct, stat_device);
+        stat_calls = stat_collected = stat_merged = stat_direct = stat_device = 0;
+    }
+    if (!page_stash2.empty()) {
         rasterizer->InnerInvalidation(page_stash2);
         page_stash2.clear();
     }

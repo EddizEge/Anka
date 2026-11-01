@@ -65,6 +65,12 @@ public:
     /// Binds a renderer to the memory manager.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 
+    /// Changes after every page table change (PageTableOp, BigPageTableOp): until it does,
+    /// GpuToCpuAddress and MaxContinuousRange answer the same for the same arguments.
+    [[nodiscard]] u64 MappingEpoch() const noexcept {
+        return mapping_epoch.load(std::memory_order_acquire);
+    }
+
     [[nodiscard]] std::optional<DAddr> GpuToCpuAddress(GPUVAddr addr) const;
 
     [[nodiscard]] std::optional<DAddr> GpuToCpuAddress(GPUVAddr addr, std::size_t size) const;
@@ -198,6 +204,7 @@ private:
         boost::container::small_vector<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result) const;
 
     std::atomic<GPUVAddr> native_syncpoint_shim{};
+    std::atomic<u64> mapping_epoch{};
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
 

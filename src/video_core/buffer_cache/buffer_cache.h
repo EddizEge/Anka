@@ -902,6 +902,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
     if (use_optimized_vertex_buffers) {
         auto& flags = maxwell3d->dirty.flags;
         u32 enabled_mask = enabled_vertex_buffers_mask;
+        const bool vertex_skip = VertexSkipEnabled();
         HostBindings<Buffer> bindings{};
         u32 last_index = (std::numeric_limits<u32>::max)();
         const auto flush_bindings = [&]() {
@@ -918,7 +919,14 @@ void BufferCache<P>::BindHostVertexBuffers() {
             enabled_mask &= (enabled_mask - 1);
             const Binding& binding = VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
-            TouchBuffer(buffer, binding.buffer_id);
+            // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
+            // when this stream touched the same buffer this frame.
+            if (!vertex_skip || vertex_touched_ids[index] != binding.buffer_id ||
+                vertex_touched_ticks[index] != frame_tick + 1) {
+                TouchBuffer(buffer, binding.buffer_id);
+                vertex_touched_ids[index] = binding.buffer_id;
+                vertex_touched_ticks[index] = frame_tick + 1;
+            }
             SynchronizeBuffer(buffer, binding.device_addr, binding.size);
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
@@ -928,6 +936,15 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const u32 stride = maxwell3d->regs.vertex_streams[index].stride;
             const u32 offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, binding.size);
+            if constexpr (!IS_OPENGL) {
+                // Each changed stream on its own (~40 bytes recorded) instead of in a batch
+                // carrying four 32-entry arrays (~1.3 KiB a record: a full command chunk,
+                // DispatchWork and a worker wake-up every ~24 draws). Same bindings.
+                if (vertex_skip) {
+                    BindHostVertexBuffer(index, buffer, offset, binding.size, stride);
+                    continue;
+                }
+            }
             if (!bindings.buffers.empty() && index != last_index + 1) {
                 flush_bindings();
             }
@@ -1057,6 +1074,30 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         }
         channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
+        if constexpr (!IS_OPENGL) {
+            // EDEN_NX2_UBO_REUSE: read the guest bytes into the runtime's scratch first; the
+            // runtime binds the slice it streamed for this range earlier in the same scheduler
+            // tick when size and bytes match (constants rebound every draw, one buffer bound to
+            // several stages) and streams a new one otherwise. One descriptor per bind either way.
+            if (runtime.UniformReuseEnabled()) {
+                const std::span<u8> bytes = runtime.UniformReuseScratch(size);
+                device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
+                const bool reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                static u64 binds{};
+                static u64 reuses{};
+                static u64 reused_bytes{};
+                ++binds;
+                if (reused) {
+                    ++reuses;
+                    reused_bytes += size;
+                }
+                if ((binds & ((u64{1} << 22) - 1)) == 0) {
+                    LOG_INFO(HW_GPU, "Uniform buffer reuse: {} of {} streamed binds reused, {} MiB not copied",
+                             reuses, binds, reused_bytes >> 20);
+                }
+                return;
+            }
+        }
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
         device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
@@ -1452,8 +1493,12 @@ void BufferCache<P>::UpdateVertexBuffers() {
     }
     flags[Dirty::VertexBuffers] = false;
 
+    const bool vertex_skip = VertexSkipEnabled();
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
-        UpdateVertexBuffer(index);
+        // Clean streams cost a flag test here instead of a call each.
+        if (!vertex_skip || flags[Dirty::VertexBuffer0 + index]) {
+            UpdateVertexBuffer(index);
+        }
     }
 }
 
@@ -1471,6 +1516,48 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         throw std::runtime_error("Native vertex stream exceeds supported 32-bit buffer size");
     }
     const GPUVAddr gpu_addr_end = native ? gpu_addr_begin + native_size : limit.Address() + 1;
+    // EDEN_NX2_VERTEX_SKIP: a disabled or empty stream binds nothing whatever its address
+    // translates to, and a stream range seen before reuses its translation and buffer while the
+    // GPU page table and that buffer are unchanged (VertexBufferMemo). ~5,000 draws a frame
+    // switch streams between meshes; each switch was a page table walk plus a buffer lookup.
+    VertexBufferMemo* memo = nullptr;
+    u64 map_epoch = 0;
+    if (VertexSkipEnabled()) {
+        if (array.enable == 0 || static_cast<u32>(gpu_addr_end - gpu_addr_begin) == 0) {
+            channel_state->vertex_buffers[index] = NULL_BINDING;
+            UpdateVertexBufferSlot(index, NULL_BINDING);
+            return;
+        }
+        // With accurate GPU fences FindBuffer also synchronizes the buffer's writes.
+        if (!Settings::IsGPUFenceBehaviorAccurate()) {
+            if (!vertex_memo) {
+                vertex_memo = std::make_unique<VertexBufferMemo[]>(VERTEX_MEMO_SIZE);
+            }
+            if (vertex_memo_owner != gpu_memory->GetID()) {
+                vertex_memo_owner = gpu_memory->GetID();
+                ++vertex_memo_epoch;
+            }
+            map_epoch = gpu_memory->MappingEpoch();
+            memo = &vertex_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
+                                (VERTEX_MEMO_SIZE - 1)];
+            // The page_table test is FindBuffer's own: a buffer created at device page 0
+            // (ResolveOverlaps skips overlaps there, the inline index buffer) can take over the
+            // pages of a buffer that is still alive.
+            if (memo->memo_epoch == vertex_memo_epoch && memo->map_epoch == map_epoch &&
+                memo->gpu_addr_begin == gpu_addr_begin && memo->gpu_addr_end == gpu_addr_end &&
+                memo->generation == vertex_memo_generations[memo->buffer_id.Value()] &&
+                page_table[memo->device_addr >> CACHING_PAGEBITS] == memo->buffer_id) {
+                const Binding binding{
+                    .device_addr = memo->device_addr,
+                    .size = memo->size,
+                    .buffer_id = memo->buffer_id,
+                };
+                channel_state->vertex_buffers[index] = binding;
+                UpdateVertexBufferSlot(index, binding);
+                return;
+            }
+        }
+    }
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     u32 size = address_size; // TODO: Analyze stride and number of vertices
@@ -1490,6 +1577,22 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
     };
     channel_state->vertex_buffers[index] = binding;
     UpdateVertexBufferSlot(index, binding);
+    if (memo != nullptr) {
+        const size_t slot = buffer_id.Value();
+        if (slot >= vertex_memo_generations.size()) {
+            vertex_memo_generations.resize(slot + 1);
+        }
+        *memo = VertexBufferMemo{
+            .gpu_addr_begin = gpu_addr_begin,
+            .gpu_addr_end = gpu_addr_end,
+            .device_addr = *device_addr,
+            .map_epoch = map_epoch,
+            .size = size,
+            .buffer_id = buffer_id,
+            .generation = vertex_memo_generations[slot],
+            .memo_epoch = vertex_memo_epoch,
+        };
+    }
 }
 
 template <class P>
@@ -1836,6 +1939,27 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
     if (buffer_id != NULL_BUFFER_ID) {
+        // The LRU list moves a buffer to its end once per frame tick (Touch returns at once when
+        // its item already has the tick), but finding the item is two dependent loads into a
+        // std::deque of one-item blocks, for each of ~20 bindings a draw (~2.8% of the GPU thread
+        // on title 1). The tick each slot was last touched in, kept in a flat array, skips that;
+        // a slot reused within the tick holds a buffer inserted with this tick, which Touch
+        // skips too. EDEN_NX2_TOUCH_SKIP=0 turns it off.
+        static const bool touch_skip = [] {
+            const char* value = std::getenv("EDEN_NX2_TOUCH_SKIP");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (touch_skip) {
+            const size_t index = buffer_id.index;
+            if (index < touch_ticks.size()) {
+                if (touch_ticks[index] == frame_tick) {
+                    return;
+                }
+            } else {
+                touch_ticks.resize(index + 1 + index / 2, ~u64{});
+            }
+            touch_ticks[index] = frame_tick;
+        }
         lru_cache.Touch(buffer.getLRUID(), frame_tick);
     }
 }
@@ -2132,6 +2256,10 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
         dirty_index = true;
     }
 
+    // UpdateVertexBuffer's memo entries naming this id are stale from here on.
+    if (buffer_id.Value() < vertex_memo_generations.size()) {
+        ++vertex_memo_generations[buffer_id.Value()];
+    }
     for (u32 index = 0; index < channel_state->vertex_buffers.size(); index++) {
         auto& binding = channel_state->vertex_buffers[index];
         if (binding.buffer_id == buffer_id) {
