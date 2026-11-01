@@ -57,6 +57,12 @@ inline const bool g_nx2_sync_memo = [] {
     const char* value = std::getenv("EDEN_NX2_SYNC_MEMO");
     return value == nullptr || value[0] != '0';
 }();
+/// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
+/// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
+inline const bool g_nx2_vertex_fast = [] {
+    const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
+    return value == nullptr || value[0] != '0';
+}();
 
 using BufferId = Common::SlotId;
 
@@ -555,18 +561,25 @@ private:
     /// resolved to, direct-mapped by address. An entry holds while its memory manager's page
     /// table (MappingEpoch) and its buffer (vertex_memo_generations, bumped by DeleteBuffer) are
     /// unchanged and page_table still names that buffer: then FindBuffer would return it again.
+    /// layout_epoch is buffer_layout_epoch when page_table was last seen naming the buffer
+    /// (~u64{0} when it did not): while that holds page_table still does (EDEN_NX2_VERTEX_FAST).
     struct VertexBufferMemo {
         GPUVAddr gpu_addr_begin;
         GPUVAddr gpu_addr_end;
         DAddr device_addr;
         u64 map_epoch;
+        u64 layout_epoch;
         u32 size;
         BufferId buffer_id;
         u32 generation;
         u32 memo_epoch;
     };
     static constexpr size_t VERTEX_MEMO_SIZE = 4096;
-    std::unique_ptr<VertexBufferMemo[]> vertex_memo;
+    /// One vertex_memo entry per cache line: at 56 bytes most entries would straddle two.
+    struct alignas(64) VertexMemoLine {
+        VertexBufferMemo entry;
+    };
+    std::unique_ptr<VertexMemoLine[]> vertex_memo;
     std::vector<u32> vertex_memo_generations;
     size_t vertex_memo_owner = ~size_t{0};
     u32 vertex_memo_epoch = 0;
@@ -605,6 +618,14 @@ private:
     static bool VertexSkipEnabled() {
         return g_nx2_vertex_skip;
     }
+
+    /// Bumped by every page_table change (ChangeRegister) (EDEN_NX2_VERTEX_FAST).
+    u64 buffer_layout_epoch = 0;
+    /// The memo entry each vertex stream resolved through last (EDEN_NX2_VERTEX_FAST). Valid on
+    /// the same terms as vertex_memo's; a stream marked dirty with the range it had (its stride,
+    /// enable or frequency changed, or the state was invalidated) finds it here without hashing
+    /// into vertex_memo.
+    std::array<VertexBufferMemo, NUM_VERTEX_BUFFERS> vertex_stream_memo{};
 
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 

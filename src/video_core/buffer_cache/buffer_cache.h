@@ -908,7 +908,10 @@ const Binding& BufferCache<P>::VertexBufferSlot(u32 index) const {
 
 template <class P>
 void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
-    Binding& slot = VertexBufferSlot(index);
+    // EDEN_NX2_VERTEX_FAST: every caller passes index < NUM_VERTEX_BUFFERS (<= v_buffer's 32),
+    // and VertexBufferSlot's ASSERT is an out-of-line lambda call each time (~0.5% of the split
+    // back on the wide view with BindHostVertexBuffers' one).
+    Binding& slot = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
     if (slot.device_addr != binding.device_addr || slot.size != binding.size) {
         ++vertex_buffers_serial;
     }
@@ -947,7 +950,8 @@ void BufferCache<P>::BindHostVertexBuffers() {
         while (enabled_mask != 0) {
             const u32 index = std::countr_zero(enabled_mask);
             enabled_mask &= (enabled_mask - 1);
-            const Binding& binding = VertexBufferSlot(index);
+            // index is a bit of the u32 enabled_vertex_buffers_mask: below v_buffer's 32.
+            const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
             // when this stream touched the same buffer this frame.
@@ -1613,29 +1617,50 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         // With accurate GPU fences FindBuffer also synchronizes the buffer's writes.
         if (!Settings::IsGPUFenceBehaviorAccurate()) {
             if (!vertex_memo) {
-                vertex_memo = std::make_unique<VertexBufferMemo[]>(VERTEX_MEMO_SIZE);
+                vertex_memo = std::make_unique<VertexMemoLine[]>(VERTEX_MEMO_SIZE);
             }
             if (vertex_memo_owner != gpu_memory->GetID()) {
                 vertex_memo_owner = gpu_memory->GetID();
                 ++vertex_memo_epoch;
             }
             map_epoch = gpu_memory->MappingEpoch();
-            memo = &vertex_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
-                                (VERTEX_MEMO_SIZE - 1)];
             // The page_table test is FindBuffer's own: a buffer created at device page 0
             // (ResolveOverlaps skips overlaps there, the inline index buffer) can take over the
-            // pages of a buffer that is still alive.
-            if (memo->memo_epoch == vertex_memo_epoch && memo->map_epoch == map_epoch &&
-                memo->gpu_addr_begin == gpu_addr_begin && memo->gpu_addr_end == gpu_addr_end &&
-                memo->generation == vertex_memo_generations[memo->buffer_id.Value()] &&
-                page_table[memo->device_addr >> CACHING_PAGEBITS] == memo->buffer_id) {
+            // pages of a buffer that is still alive. EDEN_NX2_VERTEX_FAST: page_table changes
+            // only in ChangeRegister, which bumps buffer_layout_epoch, so an entry whose
+            // layout_epoch is the current one passes it without loading from the 4 MiB table.
+            const auto memo_holds = [&](const VertexBufferMemo& entry) {
+                return entry.memo_epoch == vertex_memo_epoch && entry.map_epoch == map_epoch &&
+                       entry.gpu_addr_begin == gpu_addr_begin &&
+                       entry.gpu_addr_end == gpu_addr_end &&
+                       entry.generation == vertex_memo_generations[entry.buffer_id.Value()] &&
+                       ((g_nx2_vertex_fast && entry.layout_epoch == buffer_layout_epoch) ||
+                        page_table[entry.device_addr >> CACHING_PAGEBITS] == entry.buffer_id);
+            };
+            const auto bind_entry = [&](const VertexBufferMemo& entry) {
                 const Binding binding{
-                    .device_addr = memo->device_addr,
-                    .size = memo->size,
-                    .buffer_id = memo->buffer_id,
+                    .device_addr = entry.device_addr,
+                    .size = entry.size,
+                    .buffer_id = entry.buffer_id,
                 };
                 channel_state->vertex_buffers[index] = binding;
                 UpdateVertexBufferSlot(index, binding);
+            };
+            // EDEN_NX2_VERTEX_FAST: a stream marked dirty with the range it resolved last time.
+            if (g_nx2_vertex_fast && memo_holds(vertex_stream_memo[index])) {
+                bind_entry(vertex_stream_memo[index]);
+                return;
+            }
+            memo = &vertex_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
+                                (VERTEX_MEMO_SIZE - 1)]
+                        .entry;
+            if (memo_holds(*memo)) {
+                if (g_nx2_vertex_fast) {
+                    // page_table names the buffer now (tested, or unchanged since it did).
+                    memo->layout_epoch = buffer_layout_epoch;
+                    vertex_stream_memo[index] = *memo;
+                }
+                bind_entry(*memo);
                 return;
             }
         }
@@ -1669,11 +1694,19 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             .gpu_addr_end = gpu_addr_end,
             .device_addr = *device_addr,
             .map_epoch = map_epoch,
+            // ~u64{0} is never reached: a later hit then tests page_table as before.
+            .layout_epoch = g_nx2_vertex_fast &&
+                                    page_table[*device_addr >> CACHING_PAGEBITS] == buffer_id
+                                ? buffer_layout_epoch
+                                : ~u64{0},
             .size = size,
             .buffer_id = buffer_id,
             .generation = vertex_memo_generations[slot],
             .memo_epoch = vertex_memo_epoch,
         };
+        if (g_nx2_vertex_fast) {
+            vertex_stream_memo[index] = *memo;
+        }
     }
 }
 
@@ -2009,6 +2042,8 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
     const DAddr device_addr_end = device_addr_begin + size;
     const u64 page_begin = device_addr_begin / CACHING_PAGESIZE;
     const u64 page_end = Common::DivCeil(device_addr_end, CACHING_PAGESIZE);
+    // EDEN_NX2_VERTEX_FAST: vertex memo entries take page_table as unchanged while this holds.
+    ++buffer_layout_epoch;
     for (u64 page = page_begin; page != page_end; ++page) {
         if constexpr (insert) {
             page_table[page] = buffer_id;
