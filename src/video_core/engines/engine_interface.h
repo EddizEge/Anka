@@ -37,6 +37,16 @@ public:
     /// Write multiple values to the register identified by method.
     virtual void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) = 0;
 
+    /// What CallMethod(system, methods[i], arguments[i], true) does for each i, in order: macro
+    /// writes to methods in [method_run_begin, method_run_begin + method_run_count) that follow
+    /// each other in the split GPU thread's ring (GpuSplit::Execute), at most MaxMethodRun.
+    virtual void CallMethodRun(Core::System& system, const u32* methods, const u32* arguments,
+                               u32 count) {
+        for (u32 i = 0; i < count; ++i) {
+            CallMethod(system, methods[i], arguments[i], true);
+        }
+    }
+
     void ConsumeSink(Core::System& system) {
         if (!method_sink.empty()) {
             ConsumeSinkImpl(system);
@@ -47,6 +57,10 @@ public:
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
+    /// Methods whose consecutive macro writes go to CallMethodRun together (none by default).
+    static constexpr u32 MaxMethodRun = 32;
+    u32 method_run_begin{};
+    u32 method_run_count{};
 protected:
     virtual void ConsumeSinkImpl(Core::System& system) {
         for (auto [method, value] : method_sink) {

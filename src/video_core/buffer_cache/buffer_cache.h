@@ -15,6 +15,7 @@
 
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
+#include "video_core/buffer_cache/word_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
@@ -550,7 +551,8 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     const auto& cbufs = maxwell3d->state.shader_stages[stage];
     const GPUVAddr ssbo_addr = cbufs.const_buffers[cbuf_index].address + cbuf_offset;
     channel_state->storage_buffers[stage][ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
+        g_nx2_ssbo_memo ? MemoStorageBufferBinding(ssbo_addr, cbuf_index, is_written)
+                        : StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
     return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
 }
 
@@ -923,7 +925,10 @@ const Binding& BufferCache<P>::VertexBufferSlot(u32 index) const {
 
 template <class P>
 void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
-    Binding& slot = VertexBufferSlot(index);
+    // EDEN_NX2_VERTEX_FAST: every caller passes index < NUM_VERTEX_BUFFERS (<= v_buffer's 32),
+    // and VertexBufferSlot's ASSERT is an out-of-line lambda call each time (~0.5% of the split
+    // back on the wide view with BindHostVertexBuffers' one).
+    Binding& slot = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
     if (slot.device_addr != binding.device_addr || slot.size != binding.size) {
         ++vertex_buffers_serial;
     }
@@ -962,7 +967,8 @@ void BufferCache<P>::BindHostVertexBuffers() {
         while (enabled_mask != 0) {
             const u32 index = std::countr_zero(enabled_mask);
             enabled_mask &= (enabled_mask - 1);
-            const Binding& binding = VertexBufferSlot(index);
+            // index is a bit of the u32 enabled_vertex_buffers_mask: below v_buffer's 32.
+            const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
             // when this stream touched the same buffer this frame.
@@ -1125,9 +1131,27 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // tick when size and bytes match (constants rebound every draw, one buffer bound to
             // several stages) and streams a new one otherwise. One descriptor per bind either way.
             if (runtime.UniformReuseEnabled()) {
-                const std::span<u8> bytes = runtime.UniformReuseScratch(size);
-                device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
-                const bool reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                // EDEN_NX2_UBO_DIRECT: when the guest bytes lie in one run of host memory (at most
+                // two device pages, the second right after the first), the runtime compares and
+                // copies them in place instead of from a copy read into the scratch first.
+                const u8* guest = nullptr;
+                if (runtime.UniformDirectEnabled() && size != 0 && size <= Core::DEVICE_PAGESIZE) {
+                    const u8* const first = device_memory.GetPointer<u8>(device_addr);
+                    const DAddr last = device_addr + size - 1;
+                    if (first != nullptr &&
+                        ((last >> Core::DEVICE_PAGEBITS) == (device_addr >> Core::DEVICE_PAGEBITS) ||
+                         device_memory.GetPointer<u8>(last) == first + (size - 1))) {
+                        guest = first;
+                    }
+                }
+                bool reused;
+                if (guest != nullptr) {
+                    reused = runtime.BindMappedUniformBufferReuseFrom(device_addr, guest, size);
+                } else {
+                    const std::span<u8> bytes = runtime.UniformReuseScratch(size);
+                    device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
+                    reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                }
                 static u64 binds{};
                 static u64 reuses{};
                 static u64 reused_bytes{};
@@ -1190,9 +1214,10 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
+        // Null unless the range has two or more segments (EDEN_NX2_SSBO_MEMO remembers it).
         const VirtualSegments* found =
-            virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
-        if (!found || found->size() < 2) {
+            virtual_ranges.QueryMultiRange(*gpu_memory, binding.gpu_addr, binding.size);
+        if (!found) {
             return;
         }
         const VirtualSegments segments = *found;
@@ -1627,29 +1652,50 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         // With accurate GPU fences FindBuffer also synchronizes the buffer's writes.
         if (!Settings::IsGPUFenceBehaviorAccurate()) {
             if (!vertex_memo) {
-                vertex_memo = std::make_unique<VertexBufferMemo[]>(VERTEX_MEMO_SIZE);
+                vertex_memo = std::make_unique<VertexMemoLine[]>(VERTEX_MEMO_SIZE);
             }
             if (vertex_memo_owner != gpu_memory->GetID()) {
                 vertex_memo_owner = gpu_memory->GetID();
                 ++vertex_memo_epoch;
             }
             map_epoch = gpu_memory->MappingEpoch();
-            memo = &vertex_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
-                                (VERTEX_MEMO_SIZE - 1)];
             // The page_table test is FindBuffer's own: a buffer created at device page 0
             // (ResolveOverlaps skips overlaps there, the inline index buffer) can take over the
-            // pages of a buffer that is still alive.
-            if (memo->memo_epoch == vertex_memo_epoch && memo->map_epoch == map_epoch &&
-                memo->gpu_addr_begin == gpu_addr_begin && memo->gpu_addr_end == gpu_addr_end &&
-                memo->generation == vertex_memo_generations[memo->buffer_id.Value()] &&
-                page_table[memo->device_addr >> CACHING_PAGEBITS] == memo->buffer_id) {
+            // pages of a buffer that is still alive. EDEN_NX2_VERTEX_FAST: page_table changes
+            // only in ChangeRegister, which bumps buffer_layout_epoch, so an entry whose
+            // layout_epoch is the current one passes it without loading from the 4 MiB table.
+            const auto memo_holds = [&](const VertexBufferMemo& entry) {
+                return entry.memo_epoch == vertex_memo_epoch && entry.map_epoch == map_epoch &&
+                       entry.gpu_addr_begin == gpu_addr_begin &&
+                       entry.gpu_addr_end == gpu_addr_end &&
+                       entry.generation == vertex_memo_generations[entry.buffer_id.Value()] &&
+                       ((g_nx2_vertex_fast && entry.layout_epoch == buffer_layout_epoch) ||
+                        page_table[entry.device_addr >> CACHING_PAGEBITS] == entry.buffer_id);
+            };
+            const auto bind_entry = [&](const VertexBufferMemo& entry) {
                 const Binding binding{
-                    .device_addr = memo->device_addr,
-                    .size = memo->size,
-                    .buffer_id = memo->buffer_id,
+                    .device_addr = entry.device_addr,
+                    .size = entry.size,
+                    .buffer_id = entry.buffer_id,
                 };
                 channel_state->vertex_buffers[index] = binding;
                 UpdateVertexBufferSlot(index, binding);
+            };
+            // EDEN_NX2_VERTEX_FAST: a stream marked dirty with the range it resolved last time.
+            if (g_nx2_vertex_fast && memo_holds(vertex_stream_memo[index])) {
+                bind_entry(vertex_stream_memo[index]);
+                return;
+            }
+            memo = &vertex_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
+                                (VERTEX_MEMO_SIZE - 1)]
+                        .entry;
+            if (memo_holds(*memo)) {
+                if (g_nx2_vertex_fast) {
+                    // page_table names the buffer now (tested, or unchanged since it did).
+                    memo->layout_epoch = buffer_layout_epoch;
+                    vertex_stream_memo[index] = *memo;
+                }
+                bind_entry(*memo);
                 return;
             }
         }
@@ -1683,11 +1729,19 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             .gpu_addr_end = gpu_addr_end,
             .device_addr = *device_addr,
             .map_epoch = map_epoch,
+            // ~u64{0} is never reached: a later hit then tests page_table as before.
+            .layout_epoch = g_nx2_vertex_fast &&
+                                    page_table[*device_addr >> CACHING_PAGEBITS] == buffer_id
+                                ? buffer_layout_epoch
+                                : ~u64{0},
             .size = size,
             .buffer_id = buffer_id,
             .generation = vertex_memo_generations[slot],
             .memo_epoch = vertex_memo_epoch,
         };
+        if (g_nx2_vertex_fast) {
+            vertex_stream_memo[index] = *memo;
+        }
     }
 }
 
@@ -2023,6 +2077,8 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
     const DAddr device_addr_end = device_addr_begin + size;
     const u64 page_begin = device_addr_begin / CACHING_PAGESIZE;
     const u64 page_end = Common::DivCeil(device_addr_end, CACHING_PAGESIZE);
+    // EDEN_NX2_VERTEX_FAST: vertex memo entries take page_table as unchanged while this holds.
+    ++buffer_layout_epoch;
     for (u64 page = page_begin; page != page_end; ++page) {
         if constexpr (insert) {
             page_table[page] = buffer_id;
@@ -2069,6 +2125,41 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 #endif
 
     if (use_optimized_vertex_buffers) {
+        // EDEN_NX2_SYNC_MEMO: every draw synchronizes each vertex stream, the index buffer and
+        // each storage buffer again (~12.8% of the split back on the wide view, uploads ~0.2%).
+        // A range this call left clean stays clean while no call could set a CPU or untracked
+        // bit in it: the tracker's CPU-set epoch is unchanged (one compare) or none of its 4 MiB
+        // regions was stamped since (any CPU-modified marking there, DeleteBuffer's included).
+        // Until then the walk below would find nothing, and true is what it returns then.
+        SyncMemo* memo = nullptr;
+        const u64 sync_epoch = memory_tracker.CpuSetEpoch();
+        const DAddr range_end = device_addr + size;
+        const auto memo_holds = [&] {
+            return memo->epoch != 0 &&
+                   memory_tracker.UnsetSince(memo->begin, memo->end - memo->begin, memo->epoch);
+        };
+        // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
+        bool memo_hit = false;
+        if (g_nx2_sync_memo && size != 0) {
+            static u64 syncs{};
+            static u64 skipped{};
+            if ((++syncs & ((u64{1} << 22) - 1)) == 0) {
+                LOG_INFO(HW_GPU, "Buffer sync memo: {} of {} synchronizations skipped", skipped,
+                         syncs);
+            }
+            memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
+                              (SYNC_MEMO_SIZE - 1)];
+            // Only the range's own regions: one stamped elsewhere in a joined memo is no change
+            // here.
+            if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
+                memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
+                ++skipped;
+                if (g_nx2_sync_skip_mode != 2) {
+                    return true;
+                }
+                memo_hit = true;
+            }
+        }
         upload_copies.clear();
         u64 total_size_bytes = 0;
         u64 largest_copy = 0;
@@ -2092,6 +2183,27 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             });
             add_upload(upload_start, device_addr_out + range_size);
         });
+        if (memo != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
+            // ForEachUploadRange cleared the CPU and untracked bits of every page in the range and
+            // nothing could set one since. A remembered range that overlaps or touches it and
+            // still holds is clean now too: keep their union.
+            if (memo->begin <= range_end && device_addr <= memo->end && memo_holds()) {
+                memo->begin = (std::min)(memo->begin, device_addr);
+                memo->end = (std::max)(memo->end, range_end);
+            } else {
+                memo->begin = device_addr;
+                memo->end = range_end;
+            }
+            memo->epoch = sync_epoch;
+        }
+        if (memo_hit && total_size_bytes != 0) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                LOG_ERROR(HW_GPU, "EDEN_NX2_SYNC_MEMO: remembered range {:#x}+{:#x} uploads {:#x} bytes",
+                          device_addr, size, total_size_bytes);
+            }
+        }
         if (total_size_bytes == 0) {
             return true;
         }
@@ -2413,10 +2525,57 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         return NULL_BINDING;
     }
 
+    const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+    return StorageBufferBindingAt(gpu_addr, next_qword, cbuf_index, is_written);
+}
+
+template <class P>
+Binding BufferCache<P>::MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                                 bool is_written) {
+    // EDEN_NX2_SSBO_MEMO: each draw resolved every storage buffer again (~1.4% of the split back
+    // on the wide view, mostly GetMemoryLayoutSize: a lock and a range map walk). The constant
+    // buffer words are still read every time; only what they resolve to is remembered.
+    const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    if (gpu_addr == 0) {
+        return NULL_BINDING;
+    }
+    const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+    const size_t owner = gpu_memory->GetID();
+    // Read before resolving: a page table change meanwhile leaves an entry no later call matches.
+    const u64 map_epoch = gpu_memory->MappingEpoch();
+    StorageBindingMemo& memo =
+        storage_binding_memo[static_cast<size_t>((gpu_addr >> 8) ^ (gpu_addr >> 20)) &
+                             (STORAGE_BINDING_MEMO_SIZE - 1)];
+    static u64 bindings{};
+    static u64 reused{};
+    if ((++bindings & ((u64{1} << 22) - 1)) == 0) {
+        LOG_INFO(HW_GPU, "Storage binding memo: {} of {} bindings reused", reused, bindings);
+    }
+    if (memo.gpu_addr == gpu_addr && memo.next_qword == next_qword &&
+        memo.map_epoch == map_epoch && memo.owner == owner && memo.is_written == is_written) {
+        ++reused;
+        return memo.binding;
+    }
+    const Binding binding = StorageBufferBindingAt(gpu_addr, next_qword, cbuf_index, is_written);
+    if (binding.buffer_id != NULL_BUFFER_ID) {
+        memo = StorageBindingMemo{
+            .gpu_addr = gpu_addr,
+            .next_qword = next_qword,
+            .map_epoch = map_epoch,
+            .owner = owner,
+            .binding = binding,
+            .is_written = is_written,
+        };
+    }
+    return binding;
+}
+
+template <class P>
+Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword, u32 cbuf_index,
+                                               bool is_written) const {
     const auto size = [&]() {
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&

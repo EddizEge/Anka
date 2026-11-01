@@ -197,6 +197,11 @@ private:
     /// GetPointer(gpu_addr) through this thread's page translations (EDEN_NX2_DESC_XLAT).
     [[nodiscard]] const u8* SmallReadPointer(GPUVAddr gpu_addr) const;
 
+    /// A write within one 4 KiB page through the same translations, as WriteBlockImpl (unsafe)
+    /// makes it; false, with nothing written, where WriteBlockImpl must walk the page tables
+    /// (EDEN_NX2_SMALL_WRITE).
+    bool WriteSmall(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
 
     [[nodiscard]] std::size_t PageEntryIndex(GPUVAddr gpu_addr, bool is_big_page) const {

@@ -45,6 +45,25 @@
 
 namespace VideoCommon {
 
+// EDEN_NX2_VERTEX_SKIP (BufferCache::VertexSkipEnabled) and EDEN_NX2_SYNC_MEMO (SynchronizeBuffer),
+// read once at startup: as function-local statics every per-draw query paid a thread-safe
+// initialization check (VertexSkipEnabled alone ~0.8% of the split back thread).
+inline const bool g_nx2_vertex_skip = [] {
+    const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
+    return value == nullptr || value[0] != '0';
+}();
+/// EDEN_NX2_SYNC_MEMO=0 synchronizes every range as before.
+inline const bool g_nx2_sync_memo = [] {
+    const char* value = std::getenv("EDEN_NX2_SYNC_MEMO");
+    return value == nullptr || value[0] != '0';
+}();
+/// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
+/// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
+inline const bool g_nx2_vertex_fast = [] {
+    const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
+    return value == nullptr || value[0] != '0';
+}();
+
 using BufferId = Common::SlotId;
 
 using VideoCore::Surface::PixelFormat;
@@ -303,6 +322,16 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainCPUBuffer(DAddr gpu_addr, u32 size,
                                                           ObtainBufferSynchronize sync_info,
                                                           ObtainBufferOperation post_op);
+
+    /// Profiling: the buffer of vertex stream `index`'s current binding (32: the index buffer).
+    [[nodiscard]] BufferId BoundGeometryBuffer(u32 index) const noexcept {
+        if (index == 32) {
+            return channel_state->index_buffer.buffer_id;
+        }
+        return index < NUM_VERTEX_BUFFERS ? channel_state->vertex_buffers[index].buffer_id
+                                          : NULL_BUFFER_ID;
+    }
+
     void FlushCachedWrites();
 
     /// Return true when there are uncommitted buffers to be downloaded
@@ -497,6 +526,14 @@ private:
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                                bool is_written) const;
 
+    /// StorageBufferBinding from the two words already read at ssbo_addr (gpu_addr non-zero).
+    [[nodiscard]] Binding StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword,
+                                                 u32 cbuf_index, bool is_written) const;
+
+    /// StorageBufferBinding through storage_binding_memo (EDEN_NX2_SSBO_MEMO).
+    [[nodiscard]] Binding MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                                   bool is_written);
+
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
 
@@ -539,18 +576,25 @@ private:
     /// resolved to, direct-mapped by address. An entry holds while its memory manager's page
     /// table (MappingEpoch) and its buffer (vertex_memo_generations, bumped by DeleteBuffer) are
     /// unchanged and page_table still names that buffer: then FindBuffer would return it again.
+    /// layout_epoch is buffer_layout_epoch when page_table was last seen naming the buffer
+    /// (~u64{0} when it did not): while that holds page_table still does (EDEN_NX2_VERTEX_FAST).
     struct VertexBufferMemo {
         GPUVAddr gpu_addr_begin;
         GPUVAddr gpu_addr_end;
         DAddr device_addr;
         u64 map_epoch;
+        u64 layout_epoch;
         u32 size;
         BufferId buffer_id;
         u32 generation;
         u32 memo_epoch;
     };
     static constexpr size_t VERTEX_MEMO_SIZE = 4096;
-    std::unique_ptr<VertexBufferMemo[]> vertex_memo;
+    /// One vertex_memo entry per cache line: at 56 bytes most entries would straddle two.
+    struct alignas(64) VertexMemoLine {
+        VertexBufferMemo entry;
+    };
+    std::unique_ptr<VertexMemoLine[]> vertex_memo;
     std::vector<u32> vertex_memo_generations;
     size_t vertex_memo_owner = ~size_t{0};
     u32 vertex_memo_epoch = 0;
@@ -587,14 +631,49 @@ private:
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.
     static bool VertexSkipEnabled() {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        return g_nx2_vertex_skip;
     }
 
+    /// Bumped by every page_table change (ChangeRegister) (EDEN_NX2_VERTEX_FAST).
+    u64 buffer_layout_epoch = 0;
+    /// The memo entry each vertex stream resolved through last (EDEN_NX2_VERTEX_FAST). Valid on
+    /// the same terms as vertex_memo's; a stream marked dirty with the range it had (its stride,
+    /// enable or frequency changed, or the state was invalidated) finds it here without hashing
+    /// into vertex_memo.
+    std::array<VertexBufferMemo, NUM_VERTEX_BUFFERS> vertex_stream_memo{};
+
     boost::container::small_vector<BufferCopy, 4> upload_copies;
+
+    /// EDEN_NX2_SYNC_MEMO (SynchronizeBuffer): ranges left synchronized (no CPU-modified or
+    /// untracked page), with the memory tracker's CPU-set epoch at which that held, direct-mapped
+    /// by the 64 KiB block of the start; ranges may cross regions, and ranges that overlap or
+    /// touch while both hold are joined. A range inside one that still holds (UnsetSince) has no
+    /// page to upload, clear or retrack, whichever buffer holds it: the call does nothing.
+    struct SyncMemo {
+        DAddr begin;
+        DAddr end;
+        u64 epoch; ///< 0: empty (the tracker's epoch starts at 1)
+    };
+    static constexpr size_t SYNC_MEMO_SIZE = 2048;
+    std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
+
+    /// EDEN_NX2_SSBO_MEMO (BindGraphicsStorageBuffer): bindings StorageBufferBindingAt resolved,
+    /// keyed by the two constant buffer words it read (address, then the size when packed), the
+    /// memory manager and its MappingEpoch read before, direct-mapped by address. Besides those
+    /// words the binding depends only on that manager's page table and kind map (both changed
+    /// only together with MappingEpoch) and on the device's storage buffer alignment (fixed), so
+    /// an entry matching all of them is what StorageBufferBindingAt would return again. Only
+    /// resolved bindings are kept: the failing ones still log as before.
+    struct StorageBindingMemo {
+        GPUVAddr gpu_addr;
+        u64 next_qword;
+        u64 map_epoch;
+        size_t owner;
+        Binding binding;
+        bool is_written;
+    };
+    static constexpr size_t STORAGE_BINDING_MEMO_SIZE = 256;
+    std::array<StorageBindingMemo, STORAGE_BINDING_MEMO_SIZE> storage_binding_memo{};
 
     MemoryTracker memory_tracker;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;

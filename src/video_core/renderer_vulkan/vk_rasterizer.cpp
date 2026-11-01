@@ -389,6 +389,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     const char* value = std::getenv("EDEN_NX2_RESET_RUNS");
                     return value == nullptr || value[0] != '0';
                 }();
+                // EDEN_NX2_RESET_SORT: the records are reset in address order, so records next to
+                // each other in memory make runs in whatever order the list names them. Every
+                // record gets the same 20 bytes and a pointer is skipped for its own address
+                // only, so when no two records share a byte (checked once sorted; otherwise the
+                // order of the list is kept) memory ends up the same, and each cache sees an
+                // invalidation of the same bytes. =0 keeps the order of the list.
+                static const bool sort_enabled = [] {
+                    const char* value = std::getenv("EDEN_NX2_RESET_SORT");
+                    return value == nullptr || value[0] != '0';
+                }();
                 static constexpr u32 RecordSize = 5 * sizeof(u32);
                 static constexpr u32 MaxRun = 4096 / RecordSize;
                 static const auto run_words = [] {
@@ -398,8 +408,30 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     }
                     return words;
                 }();
+                // The records written (writing them changes no GPU mapping).
+                std::vector<u64> records;
+                records.reserve(pointers.size());
+                for (const u64 pointer : pointers) {
+                    if (pointer != 0 && gpu_memory->IsFullyMappedRange(pointer, RecordSize)) {
+                        records.push_back(pointer);
+                    }
+                }
+                bool sorted = false;
+                if (runs_enabled && sort_enabled && !std::is_sorted(records.begin(), records.end())) {
+                    std::vector<u64> ordered(records);
+                    std::sort(ordered.begin(), ordered.end());
+                    const bool disjoint =
+                        std::adjacent_find(ordered.begin(), ordered.end(), [](u64 lower, u64 upper) {
+                            return upper - lower < RecordSize;
+                        }) == ordered.end();
+                    if (disjoint) {
+                        records = std::move(ordered);
+                        sorted = true;
+                    }
+                }
                 GPUVAddr run_start = 0;
                 u32 run_records = 0;
+                u32 writes = 0;
                 const auto write_run = [&] {
                     if (run_records == 0) {
                         return;
@@ -409,13 +441,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                         run_start, run_bytes,
                         {reinterpret_cast<const u8*>(run_words.data()), run_bytes});
                     run_records = 0;
+                    ++writes;
                 };
-                u32 written = 0;
-                for (const u64 pointer : pointers) {
-                    if (pointer == 0 || !gpu_memory->IsFullyMappedRange(pointer, RecordSize)) {
-                        continue;
-                    }
-                    ++written;
+                for (const u64 pointer : records) {
                     if (runs_enabled && run_records != 0 && run_records < MaxRun &&
                         pointer == run_start + u64{run_records} * RecordSize &&
                         (run_start >> 12) == ((pointer + RecordSize - 1) >> 12)) {
@@ -430,8 +458,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                 static u32 reset_logs{};
                 if (reset_logs < 5) {
                     ++reset_logs;
-                    LOG_INFO(HW_GPU, "Indirect draw reset: list {:#x}, {} records ({} written)",
-                             list_begin, count, written);
+                    LOG_INFO(HW_GPU,
+                             "Indirect draw reset: list {:#x}, {} records ({} written in {} "
+                             "inline writes{})",
+                             list_begin, count, records.size(), writes, sorted ? ", sorted" : "");
                 }
             }
             submitted = true;

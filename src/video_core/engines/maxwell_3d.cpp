@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_indirect_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
@@ -128,6 +129,16 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     execution_mask.reset();
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
+    // EDEN_NX2_CB_RUNS=0: the split's back runs each constant buffer data word a macro writes on
+    // its own (CallMethod), each with its own guest memory write (see CallMethodRun).
+    static const bool cb_runs = [] {
+        const char* value = std::getenv("EDEN_NX2_CB_RUNS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (cb_runs) {
+        method_run_begin = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+        method_run_count = 16;
+    }
 }
 
 Maxwell3D::~Maxwell3D() = default;
@@ -581,6 +592,46 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
     }
     ProcessDirtyRegisters(method, argument);
     ProcessMethodCall(method, argument, method_argument, is_last_call);
+}
+
+void Maxwell3D::CallMethodRun(Core::System& system, const u32* methods, const u32* arguments,
+                              u32 count) {
+    // NVN's draw macros write two words at a time into c[0][0x640] (base vertex and instance,
+    // set and reset around each draw): the split's back made one guest memory write (page walk,
+    // invalidation range) per word, ~2% of it. Each word still gets what CallMethod gives it
+    // (shadow RAM, its register, dirty flags); the words then go to memory together. Same result:
+    // what the words set does not move the write (CB_ADDRESS, CB_OFFSET and CB_SIZE are other
+    // registers), and nothing in between reads guest memory: only the first word can end a
+    // deferred instanced draw (ProcessDirtyRegisters clears it), before any word is written, as
+    // before. The invalidation ranges cover the bytes the single writes did (contiguous).
+    // Runs that would trip ProcessCBMultiData's per-write checks take CallMethod word by word.
+    const auto& cb = regs.const_buffer;
+    if (count > MaxMethodRun || executing_macro != 0 || cb.Address() == 0 ||
+        u64{cb.offset} + u64{count - 1} * sizeof(u32) > u64{cb.size}) {
+        for (u32 i = 0; i < count; ++i) {
+            CallMethod(system, methods[i], arguments[i], true);
+        }
+        return;
+    }
+    std::array<u32, MaxMethodRun> values;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 method = methods[i];
+        const u32 method_argument = arguments[i];
+        RecordWrite(method, method_argument, 1, 1);
+        if (g_trace_first_method_writes) [[unlikely]] {
+            TraceFirstMethodWrite(method, method_argument);
+        }
+        if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::MethodWrites, 1);
+            if (regs.reg_array[method] == method_argument) {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameValueWrites, 1);
+            }
+        }
+        const u32 argument = ProcessShadowRam(method, method_argument);
+        ProcessDirtyRegisters(method, argument);
+        values[i] = argument;
+    }
+    ProcessCBMultiData(values.data(), count);
 }
 
 void Maxwell3D::DumpRecentWrites(u32 method) {
@@ -1607,6 +1658,7 @@ void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUV
     params.stride = count > 1 ? stride : 0;
     draw_manager.DrawIndexedIndirect(*this, static_cast<Regs::PrimitiveTopology>(topology), 0,
                                      estimate);
+    VideoCommon::Nx2IndirectDiag::Note(*this, topology, record, count);
     engine_state = EngineHint::None;
     replace_table.clear();
 }

@@ -44,6 +44,14 @@ const bool g_nx2_desc_xlat = [] {
     return value == nullptr || value[0] != '0';
 }();
 
+// Small writes within one 4 KiB page (macros' constant buffer words: four per draw in title 1,
+// ~2% of the split back thread walking the page tables in WriteBlockImpl for each; inline records)
+// go through the same remembered page pointers. EDEN_NX2_SMALL_WRITE=0 walks for every write.
+const bool g_nx2_small_write = [] {
+    const char* value = std::getenv("EDEN_NX2_SMALL_WRITE");
+    return value == nullptr || value[0] != '0';
+}();
+
 struct SmallReadCache {
     static constexpr std::size_t NumSlots = 64;
     std::size_t owner = ~std::size_t{0}; ///< MemoryManager::GetID of the entries
@@ -558,16 +566,47 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     MemoryOperation(gpu_dest_addr, size, true, mapped_big, just_advance, write_short_pages);
 }
 
+bool MemoryManager::WriteSmall(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
+    constexpr std::size_t SmallPage = std::size_t{1} << cpu_page_bits;
+    if (!g_nx2_small_write || size == 0 || page_bits < cpu_page_bits ||
+        big_page_bits < cpu_page_bits || (gpu_dest_addr & (SmallPage - 1)) + size > SmallPage ||
+        !IsWithinGPUAddressRange(gpu_dest_addr)) {
+        return false;
+    }
+    // WriteBlockImpl skips a reserved big page; GpuToCpuAddress would look at the small pages
+    // under it. Under a mapped or free big page both translate the address the same way.
+    if (GetEntry(gpu_dest_addr, true) == EntryType::Reserved) {
+        return false;
+    }
+    // As WriteBlockImpl, first: a Switch 2 sparse block the write lands on gets its memory (when
+    // this returns false WriteBlockImpl asks again, and blocks with memory are left as they are).
+    Tegra::Nx2BackSparseWrite(gpu_dest_addr, size);
+    // The host page WriteBlockImpl writes through (its GetPointer, or the device WriteBlockUnsafe
+    // for a 4 KiB block of a big page); none where it would write nothing or log, which it then
+    // does itself. The pointer is device memory, written as WriteBlockImpl writes it.
+    const u8* const pointer = SmallReadPointer(gpu_dest_addr);
+    if (pointer == nullptr) {
+        return false;
+    }
+    std::memcpy(const_cast<u8*>(pointer), src_buffer, size);
+    return true;
+}
+
 void MemoryManager::WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which) {
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, which, false);
 }
 
 void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
+    if (WriteSmall(gpu_dest_addr, src_buffer, size)) {
+        return;
+    }
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
 }
 
 void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
-    WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    if (!WriteSmall(gpu_dest_addr, src_buffer, size)) {
+        WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    }
     ++cached_writes;
     accumulator.Add(gpu_dest_addr, size);
 }

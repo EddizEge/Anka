@@ -435,6 +435,36 @@ bool BufferCacheRuntime::BindMappedUniformBufferReuse(DAddr device_addr, u32 siz
     return false;
 }
 
+bool BufferCacheRuntime::BindMappedUniformBufferReuseFrom(DAddr device_addr, const u8* guest,
+                                                          u32 size) {
+    // EDEN_NX2_UBO_DIRECT: BindMappedUniformBufferReuse with the bytes read from guest memory in
+    // place. A new slice copies them into its own record first and streams the record, never
+    // guest memory again: the guest may write between two reads, and the stream must hold
+    // exactly the bytes later binds compare against (guest -> record -> stream, as before).
+    UniformSlice& slice =
+        uniform_slices[((device_addr >> 8) * 0x9E3779B97F4A7C15ULL) >> (64 - UNIFORM_SLICE_BITS)];
+    if (slice.tick == scheduler.CurrentTick() && slice.device_addr == device_addr &&
+        slice.size == size && std::memcmp(slice.bytes.data(), guest, size) == 0) {
+        guest_descriptor_queue.AddBuffer(slice.buffer, slice.buffer_address, slice.offset, size);
+        return true;
+    }
+    if (slice.bytes.size() < size) {
+        slice.bytes.resize((std::max<size_t>)(size, 4096));
+    }
+    std::memcpy(slice.bytes.data(), guest, size);
+    const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
+    guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address,
+                                     static_cast<u32>(ref.offset), size);
+    std::memcpy(ref.mapped_span.data(), slice.bytes.data(), size);
+    slice.device_addr = device_addr;
+    slice.tick = scheduler.CurrentTick();
+    slice.buffer = ref.buffer;
+    slice.buffer_address = ref.device_address;
+    slice.offset = static_cast<u32>(ref.offset);
+    slice.size = size;
+    return false;
+}
+
 u32 BufferCacheRuntime::GetStorageBufferAlignment() const {
     return static_cast<u32>(device.GetStorageBufferAlignment());
 }

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <limits>
 #include <utility>
 
@@ -24,6 +25,13 @@ template <class T>
 using RangeSetsAllocator =
     boost::fast_pool_allocator<T, boost::default_user_allocator_new_delete,
                                boost::details::pool::default_mutex, 1024, 2048>;
+
+/// EDEN_NX2_RANGE_SKIP=0: RangeSet::Add always inserts, as before. Read once (not a
+/// function-local static: Add runs several times per draw).
+const bool g_range_skip_covered_adds = [] {
+    const char* value = std::getenv("EDEN_NX2_RANGE_SKIP");
+    return value == nullptr || value[0] != '0';
+}();
 }
 
 template <typename AddressType>
@@ -39,6 +47,16 @@ struct RangeSet<AddressType>::RangeSetImpl {
     void Add(AddressType base_address, size_t size) {
         AddressType end_address = base_address + static_cast<AddressType>(size);
         IntervalType interval{base_address, end_address};
+        // EDEN_NX2_RANGE_SKIP: adding a range one stored range already covers leaves the set as
+        // it is. The stored ranges are disjoint and joined, so the first one not entirely below
+        // the range is the only one that can cover it. Each draw adds the ranges of its written
+        // storage buffers again (~3.5% of the split back on the wide view in joins and frees).
+        if (g_range_skip_covered_adds && size != 0 && !m_ranges_set.empty()) {
+            const auto it = m_ranges_set.lower_bound(interval);
+            if (it != m_ranges_set.end() && boost::icl::contains(*it, interval)) {
+                return;
+            }
+        }
         m_ranges_set.add(interval);
     }
 
