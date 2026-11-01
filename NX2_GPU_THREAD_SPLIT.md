@@ -262,3 +262,10 @@ meanwhile only writes guest memory, keeps the caches' books and uploads guest me
 bytes, with the buffer cache locked. Log: "Indirect draw reset uploads batched: N uploads in M copy
 commands over K resets" (first reset, then every 1024); profile: "indirect draw reset uploads N in
 M copy commands". Built; not measured yet.
+
+Review fixes (2026-11-01): a reset batch holds copies of one CanReorderUpload answer only (taken
+per copy when batched; recorded in order, a copy that would have gone to the upload command buffer
+could land after a later upload there over its bytes); with `EDEN_NX2_INLINE_DEFER=0` the batch is
+recorded before a run's immediate CPU-modified mark. Log "Indirect draw reset list ...: records
+share bytes (N lists with records overlapping at another offset, M naming one record twice, of K)"
+at each power of two: absent, those overlaps do not occur. Built; not measured yet.
