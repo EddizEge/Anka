@@ -271,6 +271,23 @@ public:
 
     bool InlineMemory(DAddr dest_address, size_t copy_size, std::span<const u8> inlined_buffer);
 
+    /// EDEN_NX2_RESET_BATCH: uploads gathered by InlineMemoryBatched and not recorded yet, all
+    /// into one buffer, each after the previous one's end.
+    struct InlineBatch {
+        static constexpr size_t MaxBytes = 256 * 1024;
+        BufferId buffer_id{};
+        std::vector<BufferCopy> copies; ///< src_offset: where the copy's bytes start in `bytes`
+        std::vector<u8> bytes;
+    };
+
+    /// InlineMemory with the upload's copy left in `batch` (FlushInlineBatch records it).
+    bool InlineMemoryBatched(DAddr dest_address, size_t copy_size,
+                             std::span<const u8> inlined_buffer, InlineBatch& batch);
+
+    /// Records the uploads gathered in `batch`: one staging buffer, one copy command between
+    /// the two barriers. Returns whether there were any.
+    bool FlushInlineBatch(InlineBatch& batch);
+
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size);
 
     void DisableGraphicsUniformBuffer(size_t stage, u32 index);

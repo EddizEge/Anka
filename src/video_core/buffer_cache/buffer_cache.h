@@ -2341,6 +2341,89 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
 }
 
 template <class P>
+bool BufferCache<P>::InlineMemoryBatched(DAddr dest_address, size_t copy_size,
+                                         std::span<const u8> inlined_buffer, InlineBatch& batch) {
+    // InlineMemory and InlineMemoryImplementation step by step, the upload's copy left in the
+    // batch, to be recorded with the following ones into the same buffer. Recorded first: the
+    // batch when FindBuffer may make a buffer (joining overlapping ones copies their contents,
+    // and frees them), when finding one may wait for the host GPU (accurate GPU fences: the
+    // write goes the unbatched way), when this copy goes to another buffer or does not start
+    // after the previous one's end (one copy command, regions in ascending order: overlapping
+    // writes keep their order), and when it is full. Until then this records only uploads of
+    // CPU-modified guest memory into the buffer (SynchronizeBuffer), the bytes an upload made
+    // in its place would have found there: each byte of the buffer ends up as it would have.
+    if (Settings::IsGPUFenceBehaviorAccurate()) [[unlikely]] {
+        FlushInlineBatch(batch);
+        return InlineMemory(dest_address, copy_size, inlined_buffer);
+    }
+    if (!IsRegionRegistered(dest_address, copy_size)) {
+        return false;
+    }
+    const DAddr aligned_start = Common::AlignDown(dest_address, DEVICE_PAGESIZE);
+    const DAddr aligned_end = Common::AlignUp(dest_address + copy_size, DEVICE_PAGESIZE);
+    if (!IsRegionGpuModified(aligned_start, aligned_end - aligned_start)) {
+        return false;
+    }
+    ClearDownload(dest_address, copy_size);
+    gpu_modified_ranges.Subtract(dest_address, copy_size);
+
+    // FindBuffer's own test for a buffer holding the range (it makes one otherwise).
+    const BufferId held = page_table[dest_address >> CACHING_PAGEBITS];
+    if (!held || !slot_buffers[held].IsInBounds(dest_address, copy_size)) {
+        FlushInlineBatch(batch);
+    }
+    const BufferId buffer_id = FindBuffer(dest_address, static_cast<u32>(copy_size), false);
+    Buffer& buffer = slot_buffers[buffer_id];
+    SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
+
+    const u64 dst_offset = buffer.Offset(dest_address);
+    if (!batch.copies.empty() &&
+        (buffer_id != batch.buffer_id ||
+         dst_offset < batch.copies.back().dst_offset + batch.copies.back().size ||
+         batch.bytes.size() + copy_size > InlineBatch::MaxBytes)) {
+        FlushInlineBatch(batch);
+    }
+    batch.buffer_id = buffer_id;
+    batch.copies.push_back(BufferCopy{
+        .src_offset = batch.bytes.size(),
+        .dst_offset = dst_offset,
+        .size = copy_size,
+    });
+    batch.bytes.insert(batch.bytes.end(), inlined_buffer.data(),
+                       inlined_buffer.data() + copy_size);
+    return true;
+}
+
+template <class P>
+bool BufferCache<P>::FlushInlineBatch(InlineBatch& batch) {
+    if (batch.copies.empty()) {
+        return false;
+    }
+    Buffer& buffer = slot_buffers[batch.buffer_id];
+    if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+        auto upload_staging = runtime.UploadStagingBuffer(batch.bytes.size());
+        std::memcpy(upload_staging.mapped_span.data(), batch.bytes.data(), batch.bytes.size());
+        for (BufferCopy& copy : batch.copies) {
+            copy.src_offset += upload_staging.offset;
+        }
+        const std::span<const BufferCopy> copies(batch.copies.data(), batch.copies.size());
+        // Into the upload command buffer only when every copy may go there (each alone would
+        // have; uploads mark no use, so no copy of the batch changed another's answer).
+        const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
+        runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+    } else {
+        for (const BufferCopy& copy : batch.copies) {
+            buffer.ImmediateUpload(copy.dst_offset,
+                                   std::span<const u8>(batch.bytes.data() + copy.src_offset,
+                                                       copy.size));
+        }
+    }
+    batch.copies.clear();
+    batch.bytes.clear();
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer) {
     DownloadBufferMemory(buffer, buffer.CpuAddr(), buffer.SizeBytes());
 }

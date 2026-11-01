@@ -245,6 +245,8 @@ enum class Counter : u32 {
     SameWritesInvalidatedLater, ///< Skipped, then invalidated at FlushCaching (work in between)
     SameWritesUntracked, ///< Held bytes not counted: a page written around the caches
     UniformStageReuses,  ///< Uniform binds EDEN_NX2_UBO_STAGE alone reused
+    ResetUploads,      ///< Indirect draw reset uploads batched (EDEN_NX2_RESET_BATCH)
+    ResetCopyCommands, ///< The copy commands they were recorded in
     Count,
 };
 
@@ -465,6 +467,11 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (data.counters[static_cast<size_t>(Counter::UniformStageReuses)] != 0) {
         line += fmt::format(" | uniform binds reused through the stage slot only {:.0f}",
                             rate(static_cast<size_t>(Counter::UniformStageReuses)));
+    }
+    if (data.counters[static_cast<size_t>(Counter::ResetUploads)] != 0) {
+        line += fmt::format(" | indirect draw reset uploads {:.0f} in {:.0f} copy commands",
+                            rate(static_cast<size_t>(Counter::ResetUploads)),
+                            rate(static_cast<size_t>(Counter::ResetCopyCommands)));
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",

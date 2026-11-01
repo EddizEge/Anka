@@ -8,6 +8,8 @@
 
 #include <array>
 #include <atomic>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include <boost/container/static_vector.hpp>
@@ -223,6 +225,12 @@ private:
     }
 
     void FlushWork();
+
+    /// EDEN_NX2_RESET_BATCH: AccelerateInlineToMemory for each run (address, size), in order,
+    /// a run's bytes being the first `size` of `data`. Called with the buffer and texture
+    /// caches locked (PrepareDraw).
+    void AccelerateInlineRuns(std::span<const std::pair<GPUVAddr, u32>> runs,
+                              std::span<const u8> data);
 
     void UpdateDynamicStates();
 

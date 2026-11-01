@@ -456,6 +456,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                         sorted = true;
                     }
                 }
+                // EDEN_NX2_RESET_BATCH: the runs written together (AccelerateInlineRuns), the
+                // uploads into GPU-written buffer data recorded as one copy per buffer instead of
+                // a staging buffer, two barriers and a copy each. Not with accurate GPU fences,
+                // where finding a buffer may wait for the host GPU. =0 writes each run on its own.
+                static const bool batch_enabled = [] {
+                    const char* value = std::getenv("EDEN_NX2_RESET_BATCH");
+                    return value == nullptr || value[0] != '0';
+                }();
+                const bool batch = batch_enabled && !Settings::IsGPUFenceBehaviorAccurate();
+                std::vector<std::pair<GPUVAddr, u32>> batch_runs;
+                if (batch) {
+                    batch_runs.reserve(records.size());
+                }
                 GPUVAddr run_start = 0;
                 u32 run_records = 0;
                 u32 writes = 0;
@@ -464,9 +477,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                         return;
                     }
                     const size_t run_bytes = size_t{run_records} * RecordSize;
-                    AccelerateInlineToMemory(
-                        run_start, run_bytes,
-                        {reinterpret_cast<const u8*>(run_words.data()), run_bytes});
+                    if (batch) {
+                        batch_runs.emplace_back(run_start, static_cast<u32>(run_bytes));
+                    } else {
+                        AccelerateInlineToMemory(
+                            run_start, run_bytes,
+                            {reinterpret_cast<const u8*>(run_words.data()), run_bytes});
+                    }
                     run_records = 0;
                     ++writes;
                 };
@@ -482,6 +499,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     run_records = 1;
                 }
                 write_run();
+                if (!batch_runs.empty()) {
+                    AccelerateInlineRuns(batch_runs, {reinterpret_cast<const u8*>(run_words.data()),
+                                                      sizeof(run_words)});
+                }
                 static u32 reset_logs{};
                 if (reset_logs < 5) {
                     ++reset_logs;
@@ -1941,35 +1962,49 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
     return accelerate_dma;
 }
 
+namespace {
+// The opt-in traces of an inline write (AccelerateInlineToMemory).
+void TraceInlineWrite(Tegra::MemoryManager& memory_manager, GPUVAddr address, DAddr cpu_addr,
+                      size_t copy_size, std::span<const u8> memory) {
+    if (!memory_manager.UsesNativeTiling()) {
+        return;
+    }
+    u32 first_word{};
+    if (memory.size() >= sizeof(first_word)) std::memcpy(&first_word, memory.data(), sizeof(first_word));
+    VideoCommon::TraceNativeQuery(11, memory_manager.GetID(), address, cpu_addr, 0, first_word,
+                                  static_cast<u32>(copy_size));
+    static const GPUVAddr watch = [] {
+        const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+        return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
+    }();
+    if (watch != 0 && address < watch + 16 && address + copy_size > watch) {
+        LOG_INFO(Render_Vulkan, "Semaphore watch: inline write {:#x} size {} first word {:#x}",
+                 address, copy_size, first_word);
+    }
+}
+
+// EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
+bool InlineDeferEnabled() {
+    static const bool defer = [] {
+        const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
+        return value == nullptr || value[0] != '0';
+    }();
+    return defer;
+}
+} // Anonymous namespace
+
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
     NoteLightWork();
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
-    if (gpu_memory->UsesNativeTiling()) {
-        u32 first_word{};
-        if (memory.size() >= sizeof(first_word)) std::memcpy(&first_word, memory.data(), sizeof(first_word));
-        VideoCommon::TraceNativeQuery(11, gpu_memory->GetID(), address, cpu_addr.value_or(0),
-            0, first_word, static_cast<u32>(copy_size));
-        static const GPUVAddr watch = [] {
-            const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
-            return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
-        }();
-        if (watch != 0 && address < watch + 16 && address + copy_size > watch) {
-            LOG_INFO(Render_Vulkan, "Semaphore watch: inline write {:#x} size {} first word {:#x}",
-                     address, copy_size, first_word);
-        }
-    }
+    TraceInlineWrite(*gpu_memory, address, cpu_addr.value_or(0), copy_size, memory);
     if (!cpu_addr) [[unlikely]] {
         gpu_memory->WriteBlock(address, memory.data(), copy_size);
         return;
     }
     // Every cache is told below (or at the next FlushCaching): not a write around them.
     gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size, true);
-    // EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
-    static const bool defer = [] {
-        const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
-        return value == nullptr || value[0] != '0';
-    }();
+    const bool defer = InlineDeferEnabled();
     // One cache at a time: holding both while waiting for either (std::lock) waited longer, the
     // fencing thread and CPU write traps holding one of them most of the time.
     bool uploaded;
@@ -1996,6 +2031,76 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         texture_cache.WriteMemory(*cpu_addr, copy_size);
     }
     pipeline_cache.InvalidateRegion(*cpu_addr, copy_size);
+}
+
+void RasterizerVulkan::AccelerateInlineRuns(std::span<const std::pair<GPUVAddr, u32>> runs,
+                                            std::span<const u8> data) {
+    // EDEN_NX2_RESET_BATCH: AccelerateInlineToMemory for each run, the same steps in the same
+    // order, except that the buffer cache leaves its uploads into GPU-written buffer data in a
+    // batch (BufferCache::InlineMemoryBatched): consecutive ones into one buffer are recorded as
+    // one copy, from one staging buffer, between two barriers. The batch is recorded before this
+    // returns, so before anything that may read the buffer: the steps it waits through write
+    // guest memory, keep the caches' books (query, texture and shader invalidations, the
+    // deferred ranges) and record only uploads of guest memory over the same bytes; the buffer
+    // cache stays locked throughout (no other thread's download or bind comes in between), and
+    // a run outside device memory (the memory manager's slow path) goes after what is batched.
+    // One light epoch step stands for every run's (only its change is compared).
+    namespace Profile = VideoCommon::Nx2Profile;
+    NoteLightWork();
+    const bool defer = InlineDeferEnabled();
+    std::scoped_lock buffer_lock{buffer_cache.mutex};
+    BufferCache::InlineBatch batch;
+    u64 uploads = 0;
+    u64 commands = 0;
+    // On any way out, what is batched is recorded too.
+    SCOPE_EXIT {
+        buffer_cache.FlushInlineBatch(batch);
+    };
+    for (const auto& [address, size] : runs) {
+        const std::span<const u8> bytes = data.first(size);
+        const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
+        if (!cpu_addr) [[unlikely]] {
+            commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
+            AccelerateInlineToMemory(address, size, bytes);
+            continue;
+        }
+        TraceInlineWrite(*gpu_memory, address, *cpu_addr, size, bytes);
+        gpu_memory->WriteBlockUnsafe(address, bytes.data(), size, true);
+        const size_t batched = batch.copies.size();
+        const bool uploaded = buffer_cache.InlineMemoryBatched(*cpu_addr, size, bytes, batch);
+        if (uploaded) {
+            ++uploads;
+            // Copies recorded on the way (the batch emptied or the unbatched way taken).
+            commands += batch.copies.size() <= batched ? 1 : 0;
+        } else if (!defer) {
+            buffer_cache.WriteMemory(*cpu_addr, size);
+        }
+        query_cache.InvalidateRegion(*cpu_addr, size);
+        if (!uploaded && defer) {
+            gpu_memory->AccumulateInvalidation(address, size);
+            continue;
+        }
+        {
+            std::scoped_lock lock{texture_cache.mutex};
+            texture_cache.WriteMemory(*cpu_addr, size);
+        }
+        pipeline_cache.InvalidateRegion(*cpu_addr, size);
+    }
+    commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
+    Profile::Add(Profile::Counter::ResetUploads, uploads);
+    Profile::Add(Profile::Counter::ResetCopyCommands, commands);
+    static u64 calls{};
+    static u64 total_uploads{};
+    static u64 total_commands{};
+    ++calls;
+    total_uploads += uploads;
+    total_commands += commands;
+    if (calls == 1 || (calls & ((u64{1} << 10) - 1)) == 0) {
+        LOG_INFO(HW_GPU,
+                 "Indirect draw reset uploads batched: {} uploads in {} copy commands over {} "
+                 "resets (EDEN_NX2_RESET_BATCH=0: one each)",
+                 total_uploads, total_commands, calls);
+    }
 }
 
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
