@@ -3180,6 +3180,9 @@ public:
     void CallMethodRun(Core::System& system, const u32* methods, const u32* arguments,
                        u32 count) override;
 
+    /// EngineInterface::CallMethodBatch with CallMethod inlined (no virtual call per write).
+    void CallMethodBatch(Core::System& system, const u64* writes, u32 count) override;
+
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
     /// the front instead of CallMethod: runs macros and macro uploads against a copy of the
     /// registers and sends the register writes to the back thread.
@@ -3333,6 +3336,9 @@ private:
 
     void ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call);
 
+    /// What CallMethod does (inlined into CallMethodBatch).
+    void CallMethodImpl(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
+
     /// Retrieves information about a specific TIC entry from the TIC buffer.
     Texture::TICEntry GetTICEntry(u32 tic_index) const;
 
@@ -3409,7 +3415,12 @@ private:
     std::array<RecentWrite, 48> recent_writes{};
     size_t recent_write_index = 0;
     void RecordWrite(u32 method, u32 argument, u32 amount, u32 pending) {
-        recent_writes[recent_write_index++ % recent_writes.size()] = {method, argument, amount, pending};
+        // The index wraps here instead of being taken modulo 48 for each write (a multiply per
+        // register write); DumpRecentWrites reads the same slots in the same order.
+        recent_writes[recent_write_index] = {method, argument, amount, pending};
+        if (++recent_write_index == recent_writes.size()) {
+            recent_write_index = 0;
+        }
     }
     void DumpRecentWrites(u32 method);
     /// Parameters that have been submitted to the macro call so far.

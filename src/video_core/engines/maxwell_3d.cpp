@@ -37,6 +37,12 @@ namespace Tegra::Engines {
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MAXWELL3D_FORCE_INLINE __forceinline
+#else
+#define MAXWELL3D_FORCE_INLINE inline __attribute__((always_inline))
+#endif
+
 namespace {
 
 // EDEN_NX2_LIGHT_DRAW=0: every draw is set up in full (vk_rasterizer.cpp). Its changes are still
@@ -615,7 +621,8 @@ void Maxwell3D::TraceFirstMethodWrite(u32 method, u32 argument) {
     }
 }
 
-void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+MAXWELL3D_FORCE_INLINE void Maxwell3D::CallMethodImpl(Core::System& system, u32 method,
+                                                      u32 method_argument, bool is_last_call) {
     // It is an error to write to a register other than the current macro's ARG register before
     // it has finished execution.
     if (executing_macro != 0 && method != executing_macro + 1) {
@@ -662,6 +669,21 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
     }
     ProcessDirtyRegisters(method, argument);
     ProcessMethodCall(method, argument, method_argument, is_last_call);
+}
+
+void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+    CallMethodImpl(system, method, method_argument, is_last_call);
+}
+
+void Maxwell3D::CallMethodBatch(Core::System& system, const u64* writes, u32 count) {
+    // The split's back takes ~3 million macro writes a second this way (EDEN_NX2_WRITE_BATCH):
+    // the same calls as EngineInterface::CallMethodBatch, CallMethod inlined into the loop.
+    ForEachBatchWrite(
+        writes, count,
+        [&](u32 method, u32 argument) { CallMethodImpl(system, method, argument, true); },
+        [&](const u32* methods, const u32* arguments, u32 run) {
+            CallMethodRun(system, methods, arguments, run);
+        });
 }
 
 void Maxwell3D::CallMethodRun(Core::System& system, const u32* methods, const u32* arguments,

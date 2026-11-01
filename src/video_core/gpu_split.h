@@ -249,6 +249,8 @@ private:
     std::array<u64, MaxPending> pending{};
     u32 pending_count{};
     bool batch_writes{};
+    /// EDEN_NX2_BATCH_DIRECT: Batch entries go to the engine's CallMethodBatch (back side).
+    bool batch_direct{};
     /// See Count: the write position and the last published one without batching.
     u64 unbatched_position{};
     u64 unbatched_published{};

@@ -47,6 +47,19 @@ public:
         }
     }
 
+    /// The macro writes of a split GPU thread Batch entry (each bits 0-15 method, 32-63
+    /// argument), after its ConsumeSink: CallMethod(system, method, argument, true) for each, in
+    /// order, runs of the run methods through CallMethodRun as from consecutive entries
+    /// (GpuSplit::Execute, EDEN_NX2_BATCH_DIRECT).
+    virtual void CallMethodBatch(Core::System& system, const u64* writes, u32 count) {
+        ForEachBatchWrite(
+            writes, count,
+            [&](u32 method, u32 argument) { CallMethod(system, method, argument, true); },
+            [&](const u32* methods, const u32* arguments, u32 run) {
+                CallMethodRun(system, methods, arguments, run);
+            });
+    }
+
     void ConsumeSink(Core::System& system) {
         if (!method_sink.empty()) {
             ConsumeSinkImpl(system);
@@ -62,6 +75,36 @@ public:
     u32 method_run_begin{};
     u32 method_run_count{};
 protected:
+    /// CallMethodBatch's loop: `call(method, argument)` for a write, `call_run(methods,
+    /// arguments, count)` for a run of the run methods (at most MaxMethodRun).
+    template <typename Call, typename CallRun>
+    void ForEachBatchWrite(const u64* writes, u32 count, Call&& call, CallRun&& call_run) const {
+        for (u32 i = 0; i < count;) {
+            const u32 method = static_cast<u32>(writes[i] & 0xffff);
+            const u32 argument = static_cast<u32>(writes[i] >> 32);
+            if (method - method_run_begin < method_run_count) {
+                u32 methods[MaxMethodRun];
+                u32 arguments[MaxMethodRun];
+                u32 run = 0;
+                for (; run < MaxMethodRun && i + run < count; ++run) {
+                    const u32 next = static_cast<u32>(writes[i + run] & 0xffff);
+                    if (next - method_run_begin >= method_run_count) {
+                        break;
+                    }
+                    methods[run] = next;
+                    arguments[run] = static_cast<u32>(writes[i + run] >> 32);
+                }
+                if (run > 1) {
+                    call_run(methods, arguments, run);
+                    i += run;
+                    continue;
+                }
+            }
+            call(method, argument);
+            ++i;
+        }
+    }
+
     virtual void ConsumeSinkImpl(Core::System& system) {
         for (auto [method, value] : method_sink) {
             CallMethod(system, method, value, true);

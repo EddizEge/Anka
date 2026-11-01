@@ -116,6 +116,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         return value == nullptr || value[0] != '0';
     }();
     batch_writes = batch;
+    // EDEN_NX2_BATCH_DIRECT=0: a Batch entry's writes go to the engine one virtual call each
+    // (Execute); otherwise through its CallMethodBatch, the same loop with its own calls.
+    static const bool direct = [] {
+        const char* value = std::getenv("EDEN_NX2_BATCH_DIRECT");
+        return value == nullptr || value[0] != '0';
+    }();
+    batch_direct = direct;
     pending_count = 0;
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
@@ -370,6 +377,10 @@ size_t GpuSplit::Execute(const u64* entry, u64 published_left) {
         auto* const engine = back_engine;
         Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         engine->ConsumeSink(*system);
+        if (batch_direct) {
+            engine->CallMethodBatch(*system, writes, count);
+            return 1 + size_t{count};
+        }
         using Tegra::Engines::EngineInterface;
         for (u32 i = 0; i < count;) {
             const u32 method = static_cast<u32>(writes[i] & 0xffff);
