@@ -23,6 +23,7 @@
 #include "video_core/engines/engine_interface.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_back_cpu.h"
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_profile.h"
 
@@ -144,6 +145,8 @@ void GpuSplit::Stop() {
     wake.fetch_add(1, std::memory_order_seq_cst);
     wake.notify_one();
     back_thread.join();
+    // EDEN_NX2_BACK_CPU: the core the back had is the process's again.
+    Nx2BackCpu::StopBack();
     active = false;
     // The split is static and outlives the emulation session. The next session's back thread
     // starts reading at 0: with the old positions kept it skipped through the new, empty ring a
@@ -186,6 +189,7 @@ void GpuSplit::WaitForSpace(size_t words) {
     }
     // Reserve runs with no macro write held (ReserveEntry, WritePending, MacroWrite unbatched).
     PublishRing();
+    Nx2BackCpu::NoteFront();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
@@ -226,6 +230,7 @@ bool GpuSplit::Drain() {
         return false;
     }
     Publish();
+    Nx2BackCpu::NoteFront();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
@@ -421,6 +426,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     Common::SetCurrentThreadName("GPUBack");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    // EDEN_NX2_BACK_CPU: a physical core of its own (nx2_back_cpu.h).
+    Nx2BackCpu::StartBack();
     system->RegisterHostThread();
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
@@ -452,6 +459,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         }
         u64 last_store = read_position;
         g_back_busy.store(true, std::memory_order_relaxed);
+        Nx2BackCpu::NoteBack();
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             const size_t size = Execute(&ring[index], available - read_position);
@@ -460,6 +468,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if (read_position - last_store >= 4096 && read_position != available) {
                 consumed.store(read_position, std::memory_order_release);
                 last_store = read_position;
+                Nx2BackCpu::NoteBack();
             }
         }
         g_back_busy.store(false, std::memory_order_release);

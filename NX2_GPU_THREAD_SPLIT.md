@@ -324,3 +324,20 @@ With `=2` the draws that bound them again are verified instead of drawn: "bound 
 "verified" counts them. `EDEN_NX2_LIGHT_UNIFORM_VALUES=0` treats every storage descriptor word
 written over as changed, so with this switch on those draws bind again rather than refuse.
 Built; not measured yet.
+
+## A core of its own for the back (2026-11-01)
+
+The back is the thread a frame waits on (~98% busy). On Windows nothing places it
+(`Common::SetCurrentThreadToPerformanceCores` acts on Android only), so the other logical
+processor of its core may run another busy thread of the process meanwhile (the front spinning
+in Drain, HostTiming, a guest CPU core), and the two share that core. `EDEN_NX2_BACK_CPU=1` (off
+by default until an A/B shows a gain; unset or `=0`: nothing is called): the back runs on one
+physical core (CPU Sets, both of its logical processors) and the process's other threads on the
+other cores (the process's default CPU Sets, set back when the split stops; each new back thread
+pins itself again); `EDEN_NX2_BACK_CORE=<n>` picks the core by Windows' CoreIndex, as the log line
+names it (default: the second core of group 0). `=2` pins and logs where the back and the front
+ran, every ~32,768 samples (a sample per back wake and per 4,096 ring words: "GPU thread split
+placement (N samples, back pinned): back on logical processors ...; front last waiting on ...;
+back on the front's core X% of samples"; pinned, X should be 0); `=3` only logs (where Windows
+puts them unpinned). The switch is read at first use. Built; not measured yet
+(src/video_core/nx2_back_cpu.h).
