@@ -718,8 +718,14 @@ bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidat
         Profile::Add(Profile::Counter::LightUniformTic, 1);
         return false;
     }
-    if (entries_written(regs.tex_sampler.Address(), regs.tex_sampler.limit,
-                        pipeline.UsedSamplers())) {
+    // The sampler pool as TextureCache::SynchronizeDescriptors sets it up: at tex_sampler, with
+    // the header pool's limit when samplers go by header index (ViaHeaderBinding; TexturePair
+    // then gives the header index as the sampler index). Indices past the limit read nothing
+    // (GetSamplerId: the null sampler), so the whole-pool test misses no entry read.
+    const u32 tsc_limit = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding
+                              ? regs.tex_header.limit
+                              : regs.tex_sampler.limit;
+    if (entries_written(regs.tex_sampler.Address(), tsc_limit, pipeline.UsedSamplers())) {
         Profile::Add(Profile::Counter::LightUniformTsc, 1);
         return false;
     }
