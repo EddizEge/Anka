@@ -109,6 +109,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
+    // EDEN_NX2_WRITE_BATCH=0: every macro write is a ring entry of its own.
+    static const bool batch = [] {
+        const char* value = std::getenv("EDEN_NX2_WRITE_BATCH");
+        return value == nullptr || value[0] != '0';
+    }();
+    batch_writes = batch;
+    pending_count = 0;
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -141,6 +148,7 @@ void GpuSplit::Stop() {
     consumed_cache = 0;
     publish_every = PublishEvery;
     front_engine = nullptr;
+    pending_count = 0;
     back_engine = nullptr;
     front_macros = false;
     published.store(0, std::memory_order_relaxed);
@@ -182,6 +190,7 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
+    FlushPending();
     if (published_local == write_position) {
         return;
     }
@@ -195,6 +204,7 @@ void GpuSplit::Publish() {
 }
 
 bool GpuSplit::Drain() {
+    FlushPending();
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
         return false;
@@ -217,7 +227,8 @@ bool GpuSplit::Drain() {
 
 void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
     front_engine = engine;
-    u64* const entry = Reserve(2);
+    // The held writes are the previous engine's: they go before the switch.
+    u64* const entry = ReserveEntry(2);
     entry[0] = static_cast<u64>(Kind::Engine);
     entry[1] = reinterpret_cast<u64>(engine);
     Commit(2);
@@ -232,7 +243,7 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         const u32 piece = std::min(amount, MaxMultiWords);
         const size_t head = segment != nullptr ? 3 : 2;
         const size_t size = head + (piece + 1) / 2;
-        u64* const entry = Reserve(size);
+        u64* const entry = ReserveEntry(size);
         entry[0] = static_cast<u64>(Kind::Multi) | (segment != nullptr ? HasSegment : 0) |
                    (u64{method & 0xffff} << 8) | (u64{piece} << 32);
         entry[1] = methods_pending;
@@ -246,6 +257,16 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         amount -= piece;
         methods_pending -= piece;
     }
+}
+
+void GpuSplit::WritePending() {
+    // Cleared first: Reserve may publish (WaitForSpace), and Publish sends what is held.
+    const u32 count = pending_count;
+    pending_count = 0;
+    u64* const entry = Reserve(1 + size_t{count});
+    entry[0] = static_cast<u64>(Kind::Batch) | (u64{count} << 32);
+    std::memcpy(entry + 1, pending.data(), size_t{count} * sizeof(u64));
+    Commit(1 + size_t{count});
 }
 
 void GpuSplit::DeferFunction(std::function<void()>&& func) {
@@ -326,6 +347,45 @@ size_t GpuSplit::Execute(const u64* entry, u64 published_left) {
         engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
                                 amount, static_cast<u32>(entry[1]));
         return data + (amount + 1) / 2;
+    }
+    case Kind::Batch: {
+        // EDEN_NX2_WRITE_BATCH: for each write what a Method entry with IsLast and Direct does,
+        // in order. The method sink grows only from non-Direct Method entries (CallMethod never
+        // adds to it), so after the first ConsumeSink the ones before the later writes found it
+        // empty. Runs of the engine's run methods go to CallMethodRun as from consecutive
+        // entries (at most MaxMethodRun; CallMethodRun takes any such run word by word if it
+        // must).
+        const u32 count = static_cast<u32>(head >> 32);
+        const u64* const writes = entry + 1;
+        auto* const engine = back_engine;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        engine->ConsumeSink(*system);
+        using Tegra::Engines::EngineInterface;
+        for (u32 i = 0; i < count;) {
+            const u32 method = static_cast<u32>(writes[i] & 0xffff);
+            const u32 argument = static_cast<u32>(writes[i] >> 32);
+            if (method - engine->method_run_begin < engine->method_run_count) {
+                u32 methods[EngineInterface::MaxMethodRun];
+                u32 arguments[EngineInterface::MaxMethodRun];
+                u32 run = 0;
+                for (; run < EngineInterface::MaxMethodRun && i + run < count; ++run) {
+                    const u32 next = static_cast<u32>(writes[i + run] & 0xffff);
+                    if (next - engine->method_run_begin >= engine->method_run_count) {
+                        break;
+                    }
+                    methods[run] = next;
+                    arguments[run] = static_cast<u32>(writes[i + run] >> 32);
+                }
+                if (run > 1) {
+                    engine->CallMethodRun(*system, methods, arguments, run);
+                    i += run;
+                    continue;
+                }
+            }
+            engine->CallMethod(*system, method, argument, true);
+            ++i;
+        }
+        return 1 + size_t{count};
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);

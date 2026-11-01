@@ -1065,7 +1065,7 @@ struct Maxwell3D::FrontState {
     u32 gap_methods{~0U};
 
     /// Profiling: remembers what was written first after the held indirect draw.
-    void NoteInterposer(const VideoCommon::GpuSplit& split, u32 kind, u32 method) {
+    void NoteInterposer(VideoCommon::GpuSplit& split, u32 kind, u32 method) {
         if (held_indirect.payload != nullptr && indirect_interposer == 0 &&
             split.WritePosition() == held_indirect.end) {
             indirect_interposer = (kind << 16) | (method & 0xffff);

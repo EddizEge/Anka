@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <functional>
@@ -57,7 +58,7 @@ public:
                 const GPUVAddr* segment) {
         SelectEngine(engine);
         const size_t words = segment != nullptr ? 2 : 1;
-        u64* const entry = Reserve(words);
+        u64* const entry = ReserveEntry(words);
         entry[0] = static_cast<u64>(Kind::Method) | (is_last ? IsLast : 0) |
                    (segment != nullptr ? HasSegment : 0) | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
@@ -70,6 +71,16 @@ public:
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
+        if (batch_writes) {
+            // EDEN_NX2_WRITE_BATCH: held, then sent with the macro writes after it to the same
+            // engine as one entry (WritePending) before anything else enters the ring.
+            if (engine != front_engine || pending_count == MaxPending) [[unlikely]] {
+                FlushPending();
+                SelectEngine(engine);
+            }
+            pending[pending_count++] = (u64{argument} << 32) | (method & 0xffff);
+            return;
+        }
         SelectEngine(engine);
         u64* const entry = Reserve(1);
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
@@ -82,7 +93,7 @@ public:
     void Defer(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
-        u64* const entry = Reserve(2 + payload);
+        u64* const entry = ReserveEntry(2 + payload);
         entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
@@ -96,7 +107,7 @@ public:
     u64* DeferEditable(const Func& func, u64& start) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
-        u64* const entry = Reserve(2 + payload);
+        u64* const entry = ReserveEntry(2 + payload);
         // After a skip to the ring's start (ReserveSlow) too, the entry is at write_position.
         start = write_position;
         entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
@@ -105,8 +116,9 @@ public:
         Commit(2 + payload);
         return entry + 2;
     }
-    /// Front: the position the next entry goes to.
-    [[nodiscard]] u64 WritePosition() const {
+    /// Front: the position the next entry goes to (held macro writes are sent first).
+    [[nodiscard]] u64 WritePosition() {
+        FlushPending();
         return write_position;
     }
     /// Front: whether the entry starting at `position` may already be visible to the back.
@@ -135,6 +147,8 @@ private:
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        Batch,  ///< Bits 32-63 count, then a word per macro write: bits 0-15 method, 32-63
+                ///< argument (each run as a Method entry with IsLast and Direct)
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -144,6 +158,7 @@ private:
     static constexpr size_t RingMask = RingWords - 1;
     static constexpr u32 MaxMultiWords = 8192;
     static constexpr size_t PublishEvery = 256;
+    static constexpr u32 MaxPending = 64; ///< Macro writes in one Batch entry at most
 
     template <typename Func>
     static void CallThunk(const u64* payload) {
@@ -166,6 +181,18 @@ private:
             Publish();
         }
     }
+    /// Room for any entry but a batch: the macro writes held so far go before it.
+    u64* ReserveEntry(size_t words) {
+        FlushPending();
+        return Reserve(words);
+    }
+    /// Sends the held macro writes (EDEN_NX2_WRITE_BATCH) as one Batch entry.
+    void FlushPending() {
+        if (pending_count != 0) {
+            WritePending();
+        }
+    }
+    void WritePending();
     void WaitForSpace(size_t words);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
         if (engine != front_engine) [[unlikely]] {
@@ -191,6 +218,10 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// EDEN_NX2_WRITE_BATCH: macro writes to front_engine not in the ring yet (WritePending).
+    std::array<u64, MaxPending> pending{};
+    u32 pending_count{};
+    bool batch_writes{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
