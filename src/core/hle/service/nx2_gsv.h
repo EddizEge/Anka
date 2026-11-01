@@ -54,6 +54,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_mode_diag.h"
+#include "video_core/nx2_mode_gov.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -1050,6 +1051,9 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(PresentInterval(w));
         const auto paced = std::chrono::steady_clock::now();
+        if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
+        }
         if (PresentDiagEnabled()) {
             DiagPresent(w, entered, waited, composited, paced);
         }

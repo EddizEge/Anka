@@ -37,6 +37,7 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_busy_clock.h"
+#include "video_core/nx2_mode_gov.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -177,6 +178,9 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
+        if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
+            return VideoCommon::Nx2ModeGov::Ticks();
+        }
         if (VideoCommon::Nx2BusyClock::Enabled()) [[unlikely]] {
             return GetBusyTicks();
         }
