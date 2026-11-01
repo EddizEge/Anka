@@ -548,6 +548,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
             return;
         }
     }
+    if (Profile::Enabled() && LightDrawEnabled()) {
+        NoteLightPipeline(*pipeline, is_indexed, indirect, invalidated);
+    }
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
     const u64 render_pass_begins = scheduler.RenderPassBegins();
@@ -867,6 +870,78 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
         ++logged;
         LOG_WARNING(Render_Vulkan, "Light uniform draw differs from its full setup (pipeline {:#x}): {}",
                     light_verify.pipeline->KeyHash(), mismatch);
+    }
+}
+
+void RasterizerVulkan::NoteLightPipeline(const GraphicsPipeline& pipeline, bool is_indexed,
+                                         bool indirect, bool invalidated) {
+    // A draw the uniform way would have taken (TryLightDraw's and LightUniformOk's conditions on
+    // the previous draw, the work in between, the draw's shape and the cached writes) had fixed
+    // function state not changed too: no texture pool, command or other work since. Setting up
+    // only its pipeline and dynamic state (the EDEN_NX2_LIGHT_PIPELINE design) needs besides:
+    // - the pipeline the full setup found is the previous draw's (the same key: only dynamic
+    //   state changed, UpdateDynamicStates) or one with the same programs (a pipeline switch with
+    //   the descriptors kept, if their layouts match: not checked here);
+    // - no render target register written since the last render target update
+    //   (VideoCommon::Dirty::RenderTargets, also surface clip and with it the render area);
+    // - the descriptor words the previous pipeline reads unchanged (CheckDescriptorWords).
+    // Texture header and sampler pool entries and sparse ranges written are not checked here
+    // (LightUniformOk does). Changes nothing; the first reason that applies is counted.
+    namespace Profile = VideoCommon::Nx2Profile;
+    using LightChange = Tegra::Engines::Maxwell3D::LightChange;
+    const LightAnchor& last = light_anchor;
+    const auto& light = maxwell3d->light;
+    if (LightUniformMode() == 0 || last.level == LightLevel::None || last.pipeline == nullptr ||
+        (light.changes & LightChange::State) == 0 ||
+        (light.changes & ~(LightChange::Uniform | LightChange::State)) != 0 ||
+        last.maxwell3d != maxwell3d || last.gpu_memory != gpu_memory ||
+        last.record_count != light_entry.record_count ||
+        scheduler.RecordCount() != light_entry.record_count ||
+        last.epoch != light_epoch.load(std::memory_order_seq_cst)) {
+        return;
+    }
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    if (!light_entry.shape_ok || indirect != last.indirect || is_indexed != last.is_indexed ||
+        draw_state.topology != last.topology ||
+        (is_indexed && draw_state.index_buffer.format != last.index_format) ||
+        !LightFeedbackOff()) {
+        return;
+    }
+    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
+    if (cached_writes != light.cb_writes - last.cb_writes ||
+        light.written_count > light.written.size() || (invalidated && cached_writes == 0) ||
+        texture_cache.WriteHits() != last.image_hits ||
+        pipeline_cache.InvalidationHits() != last.shader_hits) {
+        return;
+    }
+    Profile::Add(Profile::Counter::LightPipelineCandidates, 1);
+    const GraphicsPipeline& previous = *last.pipeline;
+    if (&pipeline != &previous && pipeline.Key().unique_hashes != previous.Key().unique_hashes) {
+        Profile::Add(Profile::Counter::LightPipelinePrograms, 1);
+        return;
+    }
+    if (maxwell3d->dirty.flags[VideoCommon::Dirty::RenderTargets]) {
+        Profile::Add(Profile::Counter::LightPipelineTargets, 1);
+        return;
+    }
+    const std::span<const std::pair<GPUVAddr, u32>> written{light.written.data(),
+                                                            light.written_count};
+    if (previous.CheckDescriptorWords(written, light.rebound, LightUniformValues()).changed != 0) {
+        Profile::Add(Profile::Counter::LightPipelineDescriptors, 1);
+        return;
+    }
+    if (light.first_blocking_uniform != 0) {
+        Profile::Note(Profile::Histogram::LightPipelineFirst,
+                      s64{light.first_blocking_uniform} - 1);
+    }
+    if (&pipeline != &previous) {
+        Profile::Add(Profile::Counter::LightPipelineSwitch, 1);
+        return;
+    }
+    Profile::Add(Profile::Counter::LightPipelineSame, 1);
+    if ((light.changes & (LightChange::UniformData | LightChange::UniformBind)) == 0 &&
+        cached_writes == light.same_writes - last.same_writes && last.level == LightLevel::Full) {
+        Profile::Add(Profile::Counter::LightPipelineSamePlain, 1);
     }
 }
 

@@ -269,3 +269,19 @@ could land after a later upload there over its bytes); with `EDEN_NX2_INLINE_DEF
 recorded before a run's immediate CPU-modified mark. Log "Indirect draw reset list ...: records
 share bytes (N lists with records overlapping at another offset, M naming one record twice, of K)"
 at each power of two: absent, those overlaps do not occur. Built; not measured yet.
+
+## Light pipeline candidates, counted only (2026-11-01)
+
+After the uniform way, the draws set up in full for changed fixed function state alone (13,359 a
+second in the wide area, a14f540ce: "+ state") are what a light draw that sets up its pipeline and
+dynamic state again (EDEN_NX2_LIGHT_PIPELINE, designed, not built) could take. Whether that pays
+depends on how many of them keep their programs, render targets and descriptor words, which the
+profile did not tell. With `EDEN_NX2_GPU_PROFILE` the back's line now adds "light pipeline
+candidates (counted only) N: programs changed, render targets, descriptors; same pipeline (without
+uniforms), same programs (first register: ...)" (RasterizerVulkan::NoteLightPipeline, reads only):
+of the full setups after a draw the uniform way may follow, with nothing between but constant
+buffer data and fixed function state, the first reason that applies (the four reasons and the two
+"same" counts add up to N). "Same pipeline" draws changed dynamic state only; "same programs"
+ones another pipeline key (with dynamic vertex input off, vertex attribute formats are part of
+it). Decision rule (rapor_boru): 3.0·E + 1.4·(D−E) + 1.15·F ≥ ~10 ms/s with D same pipeline, E
+without uniforms, F same programs (per second). Built; not measured yet.

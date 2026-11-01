@@ -117,6 +117,7 @@ enum class Histogram : u32 {
     IndirectGapMethods,  ///< Methods written between two indirect draws (the first 16 of each gap)
     LightBlocking,       ///< First register that kept a draw off the light path (EDEN_NX2_LIGHT_DRAW)
     LightUniformBlocking, ///< First register outside what a light draw with uniforms sets up again
+    LightPipelineFirst,   ///< The same, for draws that kept only it from that way (counted only)
     Count,
 };
 
@@ -247,6 +248,16 @@ enum class Counter : u32 {
     UniformStageReuses,  ///< Uniform binds EDEN_NX2_UBO_STAGE alone reused
     ResetUploads,      ///< Indirect draw reset uploads batched (EDEN_NX2_RESET_BATCH)
     ResetCopyCommands, ///< The copy commands they were recorded in
+    // Draws set up in full that only fixed function state kept off the uniform way, for the
+    // EDEN_NX2_LIGHT_PIPELINE design (counted only, RasterizerVulkan::NoteLightPipeline); the
+    // first of these that applies:
+    LightPipelineCandidates,
+    LightPipelinePrograms,    ///< The pipeline found has other programs than the previous one
+    LightPipelineTargets,     ///< Render targets marked dirty (their registers written)
+    LightPipelineDescriptors, ///< A descriptor word the previous pipeline reads changed
+    LightPipelineSame,        ///< The previous pipeline: only dynamic state changed
+    LightPipelineSamePlain,   ///< Of LightPipelineSame: no uniform data or binds changed either
+    LightPipelineSwitch,      ///< Another pipeline with the same programs
     Count,
 };
 
@@ -462,6 +473,22 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::SameWritesInvalidatedLater),
                             counter(Counter::SameWritesMade),
                             counter(Counter::SameWritesUntracked));
+        if (data.counters[static_cast<size_t>(Counter::LightPipelineCandidates)] != 0) {
+            line += fmt::format(" | light pipeline candidates (counted only) {:.0f}: {:.0f} "
+                                "programs changed, {:.0f} render targets, {:.0f} descriptors; "
+                                "{:.0f} same pipeline ({:.0f} without uniforms), {:.0f} same "
+                                "programs (first register: {})",
+                                counter(Counter::LightPipelineCandidates),
+                                counter(Counter::LightPipelinePrograms),
+                                counter(Counter::LightPipelineTargets),
+                                counter(Counter::LightPipelineDescriptors),
+                                counter(Counter::LightPipelineSame),
+                                counter(Counter::LightPipelineSamePlain),
+                                counter(Counter::LightPipelineSwitch),
+                                TopValues(histograms[static_cast<size_t>(
+                                              Histogram::LightPipelineFirst)],
+                                          method, 8));
+        }
     }
     // Counted where uniform buffers are bound: the back's line with the split on.
     if (data.counters[static_cast<size_t>(Counter::UniformStageReuses)] != 0) {

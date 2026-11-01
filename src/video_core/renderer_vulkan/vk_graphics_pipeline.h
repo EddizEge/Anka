@@ -192,6 +192,9 @@ public:
     [[nodiscard]] u64 KeyHash() const noexcept {
         return key.Hash();
     }
+    [[nodiscard]] const GraphicsPipelineCacheKey& Key() const noexcept {
+        return key;
+    }
 
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
         if (key == current_key) {

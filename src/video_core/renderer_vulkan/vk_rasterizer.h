@@ -219,6 +219,11 @@ private:
     [[nodiscard]] LightLevel LightFollowable(const GraphicsPipeline& pipeline);
     /// EDEN_NX2_LIGHT_UNIFORM=2: compares a full setup with what TryLightDraw decided.
     void CheckLightVerify(GraphicsPipeline& pipeline, u64 render_pass_begins, u64 dynamic_records);
+    /// EDEN_NX2_GPU_PROFILE: for a full setup that only fixed function state kept off the uniform
+    /// way, counts what setting up its pipeline and dynamic state alone (the EDEN_NX2_LIGHT_PIPELINE
+    /// design, not implemented) would depend on. Reads only.
+    void NoteLightPipeline(const GraphicsPipeline& pipeline, bool is_indexed, bool indirect,
+                           bool invalidated);
     /// Work outside draws that may change what the next draw would bind (any thread).
     void NoteLightWork() noexcept {
         light_epoch.fetch_add(1, std::memory_order_seq_cst);
