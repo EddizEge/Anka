@@ -186,5 +186,30 @@ the range meets an entry the draw uses (32 bytes each). The refusals are split: 
 word in a rebound slot), handles, storage descriptors, TIC, TSC; "rewritten with the same value"
 counts the draws the comparison let through. `EDEN_NX2_LIGHT_UNIFORM_VALUES=0` refuses on any
 overlap as before. `=2` compares a uniform buffer the full setup streamed elsewhere by its bytes
-(StagingBufferPool::MappedBytes) and counts "uniform slices moved, same bytes". Built; not
-measured yet.
+(StagingBufferPool::MappedBytes) and counts "uniform slices moved, same bytes". Measured
+(75628f3c0, before this change): 30.25 / 29.92 FPS, as without it (the uniform way covered ~8% of
+the candidates); `=2` showed only the moved slices. This change: built; not measured yet.
+
+## Fewer writes and ring entries on the back (2026-11-01)
+
+`EDEN_NX2_SAME_SKIP` (on; `=0` off): a constant buffer write IsLightSameWrite counts (the bytes
+guest memory holds, outside sparse regions, on pages where no cache holds GPU-written buffer data
+or images and no query result waits: RasterizerVulkan::HoldsGpuWrittenData) is not made. Memory
+keeps the same bytes; its invalidation at the next FlushCaching only made the caches upload,
+compare or rebuild from them (a query result in the range would have been cancelled: such pages
+are excluded). It counts as neither a cached nor a same write (the light draw's count is
+unchanged) nor a constant buffer write of the uniform way (NoteLightWrite: it changed no word the
+uniform way checks). Mostly NVN's c[0][0x640] base vertex/instance resets; it applies only while
+the last draw may be followed by a plain light draw (light.armed). The back's line adds
+"constant buffer writes of held bytes skipped".
+
+`EDEN_NX2_WRITE_BATCH` (on; `=0` off): the front holds consecutive macro writes to one engine
+(at most 64) and sends them as one Batch entry before anything else enters the ring; every other
+entry, Publish, Drain and WritePosition send what is held first. The back runs each as a Direct
+Method entry would, in order (the sink consumed once: only non-Direct entries add to it; runs of
+constant buffer data through CallMethodRun). The profile's "method" zone now counts batches.
+
+Profile cost: zones read the time stamp counter without fences, converted to nanoseconds per
+window by the wall clock (`EDEN_NX2_PROFILE_TSC=0`: the wall clock per zone, as before); the
+indirect draw diagnostics (Nx2IndirectDiag, ~1-1.5 us per draw) run only with
+`EDEN_NX2_INDIRECT_DIAG=1`. Built; not measured yet.
