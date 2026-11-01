@@ -98,7 +98,8 @@ public:
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
 
     /// EDEN_NX2_LIGHT_DRAW: whether a cache holds GPU-written data for the area that guest memory
-    /// lacks (buffer data or images): a write of the bytes memory holds then still changes it.
+    /// lacks (buffer data or images), or a query result to be written there: a write of the bytes
+    /// memory holds then still changes something (its invalidation cancels the query's write).
     virtual bool HoldsGpuWrittenData([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {
         return true;
     }

@@ -1648,6 +1648,11 @@ bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
     // pages the area touches.
     const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
     const size_t span = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - begin;
+    // A query result cached there: the invalidation marks it so its value is never written
+    // (QueryCacheBase::InvalidateRegion), which a skipped write (EDEN_NX2_SAME_SKIP) would not.
+    if (query_cache.HoldsQueries(begin, span)) {
+        return true;
+    }
     {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.IsRegionGpuModified(begin, span)) {

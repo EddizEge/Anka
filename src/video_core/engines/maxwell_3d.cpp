@@ -118,6 +118,23 @@ const std::array<u16, Maxwell3D::Regs::NUM_REGS>& LightClasses() {
     return table;
 }
 
+// EDEN_NX2_SAME_SKIP=0: a constant buffer write of the bytes guest memory already holds that
+// IsLightSameWrite counted is still made, and its range invalidated at the next FlushCaching.
+const bool g_same_skip = [] {
+    const char* value = std::getenv("EDEN_NX2_SAME_SKIP");
+    return value == nullptr || value[0] != '0';
+}();
+
+void NoteSameWriteSkipped() {
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesSkipped, 1);
+    thread_local u64 skipped{};
+    if ((++skipped & ((u64{1} << 22) - 1)) == 0) {
+        LOG_INFO(HW_GPU, "Constant buffer writes of the bytes memory held, skipped: {} "
+                         "(EDEN_NX2_SAME_SKIP=0 makes them)",
+                 skipped);
+    }
+}
+
 } // Anonymous namespace
 
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
@@ -897,13 +914,35 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
     const GPUVAddr address{buffer_address + regs.const_buffer.offset};
     const size_t copy_size = amount * sizeof(u32);
+    bool skip_write = false;
     if (LightTrackingEnabled()) {
+        const u64 same_writes = light.same_writes;
         NoteLightChange(IsLightSameWrite(address, start_base, copy_size) ? LightChange::UniformSame
                                                                          : LightChange::UniformData,
                         MAXWELL3D_REG_INDEX(const_buffer.buffer));
-        NoteLightWrite(address, static_cast<u32>(copy_size));
+        // EDEN_NX2_SAME_SKIP: a write IsLightSameWrite counted changes no byte of guest memory
+        // (outside sparse regions), and no cache holds anything on its pages that its
+        // invalidation would change: no GPU-written buffer data or image guest memory lacks, no
+        // query result whose write it would cancel (HoldsGpuWrittenData). What the caches hold
+        // there came from guest memory as it is; the invalidation at the next FlushCaching only
+        // made them upload, compare or rebuild from the same bytes (NVN's base vertex and
+        // instance words at c[0][0x640], set and reset around each draw). It is not made: neither
+        // a cached write nor a same write, so the light path's count (as many same writes as
+        // cached writes since the last draw) reads as before, and it is no constant buffer write
+        // either (NoteLightWrite): the uniform way counts and checks only writes that were made,
+        // and this one changed no handle, storage buffer descriptor or pool entry it would check.
+        if (g_same_skip && light.same_writes != same_writes) {
+            light.same_writes = same_writes;
+            skip_write = true;
+        } else {
+            NoteLightWrite(address, static_cast<u32>(copy_size));
+        }
     }
-    memory_manager.WriteBlockCached(address, start_base, copy_size);
+    if (skip_write) {
+        NoteSameWriteSkipped();
+    } else {
+        memory_manager.WriteBlockCached(address, start_base, copy_size);
+    }
 
     // Increment the current buffer position.
     regs.const_buffer.offset += static_cast<u32>(copy_size);
@@ -918,10 +957,11 @@ bool Maxwell3D::IsLightSameWrite(GPUVAddr address, const u32* data, size_t size)
     // the draw; FrontIndirectDraw sends the resets. Mostly the bytes are already there. Such a
     // write still goes to memory and its range is invalidated at the next FlushCaching, but a
     // draw after it sees what it would without the write, as long as no cache holds data for
-    // the range that guest memory lacks (GPU-written buffer data or images): then nothing
-    // uploads anything else over it. Those writes are counted (light.same_writes); the
-    // rasterizer takes the next draw the light way only if every cached write since the last
-    // one is such a write.
+    // the range that guest memory lacks (GPU-written buffer data or images) and no query result
+    // waits to be written there: then nothing uploads anything else over it. Those writes are
+    // counted (light.same_writes); the rasterizer takes the next draw the light way only if every
+    // cached write since the last one is such a write. EDEN_NX2_SAME_SKIP (ProcessCBMultiData)
+    // leaves the counted ones unmade.
     const bool may_be_light = light.armed && (light.changes & ~LightChange::Light) == 0;
     if (!may_be_light && !VideoCommon::Nx2Profile::Enabled()) {
         return false;

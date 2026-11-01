@@ -212,6 +212,7 @@ enum class Counter : u32 {
     LightUniformVerified,    ///< EDEN_NX2_LIGHT_UNIFORM=2: decided light, set up in full and compared
     LightUniformMismatches,  ///< Of LightUniformVerified: the full setup differed (logged)
     LightUniformSlicesSame,  ///< Uniform buffers the full setup streamed elsewhere, same bytes
+    SameWritesSkipped, ///< Constant buffer writes of held bytes not made (EDEN_NX2_SAME_SKIP)
     Count,
 };
 
@@ -409,6 +410,8 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::LightUniformSlicesSame),
                             TopValues(histograms[static_cast<size_t>(Histogram::LightUniformBlocking)],
                                       method, 6));
+        line += fmt::format(" | constant buffer writes of held bytes skipped {:.0f}",
+                            counter(Counter::SameWritesSkipped));
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",
