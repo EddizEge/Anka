@@ -444,7 +444,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     }
                 }
                 bool sorted = false;
-                if (runs_enabled && sort_enabled && !std::is_sorted(records.begin(), records.end())) {
+                // Diagnostic: records sharing bytes (the list's order is kept then, and the
+                // inline writes overlap), at another offset or one record named twice.
+                bool overlapping = false;
+                bool repeated = false;
+                const auto find_overlaps = [&](const std::vector<u64>& ascending) {
+                    for (size_t i = 1; i < ascending.size(); ++i) {
+                        const u64 distance = ascending[i] - ascending[i - 1];
+                        repeated |= distance == 0;
+                        overlapping |= distance != 0 && distance < RecordSize;
+                    }
+                };
+                const bool in_order = std::is_sorted(records.begin(), records.end());
+                if (runs_enabled && sort_enabled && !in_order) {
                     std::vector<u64> ordered(records);
                     std::sort(ordered.begin(), ordered.end());
                     const bool disjoint =
@@ -454,6 +466,26 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     if (disjoint) {
                         records = std::move(ordered);
                         sorted = true;
+                    } else {
+                        find_overlaps(ordered);
+                    }
+                } else if (in_order) {
+                    find_overlaps(records);
+                }
+                {
+                    static u64 lists{};
+                    static u64 overlapping_lists{};
+                    static u64 repeating_lists{};
+                    ++lists;
+                    overlapping_lists += overlapping ? 1 : 0;
+                    repeating_lists += repeated ? 1 : 0;
+                    const u64 shared = overlapping_lists + repeating_lists;
+                    if ((overlapping || repeated) && (shared & (shared - 1)) == 0) {
+                        LOG_INFO(HW_GPU,
+                                 "Indirect draw reset list {:#x}: records share bytes ({} lists "
+                                 "with records overlapping at another offset, {} naming one "
+                                 "record twice, of {})",
+                                 list_begin, overlapping_lists, repeating_lists, lists);
                     }
                 }
                 // EDEN_NX2_RESET_BATCH: the runs written together (AccelerateInlineRuns), the
@@ -2073,6 +2105,10 @@ void RasterizerVulkan::AccelerateInlineRuns(std::span<const std::pair<GPUVAddr, 
             // Copies recorded on the way (the batch emptied or the unbatched way taken).
             commands += batch.copies.size() <= batched ? 1 : 0;
         } else if (!defer) {
+            // EDEN_NX2_INLINE_DEFER=0: the CPU-modified mark makes a later synchronization in
+            // this call upload the pages, recorded ahead of the batch: what is batched goes
+            // first, so a batched copy can't land over bytes written after it.
+            commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
             buffer_cache.WriteMemory(*cpu_addr, size);
         }
         query_cache.InvalidateRegion(*cpu_addr, size);

@@ -276,6 +276,7 @@ public:
     struct InlineBatch {
         static constexpr size_t MaxBytes = 256 * 1024;
         BufferId buffer_id{};
+        bool can_reorder{}; ///< Every copy's CanReorderUpload answer (all the same)
         std::vector<BufferCopy> copies; ///< src_offset: where the copy's bytes start in `bytes`
         std::vector<u8> bytes;
     };

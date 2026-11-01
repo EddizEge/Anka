@@ -2377,13 +2377,25 @@ bool BufferCache<P>::InlineMemoryBatched(DAddr dest_address, size_t copy_size,
     SynchronizeBuffer(buffer, dest_address, static_cast<u32>(copy_size));
 
     const u64 dst_offset = buffer.Offset(dest_address);
+    // Where the copy would go alone: the upload command buffer (ahead of the tick's commands)
+    // or in order. A batch holds copies of one answer only: recorded in order, a copy that
+    // would have gone ahead could land after a later upload over its bytes that does go ahead
+    // (a CPU write, an inline write, a synchronization). The answer does not change until the
+    // batch is recorded: it reads the buffer's use in this tick, which uploads (these copies,
+    // SynchronizeBuffer's) do not mark, and the buffer is not replaced meanwhile (FindBuffer).
+    bool can_reorder = false;
+    if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
+        const std::array one{BufferCopy{.src_offset = 0, .dst_offset = dst_offset, .size = copy_size}};
+        can_reorder = runtime.CanReorderUpload(buffer, one);
+    }
     if (!batch.copies.empty() &&
-        (buffer_id != batch.buffer_id ||
+        (buffer_id != batch.buffer_id || can_reorder != batch.can_reorder ||
          dst_offset < batch.copies.back().dst_offset + batch.copies.back().size ||
          batch.bytes.size() + copy_size > InlineBatch::MaxBytes)) {
         FlushInlineBatch(batch);
     }
     batch.buffer_id = buffer_id;
+    batch.can_reorder = can_reorder;
     batch.copies.push_back(BufferCopy{
         .src_offset = batch.bytes.size(),
         .dst_offset = dst_offset,
@@ -2407,9 +2419,9 @@ bool BufferCache<P>::FlushInlineBatch(InlineBatch& batch) {
             copy.src_offset += upload_staging.offset;
         }
         const std::span<const BufferCopy> copies(batch.copies.data(), batch.copies.size());
-        // Into the upload command buffer only when every copy may go there (each alone would
-        // have; uploads mark no use, so no copy of the batch changed another's answer).
-        const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
+        // Each copy's own answer (InlineMemoryBatched); asked again for the whole batch, which
+        // gives the same while nothing marked a use since.
+        const bool can_reorder = batch.can_reorder && runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
     } else {
         for (const BufferCopy& copy : batch.copies) {
