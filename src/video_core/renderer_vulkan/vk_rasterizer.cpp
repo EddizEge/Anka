@@ -1180,9 +1180,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        for (const auto& [addr, size] : sequences) {
-            buffer_cache.WriteMemory(addr, size);
-        }
+        buffer_cache.WriteMemoryRanges(sequences);
     }
     {
         for (const auto& [addr, size] : sequences) {

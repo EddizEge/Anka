@@ -833,6 +833,17 @@ struct Maxwell3D::FrontState {
         u64 end{};
         u64 session{};
     } held_indirect;
+    /// EDEN_NX2_GPU_PROFILE: the first entry written after held_indirect (kind << 16 | method,
+    /// see Nx2Profile::Report; 0: none or not a 3D method).
+    u32 indirect_interposer{};
+
+    /// Profiling: remembers what was written first after the held indirect draw.
+    void NoteInterposer(const VideoCommon::GpuSplit& split, u32 kind, u32 method) {
+        if (held_indirect.payload != nullptr && indirect_interposer == 0 &&
+            split.WritePosition() == held_indirect.end) {
+            indirect_interposer = (kind << 16) | (method & 0xffff);
+        }
+    }
 };
 
 // What the back runs for FrontIndirectDraw: `count` records `stride` bytes apart.
@@ -1025,6 +1036,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
             break;
         }
     }
+    if (Profile::Enabled()) [[unlikely]] {
+        fs.NoteInterposer(split, from_macro ? 3 : 1, method);
+    }
     if (from_macro) {
         split.MacroWrite(this, method, argument);
     } else {
@@ -1133,6 +1147,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
                 break;
             }
         }
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        fs.NoteInterposer(split, 2, method);
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
 }
@@ -1347,7 +1364,8 @@ bool Maxwell3D::FrontTakeIndirectRecord(Core::System& system, VideoCommon::GpuSp
 
 void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs, GPUVAddr record) {
-    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::HleIndirectDraws, 1);
+    namespace Profile = VideoCommon::Nx2Profile;
+    Profile::Add(Profile::Counter::HleIndirectDraws, 1);
     const u32 topology = fs.parameters[0];
     fs.draw_pending = false;
     // NVN's multi-draw calls the macro once per record, with nothing in between. While the last
@@ -1375,8 +1393,38 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
             }
             ++call.count;
             std::memcpy(held.payload, &call, sizeof(call));
-            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::HleIndirectMerged, 1);
+            Profile::Add(Profile::Counter::HleIndirectMerged, 1);
             return;
+        }
+        if (Profile::Enabled()) [[unlikely]] {
+            const GPUVAddr last = call.record + u64{call.count - 1} * call.stride;
+            const s64 step = static_cast<s64>(record - last);
+            if (call.topology != topology) {
+                Profile::Add(Profile::Counter::IndirectTopology, 1);
+            } else if (call.count >= MaxCount) {
+                Profile::Add(Profile::Counter::IndirectGroupFull, 1);
+            } else if (record <= call.record) {
+                Profile::Add(Profile::Counter::IndirectNotAfter, 1);
+                Profile::Note(Profile::Histogram::IndirectStep, step);
+            } else if (call.count == 1) {
+                Profile::Add(Profile::Counter::IndirectStepRange, 1);
+                Profile::Note(Profile::Histogram::IndirectStep, step);
+            } else {
+                Profile::Add(Profile::Counter::IndirectStepMismatch, 1);
+                Profile::Note(Profile::Histogram::IndirectStep, step);
+                Profile::Note(Profile::Histogram::IndirectGroupStride, call.stride);
+            }
+        }
+    } else if (Profile::Enabled() && IndirectBatchEnabled()) [[unlikely]] {
+        if (held.payload == nullptr) {
+            Profile::Add(Profile::Counter::IndirectNoPrevious, 1);
+        } else if (held.session != split.Session()) {
+            Profile::Add(Profile::Counter::IndirectRestarted, 1);
+        } else if (held.end != split.WritePosition()) {
+            Profile::Add(Profile::Counter::IndirectInterposed, 1);
+            Profile::Note(Profile::Histogram::IndirectInterposer, fs.indirect_interposer);
+        } else {
+            Profile::Add(Profile::Counter::IndirectPublished, 1);
         }
     }
     held = {};
@@ -1391,6 +1439,7 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
         FrontWrite(split, fs, address, value, true, true);
     }
     held = {payload, start, split.WritePosition(), split.Session()};
+    fs.indirect_interposer = 0;
 }
 
 void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record,

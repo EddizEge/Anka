@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -30,6 +31,27 @@
 namespace VideoCommon {
 
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
+    // A write outside every registered program and every rejected address, with no removal
+    // pending, finds nothing to invalidate or remove under the lock: return before taking it
+    // (this runs for every pre-draw invalidation range, mostly constant buffer updates).
+    // EDEN_NX2_SHADER_BOUNDS=0 always takes the lock and looks.
+    static const bool skip_outside = [] {
+        const char* value = std::getenv("EDEN_NX2_SHADER_BOUNDS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (skip_outside) {
+        const VAddr addr_end = addr + size;
+        const bool outside_registered =
+            addr_end <= registered_lowest.load(std::memory_order_acquire) ||
+            addr >= registered_highest.load(std::memory_order_acquire);
+        const bool outside_rejected =
+            !(addr_end > rejected_lowest.load(std::memory_order_relaxed) &&
+              addr <= rejected_highest.load(std::memory_order_relaxed));
+        if (outside_registered && outside_rejected &&
+            !removal_pending.load(std::memory_order_acquire)) {
+            return;
+        }
+    }
     std::scoped_lock lock{invalidation_mutex};
     InvalidatePagesInRegion(addr, size);
     RemovePendingShaders();
@@ -225,6 +247,11 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
 
     const VAddr addr_end = addr + size;
     Entry* const entry = NewEntry(addr, addr_end, data.get());
+    registered_lowest.store((std::min)(registered_lowest.load(std::memory_order_relaxed), addr),
+                            std::memory_order_release);
+    registered_highest.store(
+        (std::max)(registered_highest.load(std::memory_order_relaxed), addr_end),
+        std::memory_order_release);
 
     const u64 page_end = (addr_end + YUZU_PAGESIZE - 1) >> YUZU_PAGEBITS;
     for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
@@ -275,6 +302,7 @@ void ShaderCache::RemovePendingShaders() {
         lookup_cache.erase(it);
     }
     marked_for_removal.clear();
+    removal_pending.store(false, std::memory_order_release);
 
     if (!removed_shaders.empty()) {
         // Remove the given shaders from the cache
@@ -296,6 +324,7 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         UnmarkMemory(entry);
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
+        removal_pending.store(true, std::memory_order_release);
     }
 }
 

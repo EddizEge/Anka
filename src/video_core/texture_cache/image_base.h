@@ -126,6 +126,9 @@ struct ImageBase {
 
     u64 modification_tick = 0;
     size_t lru_index = SIZE_MAX;
+    /// frame_tick of the last LRU Touch through PrepareImage: never newer than the LRU item's own
+    /// tick (EDEN_NX2_TEX_TOUCH_SKIP).
+    u64 lru_tick = 0;
     /// An alias may have a newer modification_tick: SynchronizeAliases has to walk the aliases.
     /// Set when an alias gets newer (MarkModification, SynchronizeAliases, JoinImages,
     /// AddImageAlias), cleared by the walk (EDEN_NX2_ALIAS_LAZY).

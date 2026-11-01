@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstring>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -57,6 +58,16 @@ public:
 
     const DescriptorUpdateEntry* UpdateData() const noexcept {
         return upload_start;
+    }
+
+    /// Where the next entry goes (EDEN_NX2_DESC_REUSE keeps what a stage wrote).
+    const DescriptorUpdateEntry* Cursor() const noexcept {
+        return payload_cursor;
+    }
+
+    void AddEntries(const DescriptorUpdateEntry* entries, size_t count) {
+        std::memcpy(payload_cursor, entries, count * sizeof(DescriptorUpdateEntry));
+        payload_cursor += count;
     }
 
     void AddSampledImage(VkImageView image_view, VkSampler sampler) {

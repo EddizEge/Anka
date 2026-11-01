@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 
 #include "common/alignment.h"
@@ -29,6 +30,30 @@ bool MemoryManager::IsShuttingDown() const {
 }
 
 using Tegra::Memory::GuestMemoryFlags;
+
+namespace {
+// Small reads (texture and sampler descriptors, bindless texture handles: several per draw, ~2.4%
+// of the split back thread in title 1 spent translating their pages) remember the host pointer of
+// their 4 KiB page, per thread. The entries are dropped when the GPU page table (MappingEpoch) or
+// the device mapping (DeviceMemoryManager::TranslationGeneration) changed: until then
+// GpuToCpuAddress and the device's GetPointer answer the same for that page, and every GPU page
+// (4 KiB or larger) maps a 4 KiB-aligned block to one host page, so the pointer is the same.
+// EDEN_NX2_DESC_XLAT=0 translates every read.
+const bool g_nx2_desc_xlat = [] {
+    const char* value = std::getenv("EDEN_NX2_DESC_XLAT");
+    return value == nullptr || value[0] != '0';
+}();
+
+struct SmallReadCache {
+    static constexpr std::size_t NumSlots = 64;
+    std::size_t owner = ~std::size_t{0}; ///< MemoryManager::GetID of the entries
+    u64 mapping_epoch = 0;
+    u64 device_generation = 0;
+    std::array<u64, NumSlots> pages{};          ///< 4 KiB page number + 1; 0 is an empty slot
+    std::array<const u8*, NumSlots> pointers{}; ///< Host pointer of the page's first byte
+};
+thread_local SmallReadCache t_small_reads{};
+} // Anonymous namespace
 
 std::atomic<size_t> MemoryManager::unique_identifier_generator{};
 
@@ -271,6 +296,36 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr addr, std::size_t s
     return std::nullopt;
 }
 
+const u8* MemoryManager::SmallReadPointer(GPUVAddr gpu_addr) const {
+    if (!g_nx2_desc_xlat || page_bits < cpu_page_bits) {
+        return GetPointer(gpu_addr);
+    }
+    SmallReadCache& cache = t_small_reads;
+    // Read before translating: a change made meanwhile leaves entries that are dropped next time.
+    const u64 epoch = mapping_epoch.load(std::memory_order_acquire);
+    const u64 generation = memory.TranslationGeneration();
+    if (cache.owner != unique_identifier || cache.mapping_epoch != epoch ||
+        cache.device_generation != generation) {
+        cache.owner = unique_identifier;
+        cache.mapping_epoch = epoch;
+        cache.device_generation = generation;
+        cache.pages.fill(0);
+    }
+    const u64 page = (gpu_addr >> cpu_page_bits) + 1;
+    const std::size_t slot = static_cast<std::size_t>(page) & (SmallReadCache::NumSlots - 1);
+    const u64 offset = gpu_addr & ((u64{1} << cpu_page_bits) - 1);
+    if (cache.pages[slot] == page) {
+        return cache.pointers[slot] + offset;
+    }
+    const u8* const pointer = GetPointer(gpu_addr);
+    if (pointer != nullptr) {
+        // Unmapped pages are not remembered: their reads keep taking the full path.
+        cache.pages[slot] = page;
+        cache.pointers[slot] = pointer - offset;
+    }
+    return pointer;
+}
+
 template <typename T>
 T MemoryManager::Read(GPUVAddr addr) const {
     if constexpr (sizeof(T) == sizeof(u32)) {
@@ -282,7 +337,7 @@ T MemoryManager::Read(GPUVAddr addr) const {
         }
     }
 
-    if (auto page_pointer{GetPointer(addr)}; page_pointer) {
+    if (auto page_pointer{SmallReadPointer(addr)}; page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
         T value;
         std::memcpy(&value, page_pointer, sizeof(T));
@@ -459,7 +514,7 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     // in title 1). Anything else, unmapped or sparse pages included, takes the full path.
     constexpr std::size_t SmallPage = 0x1000;
     if (size <= SmallPage && (gpu_src_addr & (SmallPage - 1)) + size <= SmallPage) {
-        if (const u8* const pointer = GetPointer(gpu_src_addr)) {
+        if (const u8* const pointer = SmallReadPointer(gpu_src_addr)) {
             std::memcpy(dest_buffer, pointer, size);
             return;
         }

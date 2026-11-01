@@ -147,6 +147,10 @@ private:
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
+    void PushStageImageDescriptors(size_t stage, RescalingPushConstant& rescaling,
+                                   const VideoCommon::SamplerId*& samplers,
+                                   const VideoCommon::ImageViewInOut*& views);
+
     void MakePipeline(VkRenderPass render_pass);
 
     void Validate();
@@ -188,6 +192,17 @@ private:
     VkDeviceSize last_descriptor_buffer_offset{};
     u32 last_descriptor_buffer_chunk{};
     u64 last_descriptor_buffer_generation{};
+
+    /// EDEN_NX2_DESC_REUSE: the image descriptors a stage wrote last and what they were made of.
+    struct ImageDescriptorMemo {
+        std::vector<u32> ids; ///< Texture and image view ids, then sampler ids
+        std::vector<DescriptorUpdateEntry> entries; ///< What PushImageDescriptors wrote
+        std::vector<u8> rescaled; ///< Rescale bit of each texture, then image descriptor
+        u64 texture_epoch{};
+        u64 sampler_generation{};
+        bool valid{};
+    };
+    std::array<ImageDescriptorMemo, NUM_STAGES> image_descriptor_memos;
 
     std::condition_variable build_condvar;
     std::mutex build_mutex;

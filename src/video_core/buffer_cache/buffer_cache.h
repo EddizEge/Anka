@@ -175,6 +175,34 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size) {
 }
 
 template <class P>
+void BufferCache<P>::WriteMemoryRanges(std::span<const std::pair<DAddr, std::size_t>> ranges) {
+    // EDEN_NX2_INVAL_HULL=0: one GPU-modified lookup per range, as WriteMemory does.
+    static const bool use_hull = [] {
+        const char* value = std::getenv("EDEN_NX2_INVAL_HULL");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (use_hull && ranges.size() > 1) {
+        // Nothing GPU-modified in the span of all the ranges: nothing in any of them, and
+        // WriteMemory is then only the CPU-modified marking (nearly every pre-draw flush).
+        DAddr lowest = ~DAddr{};
+        DAddr highest = 0;
+        for (const auto& [addr, size] : ranges) {
+            lowest = (std::min)(lowest, addr);
+            highest = (std::max)(highest, static_cast<DAddr>(addr + size));
+        }
+        if (!IsRegionGpuModified(lowest, static_cast<size_t>(highest - lowest))) {
+            for (const auto& [addr, size] : ranges) {
+                memory_tracker.MarkRegionAsCpuModified(addr, size);
+            }
+            return;
+        }
+    }
+    for (const auto& [addr, size] : ranges) {
+        WriteMemory(addr, size);
+    }
+}
+
+template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
@@ -1457,6 +1485,10 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
+            // As DeleteBuffer: memo entries naming this id are stale from here on.
+            if (inline_buffer_id.Value() < vertex_memo_generations.size()) {
+                ++vertex_memo_generations[inline_buffer_id.Value()];
+            }
             slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
@@ -1470,19 +1502,66 @@ void BufferCache<P>::UpdateIndexBuffer() {
 
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
     const u32 size = (std::min)(address_size, draw_size);
+    // EDEN_NX2_INDEX_SKIP: every indexed draw marks the index buffer dirty (its count and first
+    // change), and each paid a page table walk plus a buffer lookup for a start address that
+    // rarely changes. While the page table is unchanged the start translates the same, and while
+    // the buffer found for it is alive and page_table still names it, FindBuffer returns it for
+    // any size within its bounds (with accurate GPU fences FindBuffer also synchronizes writes).
+    IndexBufferMemo* memo = nullptr;
+    u64 map_epoch = 0;
+    if (IndexSkipEnabled() && !Settings::IsGPUFenceBehaviorAccurate()) {
+        if (vertex_memo_owner != gpu_memory->GetID()) {
+            vertex_memo_owner = gpu_memory->GetID();
+            ++vertex_memo_epoch;
+        }
+        map_epoch = gpu_memory->MappingEpoch();
+        memo = &index_memo[((gpu_addr_begin >> 8) ^ (gpu_addr_begin >> 20)) &
+                           (INDEX_MEMO_SIZE - 1)];
+        if (size != 0 && memo->memo_epoch == vertex_memo_epoch && memo->map_epoch == map_epoch &&
+            memo->gpu_addr_begin == gpu_addr_begin &&
+            memo->generation == vertex_memo_generations[memo->buffer_id.Value()] &&
+            page_table[memo->device_addr >> CACHING_PAGEBITS] == memo->buffer_id &&
+            memo->device_addr + size <= memo->buffer_end) {
+            channel_state->index_buffer = Binding{
+                .device_addr = memo->device_addr,
+                .size = size,
+                .buffer_id = memo->buffer_id,
+            };
+            return;
+        }
+    }
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     if (size == 0 || !device_addr) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
+    const BufferId buffer_id = FindBuffer(*device_addr, size, false);
     channel_state->index_buffer = Binding{
         .device_addr = *device_addr,
         .size = size,
-        .buffer_id = FindBuffer(*device_addr, size, false),
+        .buffer_id = buffer_id,
     };
+    if (memo != nullptr && *device_addr != 0 && buffer_id != NULL_BUFFER_ID) {
+        const Buffer& buffer = slot_buffers[buffer_id];
+        if (buffer.IsInBounds(*device_addr, size)) {
+            const size_t slot = buffer_id.Value();
+            if (slot >= vertex_memo_generations.size()) {
+                vertex_memo_generations.resize(slot + 1);
+            }
+            *memo = IndexBufferMemo{
+                .gpu_addr_begin = gpu_addr_begin,
+                .device_addr = *device_addr,
+                .buffer_end = buffer.CpuAddr() + buffer.SizeBytes(),
+                .map_epoch = map_epoch,
+                .buffer_id = buffer_id,
+                .generation = vertex_memo_generations[slot],
+                .memo_epoch = vertex_memo_epoch,
+            };
+        }
+    }
 }
 
 template <class P>

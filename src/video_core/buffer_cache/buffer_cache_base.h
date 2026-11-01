@@ -239,6 +239,9 @@ public:
 
     void WriteMemory(DAddr device_addr, u64 size);
 
+    /// WriteMemory for each range, in order (the pre-draw invalidation).
+    void WriteMemoryRanges(std::span<const std::pair<DAddr, std::size_t>> ranges);
+
     void CachedWriteMemory(DAddr device_addr, u64 size);
 
     bool OnCPUWrite(DAddr device_addr, u64 size);
@@ -546,6 +549,32 @@ private:
     std::vector<u32> vertex_memo_generations;
     size_t vertex_memo_owner = ~size_t{0};
     u32 vertex_memo_epoch = 0;
+    /// EDEN_NX2_INDEX_SKIP (UpdateIndexBuffer): index buffer start addresses, what they translated
+    /// to and the buffer that held them, direct-mapped by address. Valid on the same terms as
+    /// VertexBufferMemo (same owner check, epoch and generations); the buffer's end is kept so
+    /// draws reading a different number of indices from the same start reuse the entry too.
+    struct IndexBufferMemo {
+        GPUVAddr gpu_addr_begin;
+        DAddr device_addr;
+        DAddr buffer_end;
+        u64 map_epoch;
+        BufferId buffer_id;
+        u32 generation;
+        u32 memo_epoch;
+    };
+    static constexpr size_t INDEX_MEMO_SIZE = 64;
+    std::array<IndexBufferMemo, INDEX_MEMO_SIZE> index_memo{};
+
+    /// Whether UpdateIndexBuffer reuses translations (index_memo). EDEN_NX2_INDEX_SKIP=0 turns it
+    /// off.
+    static bool IndexSkipEnabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_INDEX_SKIP");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
     /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).
     std::array<BufferId, 32> vertex_touched_ids{};
     std::array<u64, 32> vertex_touched_ticks{};

@@ -300,6 +300,12 @@ public:
 
     [[nodiscard]] bool IsRescaling(const ImageViewBase& image_view) const noexcept;
 
+    /// Changes whenever an image view id may name another view (views freed) or an image's
+    /// rescale state changed (EDEN_NX2_DESC_REUSE).
+    [[nodiscard]] u64 ImageViewEpoch() const noexcept {
+        return image_view_epoch;
+    }
+
     /// Create channel state.
     void CreateChannel(Tegra::Control::ChannelState& channel) final override;
 
@@ -574,6 +580,7 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
+    u64 image_view_epoch = 0; ///< See ImageViewEpoch
 
     Common::ThreadWorker texture_decode_worker{1, "TextureDecoder", {},
                                                Common::ThreadPlacement::Efficiency};

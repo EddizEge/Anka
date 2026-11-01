@@ -74,6 +74,12 @@ public:
     template <typename T>
     const T* GetPointer(DAddr address) const;
 
+    /// Bumped by Map and Unmap (the only writers of a page's physical pointer): until it changes,
+    /// GetPointer answers the same for the same address.
+    [[nodiscard]] u64 TranslationGeneration() const noexcept {
+        return translation_generation.load(std::memory_order_acquire);
+    }
+
     template <typename Func>
     void ApplyOpOnPAddr(PAddr address, Common::ScratchBuffer<u32>& buffer, Func&& operation) {
         DAddr subbits = DAddr(address & page_mask);

@@ -354,7 +354,8 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                                  GuestDescriptorQueue& guest_descriptor_queue,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
                                  const VideoCommon::SamplerId*& samplers,
-                                 const VideoCommon::ImageViewInOut*& views) {
+                                 const VideoCommon::ImageViewInOut*& views,
+                                 u8* rescaled_out = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
@@ -377,6 +378,9 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             is_rescaled |= element_rescaled;
         }
         rescaling.PushTexture(is_rescaled);
+        if (rescaled_out) {
+            *rescaled_out++ = static_cast<u8>(is_rescaled);
+        }
     }
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};
@@ -391,6 +395,9 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             is_rescaled |= element_rescaled;
         }
         rescaling.PushImage(is_rescaled);
+        if (rescaled_out) {
+            *rescaled_out++ = static_cast<u8>(is_rescaled);
+        }
     }
 }
 

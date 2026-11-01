@@ -3,10 +3,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <unordered_set>
 
 #include "common/common_types.h"
@@ -78,10 +81,25 @@ inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
 }
 
+/// Values noted on the GPU thread, logged per window as the most frequent ones.
+enum class Histogram : u32 {
+    IndirectInterposer,  ///< First entry after an unmerged indirect draw (see FrontIndirectDraw)
+    IndirectStep,        ///< Record address step of indirect draws that did not follow
+    IndirectGroupStride, ///< Stride of the group a step did not match
+    Count,
+};
+
+struct HistogramData {
+    std::array<std::pair<s64, u64>, 16> slots{}; ///< Value and times seen
+    u32 used{};
+    u64 dropped{}; ///< Notes of values that found no free slot
+};
+
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 24> counters{}; ///< See Counter
+    std::array<u64, 40> counters{}; ///< See Counter
+    std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
 };
@@ -142,7 +160,21 @@ enum class Counter : u32 {
     IndirectBarriers, ///< Barriers before indirect draws (buffers written since the last one)
     EmptyDraws,       ///< Draws with no indices, vertices or instances
     HleIndirectMerged, ///< Of HleIndirectDraws: joined the previous call's multi-draw
+    DescriptorStages, ///< Graphics stages with image descriptors (EDEN_NX2_DESC_REUSE)
+    DescriptorStagesReused, ///< Of DescriptorStages: copied from the stage's last draw
+    // Of HleIndirectDraws, why one did not join the previous call (EDEN_NX2_INDIRECT_BATCH):
+    IndirectNoPrevious,   ///< No earlier call to join
+    IndirectRestarted,    ///< The split ring started over since the previous call
+    IndirectInterposed,   ///< Other ring entries came after the previous call
+    IndirectPublished,    ///< The previous call's entry was already visible to the back
+    IndirectTopology,     ///< Another topology than the previous call
+    IndirectGroupFull,    ///< The previous call already holds the most records
+    IndirectNotAfter,     ///< The record is not after the previous one
+    IndirectStepRange,    ///< Step to a single previous record outside 20-256 bytes or unaligned
+    IndirectStepMismatch, ///< Step other than the previous group's stride
+    Count,
 };
+static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
 
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
 /// while profiling): which buffer downloads anything on the GPU thread reads back.
@@ -155,6 +187,40 @@ inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
         t_data.counters[static_cast<size_t>(counter)] += amount;
     }
+}
+
+inline void Note(Histogram histogram, s64 value) {
+    if (!Enabled()) {
+        return;
+    }
+    auto& data = t_data.histograms[static_cast<size_t>(histogram)];
+    for (u32 i = 0; i < data.used; ++i) {
+        if (data.slots[i].first == value) {
+            ++data.slots[i].second;
+            return;
+        }
+    }
+    if (data.used < data.slots.size()) {
+        data.slots[data.used++] = {value, 1};
+    } else {
+        ++data.dropped;
+    }
+}
+
+/// The three most frequent values of a histogram, "value x times, ...".
+template <typename Format>
+std::string TopValues(const HistogramData& data, Format&& format) {
+    auto slots = data.slots;
+    const auto end = slots.begin() + data.used;
+    std::sort(slots.begin(), end, [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::string text;
+    for (auto it = slots.begin(); it != end && it != slots.begin() + 3; ++it) {
+        text += fmt::format("{}{} x{}", text.empty() ? "" : ", ", format(it->first), it->second);
+    }
+    if (data.used > 3 || data.dropped != 0) {
+        text += ", ...";
+    }
+    return text.empty() ? "-" : text;
 }
 
 /// Called by the GPU thread (and the split's back thread) between commands: logs and resets
@@ -209,6 +275,24 @@ inline void Report(const char* thread_name = "GPU thread") {
                         rate(14), rate(13));
     line += fmt::format(" | indirect draws from GPU records {:.0f} ({:.0f} merged, {:.0f} barriers) | empty draws {:.0f}",
                         rate(15), rate(18), rate(16), rate(17));
+    const auto& histograms = data.histograms;
+    const auto interposer = [](s64 key) {
+        // FrontIndirectDraw's key: kind << 16 | method (p: pushbuffer method, r: pushbuffer
+        // run, m: macro write, ?: an entry of another kind or engine).
+        constexpr std::array<const char*, 4> kinds{"?", "p", "r", "m"};
+        return fmt::format("{}{:#x}", kinds[static_cast<size_t>(key >> 16) & 3], key & 0xffff);
+    };
+    const auto number = [](s64 value) { return fmt::format("{}", value); };
+    line += fmt::format(" | indirect not merged: {:.0f} no previous, {:.0f} ring restarted, "
+                        "{:.0f} entries between (first: {}), {:.0f} published, {:.0f} topology, "
+                        "{:.0f} group full, {:.0f} not after, {:.0f} step out of range, "
+                        "{:.0f} step mismatch (steps: {}; group strides: {})",
+                        rate(21), rate(22), rate(23),
+                        TopValues(histograms[static_cast<size_t>(Histogram::IndirectInterposer)], interposer),
+                        rate(24), rate(25), rate(26), rate(27), rate(28), rate(29),
+                        TopValues(histograms[static_cast<size_t>(Histogram::IndirectStep)], number),
+                        TopValues(histograms[static_cast<size_t>(Histogram::IndirectGroupStride)], number));
+    line += fmt::format(" | image descriptor stages {:.0f} ({:.0f} reused)", rate(19), rate(20));
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;

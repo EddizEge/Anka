@@ -3399,6 +3399,7 @@ VkSampler Sampler::Find(const VariantKey& key) const noexcept {
 }
 
 VkSampler Sampler::Emplace(VariantKey key) {
+    variant_generation.fetch_add(1, std::memory_order_relaxed);
     bool custom_border = has_custom_border_colors && !key.drop_custom_border;
     if (custom_border && !custom_border_color_budget.TryAcquire(*device_ptr, 1)) {
         static bool warned_budget = false;

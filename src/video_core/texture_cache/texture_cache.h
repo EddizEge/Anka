@@ -53,6 +53,14 @@ inline const bool g_nx2_alias_verify = [] {
     const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
     return value != nullptr && value[0] == '2';
 }();
+// PrepareImage touches an image in the LRU once per frame: a second Touch with the same frame_tick
+// returns at once (its item's tick is not older), but finding the item costs two dependent loads
+// into the LRU's deque for every texture of every draw. EDEN_NX2_TEX_TOUCH_SKIP=0 touches on every
+// use.
+inline const bool g_nx2_tex_touch_skip = [] {
+    const char* value = std::getenv("EDEN_NX2_TEX_TOUCH_SKIP");
+    return value == nullptr || value[0] != '0';
+}();
 
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
@@ -1727,6 +1735,7 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
         slot_image_views.erase(image_view_id);
     }
+    ++image_view_epoch;
     image.image_view_ids.clear();
     image.image_view_infos.clear();
     for (size_t c : active_channel_ids) {
@@ -1931,7 +1940,11 @@ void TextureCache<P>::TickAsyncUnswizzle() {
 template <class P>
 bool TextureCache<P>::ScaleUp(Image& image) {
     const bool has_copy = image.HasScaled();
+    const bool was_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     const bool rescaled = image.ScaleUp();
+    if (True(image.flags & ImageFlagBits::Rescaled) != was_rescaled) {
+        ++image_view_epoch;
+    }
     if (!has_copy && image.HasScaled()) {
         total_used_memory += GetScaledImageSizeBytes(image);
     }
@@ -1944,7 +1957,11 @@ bool TextureCache<P>::ScaleUp(Image& image) {
 
 template <class P>
 bool TextureCache<P>::ScaleDown(Image& image) {
+    const bool was_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     const bool rescaled = image.ScaleDown();
+    if (True(image.flags & ImageFlagBits::Rescaled) != was_rescaled) {
+        ++image_view_epoch;
+    }
     if (!rescaled) {
         return false;
     }
@@ -3078,6 +3095,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         }
         slot_image_views.erase(image_view_id);
     }
+    ++image_view_epoch;
     const bool retained = RetainPendingImageDownloads(image_id, slot_images[image_id],
                                                        uncommitted_downloads, committed_downloads);
     if (retained) {
@@ -3275,7 +3293,10 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
         }
         MarkModification(image);
     }
-    lru_cache.Touch(image.lru_index, frame_tick);
+    if (!g_nx2_tex_touch_skip || image.lru_tick < frame_tick) {
+        lru_cache.Touch(image.lru_index, frame_tick);
+        image.lru_tick = frame_tick;
+    }
 }
 
 template <class P>

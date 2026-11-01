@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -134,6 +136,19 @@ protected:
         const u64 addr_end = addr_begin + size;
 
         const u64 page_end = addr_end >> Core::DEVICE_PAGEBITS;
+        // EDEN_NX2_QUERY_BOUNDS: pages outside the lowest and highest page that ever held a
+        // query have none (every pre-draw invalidation range and inline write comes here):
+        // nothing to visit, so no lock. =0 always takes the lock and looks.
+        static const bool skip_outside = [] {
+            const char* value = std::getenv("EDEN_NX2_QUERY_BOUNDS");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (skip_outside &&
+            (page_end < lowest_query_page.load(std::memory_order_acquire) ||
+             (addr_begin >> Core::DEVICE_PAGEBITS) >
+                 highest_query_page.load(std::memory_order_acquire))) {
+            return;
+        }
         std::scoped_lock lock(cache_mutex);
         for (u64 page = addr_begin >> Core::DEVICE_PAGEBITS; page <= page_end; ++page) {
             const u64 page_start = page << Core::DEVICE_PAGEBITS;
@@ -178,6 +193,10 @@ protected:
 
     ::Common::unordered_map<u64, ::Common::unordered_map<u32, QueryLocation>> cached_queries;
     std::mutex cache_mutex;
+    /// Lowest and highest page ever added to cached_queries (never shrink; written under
+    /// cache_mutex, read without it by IterateCache).
+    std::atomic<u64> lowest_query_page{~u64{}};
+    std::atomic<u64> highest_query_page{};
 
     /// Releases not written to guest memory yet (PendingRelease). Written on the GPU thread,
     /// erased by the fence that writes them.

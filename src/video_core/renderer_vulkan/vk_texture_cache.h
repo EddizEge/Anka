@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <span>
 
@@ -628,7 +629,15 @@ public:
 
     [[nodiscard]] VkSampler HandleFor(const ImageView& image_view, bool is_depth);
 
+    /// Changes whenever any sampler makes a variant (EDEN_NX2_DESC_REUSE): until then HandleFor
+    /// returns what it returned before for the same view.
+    [[nodiscard]] static u64 VariantGeneration() noexcept {
+        return variant_generation.load(std::memory_order_relaxed);
+    }
+
 private:
+    static inline std::atomic<u64> variant_generation{0};
+
     struct VariantKey {
         bool reduce_anisotropy;
         bool force_nearest;

@@ -74,3 +74,19 @@ count and stride (multiDrawIndirect is mandatory). Records must follow at one st
 bytes), up to 256 a batch. `EDEN_NX2_INDIRECT_BATCH=0` turns it off; the profile line counts
 merged calls. The reset fix's records (vk_rasterizer.cpp) are written in runs of adjacent
 records within a page instead of one inline write each (`EDEN_NX2_RESET_RUNS=0`).
+
+In the game the merge never happened (0 merged of ~35,000 a second). With `EDEN_NX2_GPU_PROFILE`
+the front's line now says why per call ("indirect not merged: ..."): no previous call, ring
+restarted, other entries between (with the most frequent first entry after the held call: p =
+pushbuffer method, r = pushbuffer run, m = macro write, ? = another entry kind or engine),
+already published, other topology, group full, record not after the previous one, step out of
+range, step mismatch (with the most frequent steps and group strides).
+
+More skips of repeated per-draw work, each with its own switch (`=0` turns it off):
+`EDEN_NX2_DESC_XLAT` (small reads remember their page's host pointer until the GPU page table
+or the device mapping changes), `EDEN_NX2_TEX_TOUCH_SKIP` (one LRU touch per image per frame),
+`EDEN_NX2_USAGE_SKIP` / `EDEN_NX2_INDEX_SKIP` (usage tracker page fills, index buffer lookups),
+`EDEN_NX2_DESC_REUSE` (a stage drawn with the same views and samplers copies its last image
+descriptors; the profile line counts reused stages), `EDEN_NX2_INVAL_HULL`,
+`EDEN_NX2_SHADER_BOUNDS`, `EDEN_NX2_QUERY_BOUNDS` (pre-draw invalidations skip lookups and locks
+outside what the caches hold). Built; not measured yet.

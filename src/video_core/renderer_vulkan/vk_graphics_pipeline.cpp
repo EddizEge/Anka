@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -561,8 +562,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
+            PushStageImageDescriptors(stage, rescaling, samplers_it, views_it);
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -604,6 +604,89 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+void GraphicsPipeline::PushStageImageDescriptors(size_t stage, RescalingPushConstant& rescaling,
+                                                 const VideoCommon::SamplerId*& samplers,
+                                                 const VideoCommon::ImageViewInOut*& views) {
+    // EDEN_NX2_DESC_REUSE: a stage drawn with the same views and samplers as its last draw writes
+    // the same image descriptors (handles, sampler variants, rescale bits), so they are copied
+    // from that draw instead of visiting each view, sampler and image again. The copy holds
+    // while no image view slot was freed (an id still names the same view), no image changed its
+    // rescale state (TextureCache::ImageViewEpoch) and no sampler made a variant
+    // (Sampler::VariantGeneration). Written storage images are still marked modified.
+    // EDEN_NX2_DESC_REUSE=0 turns it off.
+    static const bool reuse = [] {
+        const char* value = std::getenv("EDEN_NX2_DESC_REUSE");
+        return value == nullptr || value[0] != '0';
+    }();
+    const Shader::Info& info{stage_infos[stage]};
+    const u32 stage_textures = Shader::NumDescriptors(info.texture_descriptors);
+    const u32 stage_images = Shader::NumDescriptors(info.image_descriptors);
+    if (!reuse || stage_textures + stage_images == 0) {
+        PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers,
+                             views);
+        return;
+    }
+    namespace Profile = VideoCommon::Nx2Profile;
+    const u32 stage_views = stage_textures + stage_images;
+    const VideoCommon::ImageViewInOut* const first_view =
+        views + Shader::NumDescriptors(info.texture_buffer_descriptors) +
+        Shader::NumDescriptors(info.image_buffer_descriptors);
+    const VideoCommon::SamplerId* const first_sampler = samplers;
+    const u64 texture_epoch = texture_cache.ImageViewEpoch();
+    const u64 sampler_generation = Sampler::VariantGeneration();
+    ImageDescriptorMemo& memo{image_descriptor_memos[stage]};
+    bool same = memo.valid && memo.texture_epoch == texture_epoch &&
+                memo.sampler_generation == sampler_generation;
+    if (same) {
+        const u32* const ids = memo.ids.data();
+        for (u32 i = 0; same && i < stage_views; ++i) {
+            same = ids[i] == first_view[i].id.index;
+        }
+        for (u32 i = 0; same && i < stage_textures; ++i) {
+            same = ids[stage_views + i] == first_sampler[i].index;
+        }
+    }
+    Profile::Add(Profile::Counter::DescriptorStages, 1);
+    if (same) {
+        Profile::Add(Profile::Counter::DescriptorStagesReused, 1);
+        guest_descriptor_queue.AddEntries(memo.entries.data(), memo.entries.size());
+        const u8* rescaled = memo.rescaled.data();
+        for (size_t i = 0; i < info.texture_descriptors.size(); ++i) {
+            rescaling.PushTexture(*rescaled++ != 0);
+        }
+        const VideoCommon::ImageViewInOut* image_it = first_view + stage_textures;
+        for (const auto& desc : info.image_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index) {
+                if (desc.is_written) {
+                    texture_cache.MarkModification(
+                        texture_cache.GetImageView(image_it->id).image_id);
+                }
+                ++image_it;
+            }
+            rescaling.PushImage(*rescaled++ != 0);
+        }
+        views = first_view + stage_views;
+        samplers = first_sampler + stage_textures;
+        return;
+    }
+    const DescriptorUpdateEntry* const first_entry = guest_descriptor_queue.Cursor();
+    memo.rescaled.resize(info.texture_descriptors.size() + info.image_descriptors.size());
+    PushImageDescriptors(texture_cache, guest_descriptor_queue, info, rescaling, samplers, views,
+                         memo.rescaled.data());
+    memo.entries.assign(first_entry, guest_descriptor_queue.Cursor());
+    memo.ids.resize(size_t{stage_views} + stage_textures);
+    for (u32 i = 0; i < stage_views; ++i) {
+        memo.ids[i] = first_view[i].id.index;
+    }
+    for (u32 i = 0; i < stage_textures; ++i) {
+        memo.ids[stage_views + i] = first_sampler[i].index;
+    }
+    // Read before the push: a variant made by the push itself leaves this copy stale.
+    memo.texture_epoch = texture_epoch;
+    memo.sampler_generation = sampler_generation;
+    memo.valid = true;
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,

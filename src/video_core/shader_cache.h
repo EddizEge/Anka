@@ -171,6 +171,13 @@ private:
     /// Bounds of every address ever rejected (never shrinks): a quick test for invalidations.
     std::atomic<VAddr> rejected_lowest{~VAddr{}};
     std::atomic<VAddr> rejected_highest{};
+
+    /// Lowest start and highest end of every program ever registered (never shrink): a write
+    /// outside them overlaps no entry (EDEN_NX2_SHADER_BOUNDS).
+    std::atomic<VAddr> registered_lowest{~VAddr{}};
+    std::atomic<VAddr> registered_highest{};
+    /// Whether marked_for_removal has entries, readable without invalidation_mutex.
+    std::atomic<bool> removal_pending{};
 };
 
 } // namespace VideoCommon
