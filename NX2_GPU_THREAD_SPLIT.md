@@ -213,3 +213,27 @@ Profile cost: zones read the time stamp counter without fences, converted to nan
 window by the wall clock (`EDEN_NX2_PROFILE_TSC=0`: the wall clock per zone, as before); the
 indirect draw diagnostics (Nx2IndirectDiag, ~1-1.5 us per draw) run only with
 `EDEN_NX2_INDIRECT_DIAG=1`. Built; not measured yet.
+
+## Review fixes for the above (2026-11-01)
+
+- Uniform way, samplers by header index (ViaHeaderBinding): the quick test of written sampler
+  pool ranges takes the header pool's limit, as TextureCache::SynchronizeDescriptors does (it
+  took tex_sampler.limit).
+- Same-write skip. The skipped invalidation also used to refresh what caches held on pages
+  written around them, and covered work between the write and the next FlushCaching. Writes
+  around the caches now mark their device pages (Nx2MarkUntrackedWrite: MemoryManager::Write
+  (semaphores), WriteBlockUnsafe unless the caller tells every cache (inline-to-memory), query
+  results (CounterReport), buffer cache downloads and DMA copies, in-place texture swizzles).
+  IsLightSameWrite counts no write on a marked page (made, no plain light draw after it). A
+  skipped write (one 4 KiB page, at most 16 between flushes) is kept by the memory manager; at
+  the next FlushCaching, if the rasterizer's WorkEpoch (RasterizerVulkan::light_epoch) or the
+  FlushCaching count of every address space (g_nx2_flushes) moved since the first skip, all kept
+  writes are invalidated as if made, otherwise those on pages marked since. Re-added ones are
+  cached writes but no same writes: the light path refuses the next draw. The line adds
+  "invalidated later", "made" (across pages / list full) and "not counted (pages written around
+  the caches)".
+- Write batches: with batching on, publishing counts words as the ring without batching would
+  hold them (a word per macro write, its skips at the ring's end, no batch headers): held writes
+  are published where their own entries were. Front reads of the back's results that do not
+  drain (Nx2IsGpuWritten behind DmaPusher's indirect record take, macro parameter flush and
+  command list flush) see them no later than before. Built; not measured yet.
