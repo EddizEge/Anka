@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <limits>
 
 #include <boost/container/small_vector.hpp>
@@ -173,11 +174,17 @@ public:
     /// same guest range earlier in this scheduler tick when its size and bytes match, or streams
     /// a new one. Returns whether a slice was reused.
     [[nodiscard]] static bool UniformReuseEnabled() noexcept {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_UBO_REUSE");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        // Read at the first call, as a function-local static const is, without that static's
+        // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+        // for each uniform buffer bind).
+        static std::atomic<s8> enabled{-1};
+        s8 value = enabled.load(std::memory_order_relaxed);
+        if (value < 0) [[unlikely]] {
+            const char* env = std::getenv("EDEN_NX2_UBO_REUSE");
+            value = static_cast<s8>(env == nullptr || env[0] != '0');
+            enabled.store(value, std::memory_order_relaxed);
+        }
+        return value != 0;
     }
 
     [[nodiscard]] std::span<u8> UniformReuseScratch(u32 size) {
@@ -193,11 +200,17 @@ public:
     /// guest bytes that are contiguous in host memory to BindMappedUniformBufferReuseFrom, which
     /// compares and copies them in place instead of through UniformReuseScratch.
     [[nodiscard]] static bool UniformDirectEnabled() noexcept {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_UBO_DIRECT");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        // Read at the first call, as a function-local static const is, without that static's
+        // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+        // for each uniform buffer bind).
+        static std::atomic<s8> enabled{-1};
+        s8 value = enabled.load(std::memory_order_relaxed);
+        if (value < 0) [[unlikely]] {
+            const char* env = std::getenv("EDEN_NX2_UBO_DIRECT");
+            value = static_cast<s8>(env == nullptr || env[0] != '0');
+            enabled.store(value, std::memory_order_relaxed);
+        }
+        return value != 0;
     }
 
     bool BindMappedUniformBufferReuseFrom(size_t stage, u32 index, DAddr device_addr,
@@ -209,11 +222,17 @@ public:
     /// holding at least the bytes bound serves a shorter bind of them (one range bound to stages
     /// that use different sizes of it).
     [[nodiscard]] static bool UniformStageEnabled() noexcept {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_UBO_STAGE");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        // Read at the first call, as a function-local static const is, without that static's
+        // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+        // for each uniform buffer bind).
+        static std::atomic<s8> enabled{-1};
+        s8 value = enabled.load(std::memory_order_relaxed);
+        if (value < 0) [[unlikely]] {
+            const char* env = std::getenv("EDEN_NX2_UBO_STAGE");
+            value = static_cast<s8>(env == nullptr || env[0] != '0');
+            enabled.store(value, std::memory_order_relaxed);
+        }
+        return value != 0;
     }
 
     /// Binds reused that EDEN_NX2_UBO_REUSE alone would have streamed (EDEN_NX2_UBO_STAGE), for

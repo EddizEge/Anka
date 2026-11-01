@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <functional>
 #include <memory>
@@ -635,11 +636,17 @@ private:
     /// Whether UpdateIndexBuffer reuses translations (index_memo). EDEN_NX2_INDEX_SKIP=0 turns it
     /// off.
     static bool IndexSkipEnabled() {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_INDEX_SKIP");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        // Read at the first call, as a function-local static const is, without that static's
+        // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+        // for each indexed draw).
+        static std::atomic<s8> enabled{-1};
+        s8 value = enabled.load(std::memory_order_relaxed);
+        if (value < 0) [[unlikely]] {
+            const char* env = std::getenv("EDEN_NX2_INDEX_SKIP");
+            value = static_cast<s8>(env == nullptr || env[0] != '0');
+            enabled.store(value, std::memory_order_relaxed);
+        }
+        return value != 0;
     }
 
     /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).

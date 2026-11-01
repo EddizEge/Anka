@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <cstdio>
 #include <cstdlib>
@@ -209,21 +210,32 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 
 // EDEN_NX2_LIGHT_DRAW=0: every draw goes through the full setup (PrepareDraw).
 bool LightDrawEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    // Read at the first call, as a function-local static const is, without that static's
+    // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+    // several times per draw).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
 }
 
 // EDEN_NX2_LIGHT_UNIFORM_VALUES=0: a light draw with uniforms refuses any constant buffer write
 // over a descriptor word (or bind of its slot) instead of reading the word again and comparing.
 bool LightUniformValues() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_LIGHT_UNIFORM_VALUES");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    // Read at the first call, without a guarded static's check on every call (light draws with
+    // uniforms).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_LIGHT_UNIFORM_VALUES");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
 }
 
 // EDEN_NX2_LIGHT_STORAGE=0: a light draw with uniforms refuses storage buffer descriptors written
@@ -231,14 +243,16 @@ bool LightUniformValues() {
 // that bound them again up in full after all and compares, as EDEN_NX2_LIGHT_UNIFORM=2 does for
 // every light draw with uniforms.
 u32 LightStorageMode() {
-    static const u32 mode = [] {
-        const char* value = std::getenv("EDEN_NX2_LIGHT_STORAGE");
-        if (value == nullptr) {
-            return 1U;
-        }
-        return value[0] == '0' ? 0U : value[0] == '2' ? 2U : 1U;
-    }();
-    return mode;
+    // Read at the first call, without a guarded static's check on every call (light draws with
+    // uniforms).
+    static std::atomic<s8> mode{-1};
+    s8 value = mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_LIGHT_STORAGE");
+        value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
+        mode.store(value, std::memory_order_relaxed);
+    }
+    return static_cast<u32>(value);
 }
 
 // Light draws bind index buffers as they are: no quad index pass (BindQuadIndexBuffer, quad

@@ -42,11 +42,18 @@ namespace {
 // EDEN_NX2_LIGHT_DRAW=0: every draw is set up in full (vk_rasterizer.cpp). Its changes are still
 // tracked while profiling (EDEN_NX2_GPU_PROFILE), for the "draw changes" counts.
 bool LightTrackingEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
-        return value == nullptr || value[0] != '0' || VideoCommon::Nx2Profile::Enabled();
-    }();
-    return enabled;
+    // Read at the first call, as a function-local static const is, without that static's
+    // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+    // for each register write).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        value = static_cast<s8>(env == nullptr || env[0] != '0' ||
+                                VideoCommon::Nx2Profile::Enabled());
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
 }
 
 // The Maxwell3D::LightChange class of each register: what a change of it means for the next
@@ -117,6 +124,10 @@ const std::array<u16, Maxwell3D::Regs::NUM_REGS>& LightClasses() {
     }();
     return table;
 }
+
+// The table, looked up once at startup: ProcessDirtyRegisters reads it for every register write
+// (LightClasses' function-local static is checked for its initialization on each call).
+const std::array<u16, Maxwell3D::Regs::NUM_REGS>& g_light_classes = LightClasses();
 
 // EDEN_NX2_SAME_SKIP=0: a constant buffer write of the bytes guest memory already holds that
 // IsLightSameWrite counted is still made, and its range invalidated at the next FlushCaching.
@@ -464,7 +475,7 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
     if (LightTrackingEnabled() && (changed || execution_mask[method])) {
-        NoteLightChange(LightClasses()[method], method);
+        NoteLightChange(g_light_classes[method], method);
     }
 }
 

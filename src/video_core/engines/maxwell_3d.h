@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <cmath>
 #include <cstdlib>
@@ -3348,11 +3349,17 @@ private:
 
     /// Whether state register writes that keep the register's value are dropped (CallMethod).
     static bool SkipSameValueWrites() {
-        static const bool skip = [] {
-            const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
-            return value == nullptr || value[0] != '0';
-        }();
-        return skip;
+        // Read at the first call, as a function-local static const is, without that static's
+        // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+        // for each register write).
+        static std::atomic<s8> skip{-1};
+        s8 value = skip.load(std::memory_order_relaxed);
+        if (value < 0) [[unlikely]] {
+            const char* env = std::getenv("EDEN_NX2_SKIP_SAME");
+            value = static_cast<s8>(env == nullptr || env[0] != '0');
+            skip.store(value, std::memory_order_relaxed);
+        }
+        return value != 0;
     }
 
     /// Handles writes to the macro uploading register.

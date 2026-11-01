@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -260,35 +261,50 @@ ConfigureFuncs ConfigureFunc(const std::array<vk::ShaderModule, NUM_STAGES>& mod
 
 // EDEN_NX2_DESC_REUSE=0: every stage's image descriptors are made again each draw.
 bool DescriptorReuseEnabled() {
-    static const bool reuse = [] {
-        const char* value = std::getenv("EDEN_NX2_DESC_REUSE");
-        return value == nullptr || value[0] != '0';
-    }();
-    return reuse;
+    // Read at the first call, as a function-local static const is, without that static's
+    // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+    // for each draw set up).
+    static std::atomic<s8> reuse{-1};
+    s8 value = reuse.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_DESC_REUSE");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        reuse.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
 }
 } // Anonymous namespace
 
 bool LightDrawOn() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    // Read at the first call, as a function-local static const is, without that static's
+    // thread-safe initialization check on every call (MSVC: a thread-local read; this runs
+    // for each draw set up).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
 }
 
 u32 LightUniformMode() {
-    static const u32 mode = [] {
+    // Read at the first call, as a function-local static const is, without that static's
+    // thread-safe initialization check on every call (several per draw).
+    static std::atomic<s8> mode{-1};
+    s8 value = mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
         // Image descriptors come from the last draw's (DescriptorReuseEnabled).
         if (!LightDrawOn() || !DescriptorReuseEnabled()) {
-            return 0U;
+            value = 0;
+        } else {
+            const char* env = std::getenv("EDEN_NX2_LIGHT_UNIFORM");
+            value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
         }
-        const char* value = std::getenv("EDEN_NX2_LIGHT_UNIFORM");
-        if (value == nullptr) {
-            return 1U;
-        }
-        return value[0] == '0' ? 0U : value[0] == '2' ? 2U : 1U;
-    }();
-    return mode;
+        mode.store(value, std::memory_order_relaxed);
+    }
+    return static_cast<u32>(value);
 }
 
 // TODO(crueter): This is the worst-formatted code I have EVER seen
