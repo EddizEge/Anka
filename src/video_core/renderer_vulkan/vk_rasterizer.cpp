@@ -295,7 +295,11 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         .indirect = indirect,
     };
     bool light_follows = false;
+    bool set_up = false;
     SCOPE_EXIT {
+        if (!light_follows && !set_up && LightDrawEnabled()) {
+            Profile::Add(Profile::Counter::LightRefusedCutShort, 1);
+        }
         anchor.record_count = scheduler.RecordCount();
         anchor.armed = light_follows;
         light_anchor = anchor;
@@ -488,8 +492,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         draw_func();
     }
     submitted = true;
-    light_follows = LightDrawEnabled() && light_entry.shape_ok && !pipeline->WritesMemory() &&
-                    LightQueriesOff() && !texture_cache.RenderTargetsNeedRepeat();
+    set_up = true;
+    light_follows = LightDrawEnabled() && LightFollowable(*pipeline);
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
@@ -564,12 +568,36 @@ void RasterizerVulkan::BeginLightDraw(bool indirect, bool shape_ok) {
     const u32 base = static_cast<u32>(indirect ? Profile::Counter::DrawChangeIndirect
                                                : Profile::Counter::DrawChangeDirect);
     Profile::Add(static_cast<Profile::Counter>(base + static_cast<u32>(change)), 1);
+    // The register whose write first kept this draw off the light path, armed or not.
+    const u32 first_blocking = maxwell3d->light.first_blocking;
+    if ((changes & ~LightChange::Light) != 0 && first_blocking != 0) {
+        Profile::Note(Profile::Histogram::LightBlocking, s64{first_blocking} - 1);
+    }
 }
 
-bool RasterizerVulkan::LightQueriesOff() const {
-    const auto& regs = maxwell3d->regs;
-    return regs.transform_feedback_enabled == 0 && regs.zpass_pixel_count_enable == 0 &&
-           !query_cache_runtime.HostConditionalRenderingSet();
+bool RasterizerVulkan::LightFeedbackOff() const {
+    return maxwell3d->regs.transform_feedback_enabled == 0;
+}
+
+bool RasterizerVulkan::LightFollowable(const GraphicsPipeline& pipeline) {
+    // A light draw repeats none of this draw's setup: it must have left nothing a full setup
+    // would do again for the same registers and memory.
+    namespace Profile = VideoCommon::Nx2Profile;
+    Profile::Counter refused;
+    if (!light_entry.shape_ok) {
+        refused = Profile::Counter::LightRefusedShape;
+    } else if (pipeline.WritesMemory()) {
+        // Each draw marks what it writes (buffer ranges, images) and orders it with barriers.
+        refused = Profile::Counter::LightRefusedWrites;
+    } else if (!LightFeedbackOff()) {
+        refused = Profile::Counter::LightRefusedFeedback;
+    } else if (texture_cache.RenderTargetsNeedRepeat()) {
+        refused = Profile::Counter::LightRefusedTargets;
+    } else {
+        return true;
+    }
+    Profile::Add(refused, 1);
+    return false;
 }
 
 template <typename Func>
@@ -580,11 +608,12 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     // command buffer holds, as nothing was recorded since (Scheduler::RecordCount; a submission
     // or InvalidateState counts too). A full setup now would produce the same, because what it
     // reads did not change:
-    // - registers: only vertex stream addresses/limits, the index buffer start/limit and draw
-    //   parameters were written (Maxwell3D::LightChange). The pipeline key, the shaders, the
-    //   texture and sampler pools, the render targets and the dynamic state do not read those
-    //   (their dirty flags are the buffer cache's own: VertexBuffer*, IndexBuffer). Topology,
-    //   index format and draw kind are the anchor's.
+    // - registers: only vertex stream addresses/limits/sizes, the index buffer start/limit and
+    //   draw parameters changed value (Maxwell3D::LightChange; a state register written with
+    //   its value changes nothing). The pipeline key, the shaders, the texture and sampler
+    //   pools, the render targets and the dynamic state do not read those (their dirty flags are
+    //   the buffer cache's own: VertexBuffer*, IndexBuffer). Topology (the effect of
+    //   topology_override), index format and draw kind are the anchor's.
     // - memory: nothing was invalidated or flushed (light_epoch: CPU writes, unmaps, flushes,
     //   fences, frames, channel changes, clears, dispatches, copies), no other engine or method
     //   wrote memory (LightChange::Command) and every cached write since the anchor began was a
@@ -592,9 +621,12 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     //   (Maxwell3D::IsLightSameWrite): its invalidation at FlushCaching above makes a full setup
     //   upload the same bytes. Uniform data, storage buffer addresses and texture handles read
     //   from constant buffers are therefore what the anchor read.
-    // - the anchor's pipeline writes no memory (no storage buffer, image or global stores) and
-    //   no queries, transform feedback or conditional rendering are active, so skipping its
-    //   per-draw bookkeeping (written ranges, image modification marks) loses nothing.
+    // - the anchor's pipeline writes no memory (no storage buffer, image or global stores),
+    //   transform feedback is off and its render targets need no upload, sparse binding, alias
+    //   copy or feedback loop barrier (LightFollowable), so skipping the per-draw bookkeeping
+    //   (written ranges, modification ticks: no other image is modified in between) loses
+    //   nothing. Queries and conditional rendering need no more than the calls made below,
+    //   which the full setup makes per draw too.
     // What a full setup would do differently is then the vertex/index/indirect buffers, done
     // here as it does them. Anything else falls back to the full setup (also from the middle:
     // what was bound so far stays valid and the full setup repeats it).
@@ -610,7 +642,6 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         Profile::Add((light.changes & LightChange::Command) != 0 ? Profile::Counter::LightOtherWork
                                                                  : Profile::Counter::LightStateChanged,
                      1);
-        Profile::Note(Profile::Histogram::LightBlocking, s64{light.first_blocking} - 1);
         return false;
     }
     const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
@@ -627,7 +658,7 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     if (!light_entry.shape_ok || indirect != last.indirect || is_indexed != last.is_indexed ||
         draw_state.topology != last.topology ||
         (is_indexed && draw_state.index_buffer.format != last.index_format) ||
-        !LightQueriesOff()) {
+        !LightFeedbackOff()) {
         Profile::Add(Profile::Counter::LightShape, 1);
         return false;
     }

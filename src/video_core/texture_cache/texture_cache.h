@@ -1248,14 +1248,24 @@ bool TextureCache<P>::RenderTargetsNeedRepeat() const {
     if (Settings::values.barrier_feedback_loops.GetValue() && last_feedback_loop_result) {
         return true;
     }
+    // An alias with an older tick is left alone (SynchronizeAliases copies newer ones only), and
+    // stays older while nothing else is drawn, copied or uploaded.
+    const auto repeats = [this](ImageId image_id) {
+        const ImageBase& image = slot_images[image_id];
+        if (True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::SparseLayers |
+                                ImageFlagBits::UnwrittenSparse))) {
+            return true;
+        }
+        return std::ranges::any_of(image.aliased_images, [&](const AliasedImage& alias) {
+            return slot_images[alias.id].modification_tick > image.modification_tick;
+        });
+    };
     for (size_t index = 0; index < NUM_RT; ++index) {
-        if ((rt_active_mask & (1u << index)) != 0 &&
-            !slot_images[rt_image_id[index]].aliased_images.empty()) {
+        if ((rt_active_mask & (1u << index)) != 0 && repeats(rt_image_id[index])) {
             return true;
         }
     }
-    return (rt_active_mask & (1u << NUM_RT)) != 0 &&
-           !slot_images[rt_depth_image_id].aliased_images.empty();
+    return (rt_active_mask & (1u << NUM_RT)) != 0 && repeats(rt_depth_image_id);
 }
 
 template <class P>

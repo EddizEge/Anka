@@ -64,6 +64,10 @@ const std::array<u16, Maxwell3D::Regs::NUM_REGS>& LightClasses() {
             // Address high and low; the stride/enable word and the frequency stay State.
             fill(MAXWELL3D_REG_INDEX(vertex_streams) + i * 4 + 1, 2, LightChange::VertexStreams);
             fill(MAXWELL3D_REG_INDEX(vertex_stream_limits) + i * 2, 2, LightChange::VertexStreams);
+            // The native class's stream sizes (Regs::NativeVertexStreamSize, padding in the
+            // legacy layout): what a stream move writes besides the address. Read only for the
+            // vertex buffer ranges and vertex count estimates, as the limits.
+            fill(0x600 / sizeof(u32) + i * 2, 2, LightChange::VertexStreams);
         }
         // Start and limit; the format stays State.
         fill(MAXWELL3D_REG_INDEX(index_buffer), 4, LightChange::IndexBuffer);
@@ -72,7 +76,9 @@ const std::array<u16, Maxwell3D::Regs::NUM_REGS>& LightClasses() {
               MAXWELL3D_REG_INDEX(vertex_buffer.first), MAXWELL3D_REG_INDEX(vertex_buffer.count),
               MAXWELL3D_REG_INDEX(vertex_id_base), MAXWELL3D_REG_INDEX(global_base_vertex_index),
               MAXWELL3D_REG_INDEX(global_base_instance_index), MAXWELL3D_REG_INDEX(draw.begin),
-              MAXWELL3D_REG_INDEX(draw.end)}) {
+              MAXWELL3D_REG_INDEX(draw.end), MAXWELL3D_REG_INDEX(topology_override)}) {
+            // topology_override only acts through the draw's topology (DrawManager::
+            // UpdateTopology), which a light draw must share with the last draw.
             classes[method] = LightChange::DrawParams;
         }
         // Size, address and offset: read only by constant buffer binds and data writes.
@@ -433,10 +439,14 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this);
     }
+    // A state register written with the value it holds changes nothing a draw reads (its dirty
+    // flags only make the next full setup redo the same); executable methods act whatever their
+    // value. With EDEN_NX2_SKIP_SAME such writes do not get here (CallMethod, ConsumeSinkImpl).
+    const bool changed = regs.reg_array[method] != argument;
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
-    if (LightTrackingEnabled()) {
+    if (LightTrackingEnabled() && (changed || execution_mask[method])) {
         NoteLightChange(LightClasses()[method], method);
     }
 }

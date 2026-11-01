@@ -194,7 +194,9 @@ private:
     void BeginLightDraw(bool indirect, bool shape_ok);
     template <typename Func>
     bool TryLightDraw(bool is_indexed, bool indirect, bool invalidated, Func& draw_func);
-    [[nodiscard]] bool LightQueriesOff() const;
+    [[nodiscard]] bool LightFeedbackOff() const;
+    /// Whether a light draw may follow this fully set up draw (counts why not, profiling).
+    [[nodiscard]] bool LightFollowable(const GraphicsPipeline& pipeline);
     /// Work outside draws that may change what the next draw would bind (any thread).
     void NoteLightWork() noexcept {
         light_epoch.fetch_add(1, std::memory_order_seq_cst);

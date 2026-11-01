@@ -296,9 +296,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
-    /// EDEN_NX2_LIGHT_DRAW: whether a draw with the last draw's bindings would do more than
-    /// that draw left to do: a feedback loop barrier, or render target images with aliases
-    /// (a later draw synchronizes them with what this one rendered).
+    /// EDEN_NX2_LIGHT_DRAW: whether another draw to the current render targets would do more to
+    /// them than mark them modified (PrepareImage): a feedback loop barrier, an upload of
+    /// CPU-modified contents, sparse binding, or a copy from an alias written after one of them.
     [[nodiscard]] bool RenderTargetsNeedRepeat() const;
 
     [[nodiscard]] bool IsRescaling() const noexcept;

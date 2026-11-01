@@ -102,11 +102,14 @@ draw by updating and binding its vertex, index and indirect buffers only, then r
 - the previous draw was set up (in full, or light after one) with the same draw kind (direct or
   indirect, indexed or not), topology and index format; one instance, no inline indices, no
   quads, no 8-bit indices, no count buffer or byte count; its pipeline writes no memory; no
-  transform feedback, pixel counting or host conditional rendering; its render targets have no
-  aliased images and no feedback loop barrier;
-- only vertex stream addresses/limits, index buffer start/limit, draw parameters and the
-  constant buffer selection were written since (Maxwell3D::LightChange; HLE macros on the back,
-  texture pools, binds and any other register count as state);
+  transform feedback; its render targets need no upload, sparse binding, copy from a newer
+  alias or feedback loop barrier (queries and conditional rendering need only the per-draw
+  calls the light setup makes too);
+- only vertex stream addresses, limits and sizes (the native class's, at 0x600), index buffer
+  start/limit, draw parameters, topology_override (its effect is the topology, compared) and
+  the constant buffer selection changed value since (Maxwell3D::LightChange; a state register
+  written with the value it holds counts as unchanged; HLE macros on the back, texture pools,
+  binds and any other register count as state);
 - nothing was recorded since (Scheduler::RecordCount: barriers, uploads, render pass changes,
   submissions), nothing invalidated, flushed, unmapped, fenced, cleared, dispatched, copied or
   ticked a frame (light_epoch), no inline data, DMA or semaphore, and each constant buffer write
@@ -117,4 +120,15 @@ With `EDEN_NX2_GPU_PROFILE` the back's line adds "draw changes direct/indirect" 
 since the previous draw, widest first) and "light draws N (M indirect); full: ..." (why the others
 were set up in full, with the most frequent first blocking register); the front's line adds
 "methods between indirect draws" (the 16 most frequent of the first 16 methods after each
-indirect draw: p/r/m as above, c = macro call). Built; not run or measured yet.
+indirect draw: p/r/m as above, c = macro call).
+
+First run (45a27e1f1, open area): 0 light draws. Every draw was "not after one", and every
+indirect draw that moved a vertex stream was "+ state": the native class sets a stream's size
+at 0x600 + 8 * stream (Regs::NativeVertexStreamSize) along with its address, and those words
+were state. And no full setup could be followed; which condition refused them was not counted.
+Two of them were stricter than the argument needs and now go: pixel counting and host
+conditional rendering (the light setup makes the per-draw query calls the full one makes) and
+any alias of a render target (only an alias written later gets copied). The back's line now
+also counts why a full setup could not be followed ("not followable: shape, memory writes,
+transform feedback, render targets, cut short") and names the registers that first kept
+draws off the light path, armed or not ("first blocking register"). Built; not measured yet.

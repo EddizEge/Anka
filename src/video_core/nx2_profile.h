@@ -185,8 +185,14 @@ enum class Counter : u32 {
     LightNotArmed,       ///< The previous draw was not one a light draw can follow
     LightStateChanged,   ///< Registers other than vertex/index buffers and draw parameters changed
     LightOtherWork,      ///< Other work in between: commands recorded, caches invalidated, memory written
-    LightShape,          ///< Another kind of draw (indexed, indirect, topology, instances, queries)
+    LightShape,          ///< Another kind of draw (indexed, indirect, topology, index format)
     LightFellBack,       ///< Buffers deleted, uploaded or the render pass ended on the way
+    // Draws set up in full that a light draw may not follow, why (the first reason that applies):
+    LightRefusedShape,    ///< Instances, inline indices, quads, 8-bit indices, count buffer, byte count
+    LightRefusedWrites,   ///< Its pipeline writes memory (storage buffers, images, global stores)
+    LightRefusedFeedback, ///< Transform feedback on
+    LightRefusedTargets,  ///< Render targets: feedback loop barrier, newer alias, CPU-modified, sparse
+    LightRefusedCutShort, ///< The setup ended early (no pipeline, configure failed, reset fix)
     Count,
 };
 
@@ -325,7 +331,13 @@ inline void Report(const char* thread_name = "GPU thread") {
         line += fmt::format(" | image descriptor stages {:.0f} ({:.0f} reused)", rate(19), rate(20));
     }
     // EDEN_NX2_LIGHT_DRAW: per draw kind (direct/indirect), the widest change since the previous
-    // draw; then how many were set up the light way and why the others were not.
+    // draw and the registers that most often kept draws off the light path; then how many were
+    // set up the light way, why the others were not and why a full setup could not be followed.
+    // Counted where draws are configured only.
+    u64 draws_classified = 0;
+    for (u32 i = 0; i < 2 * static_cast<u32>(DrawChange::Count); ++i) {
+        draws_classified += data.counters[static_cast<size_t>(Counter::DrawChangeDirect) + i];
+    }
     const auto changes = [&](DrawChange change) {
         const size_t index = static_cast<size_t>(change);
         return fmt::format("{:.0f}/{:.0f}",
@@ -333,20 +345,30 @@ inline void Report(const char* thread_name = "GPU thread") {
                            rate(static_cast<size_t>(Counter::DrawChangeIndirect) + index));
     };
     const auto counter = [&](Counter c) { return rate(static_cast<size_t>(c)); };
-    line += fmt::format(" | draw changes direct/indirect: nothing {}, vertex streams {}, + index "
-                        "buffer {}, + uniforms {}, + textures {}, + state {}, other work {}",
-                        changes(DrawChange::Nothing), changes(DrawChange::VertexStreams),
-                        changes(DrawChange::IndexBuffer), changes(DrawChange::Uniforms),
-                        changes(DrawChange::Textures), changes(DrawChange::State),
-                        changes(DrawChange::OtherWork));
     const auto method = [](s64 value) { return fmt::format("{:#x}", value); };
-    line += fmt::format(" | light draws {:.0f} ({:.0f} indirect); full: {:.0f} not after one, "
-                        "{:.0f} state (first: {}), {:.0f} other work, {:.0f} draw kind, {:.0f} fell back",
-                        counter(Counter::LightDraws), counter(Counter::LightIndirectDraws),
-                        counter(Counter::LightNotArmed), counter(Counter::LightStateChanged),
-                        TopValues(histograms[static_cast<size_t>(Histogram::LightBlocking)], method),
-                        counter(Counter::LightOtherWork), counter(Counter::LightShape),
-                        counter(Counter::LightFellBack));
+    if (draws_classified != 0) {
+        line += fmt::format(" | draw changes direct/indirect: nothing {}, vertex streams {}, + index "
+                            "buffer {}, + uniforms {}, + textures {}, + state {}, other work {} "
+                            "(first blocking register: {})",
+                            changes(DrawChange::Nothing), changes(DrawChange::VertexStreams),
+                            changes(DrawChange::IndexBuffer), changes(DrawChange::Uniforms),
+                            changes(DrawChange::Textures), changes(DrawChange::State),
+                            changes(DrawChange::OtherWork),
+                            TopValues(histograms[static_cast<size_t>(Histogram::LightBlocking)],
+                                      method, 6));
+        line += fmt::format(" | light draws {:.0f} ({:.0f} indirect); full: {:.0f} not after one, "
+                            "{:.0f} state, {:.0f} other work, {:.0f} draw kind, {:.0f} fell back; "
+                            "not followable: {:.0f} shape, {:.0f} memory writes, {:.0f} transform "
+                            "feedback, {:.0f} render targets, {:.0f} cut short",
+                            counter(Counter::LightDraws), counter(Counter::LightIndirectDraws),
+                            counter(Counter::LightNotArmed), counter(Counter::LightStateChanged),
+                            counter(Counter::LightOtherWork), counter(Counter::LightShape),
+                            counter(Counter::LightFellBack), counter(Counter::LightRefusedShape),
+                            counter(Counter::LightRefusedWrites),
+                            counter(Counter::LightRefusedFeedback),
+                            counter(Counter::LightRefusedTargets),
+                            counter(Counter::LightRefusedCutShort));
+    }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",
                             TopValues(histograms[static_cast<size_t>(Histogram::IndirectGapMethods)],
