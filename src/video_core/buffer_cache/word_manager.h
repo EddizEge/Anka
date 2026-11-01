@@ -278,10 +278,6 @@ struct WordManager {
             if (TouchesCpuWords(type))
                 RefreshDirtyWord(index);
         });
-        // After the bits (EDEN_NX2_SYNC_MEMO reads the generation before its walk).
-        if (enable && TouchesCpuWords(type)) {
-            ++cpu_set_generation;
-        }
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, (!enable) ? 1 : -1);
         }
@@ -426,7 +422,6 @@ struct WordManager {
             cached_words[word_index] = 0;
             RefreshDirtyWord(word_index);
         }
-        ++cpu_set_generation;
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, -1);
         }
@@ -496,11 +491,9 @@ struct WordManager {
     VAddr cpu_addr = 0;
     /// Bit i is set exactly while word i of CPU or Untracked is non-zero (EDEN_NX2_SYNC_SKIP).
     u64 cpu_dirty_words = 0;
-    /// Bumped by every call that may set a CPU, CachedCPU or Untracked bit here (ChangeRegionState
-    /// enabling one of them, FlushCachedWrites); a new region starts with all of them set and
-    /// nothing remembered about it. While it holds, pages found without those bits keep none
-    /// (EDEN_NX2_SYNC_MEMO).
-    u64 cpu_set_generation = 0;
+    /// MemoryTrackerBase's CPU-set epoch when a call that may set a CPU, CachedCPU or Untracked bit
+    /// here last ran, or when the region was made with all of them set (EDEN_NX2_SYNC_MEMO).
+    u64 cpu_set_stamp = 0;
 };
 
 } // namespace VideoCommon

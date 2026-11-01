@@ -2055,23 +2055,32 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     if (use_optimized_vertex_buffers) {
         // EDEN_NX2_SYNC_MEMO: every draw synchronizes each vertex stream, the index buffer and
         // each storage buffer again (~12.8% of the split back on the wide view, uploads ~0.2%).
-        // A range this call left clean stays clean until its region's CPU-set generation moves
-        // (any CPU-modified marking there, DeleteBuffer's included); until then the walk below
-        // would find nothing, and true is what it returns then.
+        // A range this call left clean stays clean while no call could set a CPU or untracked
+        // bit in it: the tracker's CPU-set epoch is unchanged (one compare) or none of its 4 MiB
+        // regions was stamped since (any CPU-modified marking there, DeleteBuffer's included).
+        // Until then the walk below would find nothing, and true is what it returns then.
         SyncMemo* memo = nullptr;
-        u64 generation = 0;
+        const u64 sync_epoch = memory_tracker.CpuSetEpoch();
+        const DAddr range_end = device_addr + size;
+        const auto memo_holds = [&] {
+            return memo->epoch != 0 &&
+                   memory_tracker.UnsetSince(memo->begin, memo->end - memo->begin, memo->epoch);
+        };
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
-        if (g_nx2_sync_memo && memory_tracker.CpuSetGeneration(device_addr, size, generation)) {
+        if (g_nx2_sync_memo && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
             if ((++syncs & ((u64{1} << 22) - 1)) == 0) {
                 LOG_INFO(HW_GPU, "Buffer sync memo: {} of {} synchronizations skipped", skipped,
                          syncs);
             }
-            memo = &sync_memo[((device_addr >> 8) ^ (device_addr >> 20)) & (SYNC_MEMO_SIZE - 1)];
-            if (memo->generation == generation && memo->begin <= device_addr &&
-                device_addr + size <= memo->end) {
+            memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
+                              (SYNC_MEMO_SIZE - 1)];
+            // Only the range's own regions: one stamped elsewhere in a joined memo is no change
+            // here.
+            if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
+                memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
                 ++skipped;
                 if (g_nx2_sync_skip_mode != 2) {
                     return true;
@@ -2102,13 +2111,18 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             });
             add_upload(upload_start, device_addr_out + range_size);
         });
-        if (memo != nullptr) {
-            // ForEachUploadRange cleared the CPU and untracked bits of every page in the range.
-            *memo = SyncMemo{
-                .begin = device_addr,
-                .end = device_addr + size,
-                .generation = generation,
-            };
+        if (memo != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
+            // ForEachUploadRange cleared the CPU and untracked bits of every page in the range and
+            // nothing could set one since. A remembered range that overlaps or touches it and
+            // still holds is clean now too: keep their union.
+            if (memo->begin <= range_end && device_addr <= memo->end && memo_holds()) {
+                memo->begin = (std::min)(memo->begin, device_addr);
+                memo->end = (std::max)(memo->end, range_end);
+            } else {
+                memo->begin = device_addr;
+                memo->end = range_end;
+            }
+            memo->epoch = sync_epoch;
         }
         if (memo_hit && total_size_bytes != 0) {
             static bool reported = false;

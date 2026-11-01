@@ -70,32 +70,43 @@ public:
         });
     }
 
-    /// EDEN_NX2_SYNC_MEMO: the CPU-set generation of the region holding [query_cpu_addr,
-    /// query_cpu_addr + query_size); false when the range is empty, crosses a region boundary or
-    /// its region does not exist yet. While the generation is unchanged no CPU, CachedCPU or
-    /// Untracked bit was set in that region, so a range ForEachUploadRange left clean is clean.
-    [[nodiscard]] bool CpuSetGeneration(VAddr query_cpu_addr, u64 query_size,
-                                        u64& generation) const noexcept {
-        if (query_size == 0) {
-            return false;
+    /// EDEN_NX2_SYNC_MEMO: the CPU-set epoch. Every call that may set a CPU, CachedCPU or
+    /// Untracked bit (MarkRegionAsCpuModified, CachedCpuWrite, FlushCachedWrites) takes a new one
+    /// before it runs and stamps the regions it visits with the latest, and so does making a
+    /// region (it starts with all of them set). A new such call must do the same.
+    [[nodiscard]] u64 CpuSetEpoch() const noexcept {
+        return cpu_set_epoch;
+    }
+
+    /// EDEN_NX2_SYNC_MEMO: for a range whose pages held no CPU or Untracked bit when the epoch
+    /// was 'epoch' (its regions existed then): true when no call could set one there since, as
+    /// the epoch is unchanged (one compare) or no region of the range was stamped later (one load
+    /// per 4 MiB region). Its pages then still hold none, and ForEachUploadRange over it would
+    /// pass nothing and change nothing.
+    [[nodiscard]] bool UnsetSince(VAddr query_cpu_addr, u64 query_size, u64 epoch) const noexcept {
+        if (epoch == cpu_set_epoch || query_size == 0) {
+            return true;
         }
-        const size_t page_index = static_cast<size_t>(query_cpu_addr >> HIGHER_PAGE_BITS);
-        const size_t last_page_index =
+        const size_t first = static_cast<size_t>(query_cpu_addr >> HIGHER_PAGE_BITS);
+        const size_t last =
             static_cast<size_t>((query_cpu_addr + query_size - 1) >> HIGHER_PAGE_BITS);
-        if (page_index >= NUM_HIGH_PAGES || last_page_index != page_index) {
+        if (last >= NUM_HIGH_PAGES) {
             return false;
         }
-        const Manager* const manager = top_tier[page_index];
-        if (manager == nullptr) {
-            return false;
+        for (size_t page_index = first; page_index <= last; ++page_index) {
+            const Manager* const manager = top_tier[page_index];
+            if (manager == nullptr || manager->cpu_set_stamp > epoch) {
+                return false;
+            }
         }
-        generation = manager->cpu_set_generation;
         return true;
     }
 
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
-        IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
+        ++cpu_set_epoch;
+        IteratePages<true>(dirty_cpu_addr, query_size, [this](Manager* manager, u64 offset, size_t size) {
+            manager->cpu_set_stamp = cpu_set_epoch;
             manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size);
         });
     }
@@ -138,8 +149,10 @@ public:
     /// Mark region as modified from the CPU
     /// but don't mark it as modified until FlusHCachedWrites is called.
     void CachedCpuWrite(VAddr dirty_cpu_addr, u64 query_size) {
+        ++cpu_set_epoch;
         IteratePages<true>(dirty_cpu_addr, query_size, [this](Manager* manager, u64 offset, size_t size) {
             const VAddr cpu_address = manager->cpu_addr + offset;
+            manager->cpu_set_stamp = cpu_set_epoch;
             manager->ChangeRegionState(Type::CachedCPU, true, cpu_address, size);
             cached_pages.insert(u32(cpu_address >> HIGHER_PAGE_BITS));
         });
@@ -147,13 +160,17 @@ public:
 
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
-        IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
+        ++cpu_set_epoch;
+        IteratePages<false>(query_cpu_addr, query_size, [this](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
+            manager->cpu_set_stamp = cpu_set_epoch;
             manager->FlushCachedWrites();
         });
     }
 
     void FlushCachedWrites() noexcept {
+        ++cpu_set_epoch;
         for (auto id : cached_pages) {
+            top_tier[id]->cpu_set_stamp = cpu_set_epoch;
             top_tier[id]->FlushCachedWrites();
         }
         cached_pages.clear();
@@ -264,6 +281,7 @@ private:
     void CreateRegion(std::size_t page_index) {
         const VAddr base_cpu_addr = page_index << HIGHER_PAGE_BITS;
         top_tier[page_index] = GetNewManager(base_cpu_addr);
+        top_tier[page_index]->cpu_set_stamp = ++cpu_set_epoch;
     }
 
     Manager* GetNewManager(VAddr base_cpu_address) {
@@ -286,6 +304,8 @@ private:
     std::deque<Manager*> free_managers;
     ::Common::unordered_set<u32> cached_pages;
     DeviceTracker* device_tracker = nullptr;
+    /// See CpuSetEpoch; starts at 1 so that 0 never matches.
+    u64 cpu_set_epoch = 1;
 };
 
 } // namespace VideoCommon

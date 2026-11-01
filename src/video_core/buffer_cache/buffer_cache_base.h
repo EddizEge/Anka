@@ -601,15 +601,16 @@ private:
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
     /// EDEN_NX2_SYNC_MEMO (SynchronizeBuffer): ranges left synchronized (no CPU-modified or
-    /// untracked page) within one memory tracker region, with that region's CPU-set generation
-    /// read before, direct-mapped by address. A range inside one whose generation still holds has
-    /// no page to upload, clear or retrack, whichever buffer holds it: the call does nothing.
+    /// untracked page), with the memory tracker's CPU-set epoch at which that held, direct-mapped
+    /// by the 64 KiB block of the start; ranges may cross regions, and ranges that overlap or
+    /// touch while both hold are joined. A range inside one that still holds (UnsetSince) has no
+    /// page to upload, clear or retrack, whichever buffer holds it: the call does nothing.
     struct SyncMemo {
         DAddr begin;
         DAddr end;
-        u64 generation;
+        u64 epoch; ///< 0: empty (the tracker's epoch starts at 1)
     };
-    static constexpr size_t SYNC_MEMO_SIZE = 1024;
+    static constexpr size_t SYNC_MEMO_SIZE = 2048;
     std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
 
     MemoryTracker memory_tracker;
