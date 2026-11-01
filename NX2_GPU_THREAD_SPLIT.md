@@ -237,3 +237,28 @@ indirect draw diagnostics (Nx2IndirectDiag, ~1-1.5 us per draw) run only with
   are published where their own entries were. Front reads of the back's results that do not
   drain (Nx2IsGpuWritten behind DmaPusher's indirect record take, macro parameter flush and
   command list flush) see them no later than before. Built; not measured yet.
+
+## Uniform reuse by stage slot, batched reset uploads (2026-11-01)
+
+`EDEN_NX2_UBO_STAGE` (on; `=0` off; with `EDEN_NX2_UBO_REUSE`): a streamed uniform bind first
+tries the slice its graphics stage's slot was bound to last, whatever range it was streamed for,
+then the range's own; either serves when streamed in this scheduler tick, unchanged since the
+slot noted it (serial) and its record starts with the guest's `size` bytes (a longer slice serves
+a shorter bind). Catches constants written to a new address with the same values each draw,
+slices the 128-slot direct-mapped table lost, one range bound with two sizes. The light uniform
+way binds through the same calls; `=2` compares moved slices by their bytes. The reuse log line
+adds "(N only through EDEN_NX2_UBO_STAGE)"; the profile's back line "uniform binds reused through
+the stage slot only".
+
+`EDEN_NX2_RESET_BATCH` (on; `=0` off; not with accurate GPU fences): the indirect draw reset
+(RESETFIX, ~1,400-2,000 records a frame, each its own inline write) goes through
+AccelerateInlineRuns: every run takes AccelerateInlineToMemory's steps in the same order, but the
+buffer cache leaves its uploads into GPU-written buffer data in a batch
+(BufferCache::InlineMemoryBatched) and records consecutive ones into one buffer as one copy from
+one staging buffer between two barriers. The batch is recorded before AccelerateInlineRuns
+returns (also on unwinding), before FindBuffer may make or join a buffer, when the next copy goes
+to another buffer, does not start after the previous one's end or would pass 256 KiB; what runs
+meanwhile only writes guest memory, keeps the caches' books and uploads guest memory over the same
+bytes, with the buffer cache locked. Log: "Indirect draw reset uploads batched: N uploads in M copy
+commands over K resets" (first reset, then every 1024); profile: "indirect draw reset uploads N in
+M copy commands". Built; not measured yet.
