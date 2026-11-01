@@ -1233,10 +1233,11 @@ private:
     }
 
     // EDEN_NX2_PRESENT_DIAG=1 (off by default): what the game tells the compositor about its frame
-    // timing. Logs (a) all 24 words of a 229 request when a word other than the slot, image and
-    // fence words changed (the first 200 times; changed words marked '*'), with the time since the
-    // previous present; (b) once a second, a histogram of the shown frame intervals, the average
-    // fence and pacing waits, the vsync ticks and how often each vi2 command ran; (c) every 600
+    // timing. Logs (a) all 24 words of a 229 request when a word other than the slot, image, word
+    // 18 and fence words changed (the first 200 times; changed words marked '*'), with the time
+    // since the previous present; (b) once a second, a histogram of the shown frame intervals, the
+    // average fence and pacing waits, the presents per requested interval (PresentInterval), the
+    // vsync ticks and how often each vi2 command ran; (c) every 600
     // presents, the values each 229 word took so far; (d) each vi2 request the first time its
     // data words are seen (the first 256).
     static bool PresentDiagEnabled() {
@@ -1256,6 +1257,7 @@ private:
         std::array<u8, 26> value_counts{};            // 7: more than six
         std::chrono::steady_clock::time_point last_entered{}, last_paced{}, second{};
         std::array<u32, 5> shown{}; // shown frame intervals: <17, 17-25, 25-34, 34-50, >50 ms
+        std::array<u32, 5> intervals{}; // presents per requested interval (PresentInterval, 1-4)
         u32 presents{};
         long long min_us{}, max_us{}, fence_us{}, pace_us{};
         u32 vsync_ticks{};
@@ -1298,8 +1300,9 @@ private:
             return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
         };
         // Words that change every present: 4 the slot (only its low byte is written, the rest is
-        // stale message data), 5 the image, 22 and 24 the fence.
-        const auto per_frame = [](u32 i) { return i == 4 || i == 5 || i == 22 || i == 24; };
+        // stale message data), 5 the image, 18 a counter (Donkey Kong Bananza cycles it through
+        // 0x11-0x18, which used up the change lines in a few seconds), 22 and 24 the fence.
+        const auto per_frame = [](u32 i) { return i == 4 || i == 5 || i == 18 || i == 22 || i == 24; };
         std::scoped_lock lk{m_diag.mutex};
         auto& d = m_diag;
         const bool first = d.last_entered == std::chrono::steady_clock::time_point{};
@@ -1363,6 +1366,7 @@ private:
             d.max_us = none ? shown_us : (std::max)(d.max_us, shown_us);
         }
         ++d.presents;
+        ++d.intervals[PresentInterval(w)];
         d.fence_us += to_us(waited - entered);
         d.pace_us += to_us(paced - composited);
         if (d.second == std::chrono::steady_clock::time_point{}) {
@@ -1376,14 +1380,16 @@ private:
             LOG_INFO(Service,
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "
-                     "vsync ticks {}, vi2 calls{}",
+                     "requested interval 1x{} 2x{} 3x{} 4x{}, vsync ticks {}, vi2 calls{}",
                      to_us(paced - d.second) / 1e6, d.presents, d.shown[0], d.shown[1], d.shown[2],
                      d.shown[3], d.shown[4], d.min_us / 1000.0, d.max_us / 1000.0,
                      d.fence_us / 1000.0 / d.presents, d.pace_us / 1000.0 / d.presents,
+                     d.intervals[1], d.intervals[2], d.intervals[3], d.intervals[4],
                      ticks - d.vsync_ticks, calls);
             d.vsync_ticks = ticks;
             d.second = paced;
             d.shown = {};
+            d.intervals = {};
             d.presents = 0;
             d.fence_us = 0;
             d.pace_us = 0;

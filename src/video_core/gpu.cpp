@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <list>
 #include <memory>
 #include <utility>
@@ -166,6 +167,23 @@ struct GPU::Impl {
 
     [[nodiscard]] u64 GetTicks() const {
         const u64 gpu_tick = system.CoreTiming().GetGPUTicks();
+        // EDEN_NX2_GPU_TICK_DIV=<d> (decimal, 1-512): divide the GPU timer by d instead of the
+        // fast_gpu_time setting's 1, 256 or 512. Donkey Kong Bananza picks its 60 / 30 / 20 fps
+        // mode from GPU timestamps: with 256 it sees almost no GPU time and goes back to 60 where
+        // the emulator can't hold it (slow motion until it drops to 30 again); with 1 it sees the
+        // emulator's whole frame time and stays at 20 fps at its lowest resolution.
+        static const double tick_div = [] {
+            const char* text = std::getenv("EDEN_NX2_GPU_TICK_DIV");
+            const double value = text != nullptr ? std::strtod(text, nullptr) : 0.0;
+            if (value < 1.0 || value > 512.0) {
+                return 0.0;
+            }
+            LOG_INFO(HW_GPU, "GPU timer divided by {} (EDEN_NX2_GPU_TICK_DIV)", value);
+            return value;
+        }();
+        if (tick_div != 0.0) {
+            return static_cast<u64>(static_cast<double>(gpu_tick) / tick_div);
+        }
         return gpu_tick / GpuClockMultiplier(Settings::values.gpu_clock.GetValue());
     }
 
