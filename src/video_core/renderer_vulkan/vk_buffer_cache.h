@@ -189,6 +189,19 @@ public:
 
     bool BindMappedUniformBufferReuse(DAddr device_addr, u32 size);
 
+    /// EDEN_NX2_UBO_DIRECT (on unless =0): with EDEN_NX2_UBO_REUSE on, the buffer cache hands
+    /// guest bytes that are contiguous in host memory to BindMappedUniformBufferReuseFrom, which
+    /// compares and copies them in place instead of through UniformReuseScratch.
+    [[nodiscard]] static bool UniformDirectEnabled() noexcept {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_UBO_DIRECT");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
+    bool BindMappedUniformBufferReuseFrom(DAddr device_addr, const u8* guest, u32 size);
+
     [[nodiscard]] VkDeviceSize SparseAlignmentFor(bool sparse_compatible) const noexcept {
         if (!sparse_compatible || !multi_range_buffers.use_sparse) {
             return 0;

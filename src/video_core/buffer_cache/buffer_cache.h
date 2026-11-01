@@ -1114,9 +1114,27 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // tick when size and bytes match (constants rebound every draw, one buffer bound to
             // several stages) and streams a new one otherwise. One descriptor per bind either way.
             if (runtime.UniformReuseEnabled()) {
-                const std::span<u8> bytes = runtime.UniformReuseScratch(size);
-                device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
-                const bool reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                // EDEN_NX2_UBO_DIRECT: when the guest bytes lie in one run of host memory (at most
+                // two device pages, the second right after the first), the runtime compares and
+                // copies them in place instead of from a copy read into the scratch first.
+                const u8* guest = nullptr;
+                if (runtime.UniformDirectEnabled() && size != 0 && size <= Core::DEVICE_PAGESIZE) {
+                    const u8* const first = device_memory.GetPointer<u8>(device_addr);
+                    const DAddr last = device_addr + size - 1;
+                    if (first != nullptr &&
+                        ((last >> Core::DEVICE_PAGEBITS) == (device_addr >> Core::DEVICE_PAGEBITS) ||
+                         device_memory.GetPointer<u8>(last) == first + (size - 1))) {
+                        guest = first;
+                    }
+                }
+                bool reused;
+                if (guest != nullptr) {
+                    reused = runtime.BindMappedUniformBufferReuseFrom(device_addr, guest, size);
+                } else {
+                    const std::span<u8> bytes = runtime.UniformReuseScratch(size);
+                    device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
+                    reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                }
                 static u64 binds{};
                 static u64 reuses{};
                 static u64 reused_bytes{};
