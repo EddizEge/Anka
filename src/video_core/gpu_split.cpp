@@ -256,7 +256,7 @@ void GpuSplit::DeferFunction(std::function<void()>&& func) {
     });
 }
 
-size_t GpuSplit::Execute(const u64* entry) {
+size_t GpuSplit::Execute(const u64* entry, u64 published_left) {
     const u64 head = entry[0];
     switch (static_cast<Kind>(head & 0xf)) {
     case Kind::Wrap:
@@ -271,6 +271,35 @@ size_t GpuSplit::Execute(const u64* entry) {
         if ((head & Direct) != 0) {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
             engine->ConsumeSink(*system);
+            // Macro writes to the engine's run methods (Maxwell3D: constant buffer data) that
+            // follow each other go to it together: published, before the ring's end, one word
+            // each (no segment).
+            using Tegra::Engines::EngineInterface;
+            if (method - engine->method_run_begin < engine->method_run_count && published_left > 1) {
+                const size_t to_end = RingWords - static_cast<size_t>(entry - ring.get());
+                const size_t limit = static_cast<size_t>(std::min<u64>(
+                    std::min<u64>(published_left, to_end), EngineInterface::MaxMethodRun));
+                u32 methods[EngineInterface::MaxMethodRun];
+                u32 arguments[EngineInterface::MaxMethodRun];
+                methods[0] = method;
+                arguments[0] = argument;
+                size_t count = 1;
+                for (; count < limit; ++count) {
+                    const u64 next = entry[count];
+                    const u32 next_method = static_cast<u32>((next >> 8) & 0xffff);
+                    if (static_cast<Kind>(next & 0xf) != Kind::Method ||
+                        (next & (Direct | HasSegment)) != Direct ||
+                        next_method - engine->method_run_begin >= engine->method_run_count) {
+                        break;
+                    }
+                    methods[count] = next_method;
+                    arguments[count] = static_cast<u32>(next >> 32);
+                }
+                if (count > 1) {
+                    engine->CallMethodRun(*system, methods, arguments, static_cast<u32>(count));
+                    return count;
+                }
+            }
             engine->CallMethod(*system, method, argument, true);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
@@ -343,7 +372,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         g_back_busy.store(true, std::memory_order_relaxed);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
-            const size_t size = Execute(&ring[index]);
+            const size_t size = Execute(&ring[index], available - read_position);
             read_position += size != 0 ? size : RingWords - index;
             // Hand ring space back now and then while working through a long batch.
             if (read_position - last_store >= 4096 && read_position != available) {

@@ -175,7 +175,8 @@ private:
     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
 
     void BackLoop(std::stop_token stop_token);
-    size_t Execute(const u64* entry);
+    /// Runs the entry; `published_left`: words published from it on. Returns its size.
+    size_t Execute(const u64* entry, u64 published_left);
 
     Core::System* system{};
     bool active{};

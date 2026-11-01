@@ -3173,6 +3173,11 @@ public:
     /// Write multiple values to the register identified by method.
     void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) override;
 
+    /// Macro writes to the constant buffer data registers that follow each other (split GPU
+    /// thread's back): CallMethod for each, with one guest memory write for all their words.
+    void CallMethodRun(Core::System& system, const u32* methods, const u32* arguments,
+                       u32 count) override;
+
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
     /// the front instead of CallMethod: runs macros and macro uploads against a copy of the
     /// registers and sends the register writes to the back thread.
