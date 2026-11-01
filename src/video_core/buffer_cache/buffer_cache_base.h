@@ -505,6 +505,14 @@ private:
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                                bool is_written) const;
 
+    /// StorageBufferBinding from the two words already read at ssbo_addr (gpu_addr non-zero).
+    [[nodiscard]] Binding StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword,
+                                                 u32 cbuf_index, bool is_written) const;
+
+    /// StorageBufferBinding through storage_binding_memo (EDEN_NX2_SSBO_MEMO).
+    [[nodiscard]] Binding MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                                   bool is_written);
+
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
 
@@ -612,6 +620,24 @@ private:
     };
     static constexpr size_t SYNC_MEMO_SIZE = 2048;
     std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
+
+    /// EDEN_NX2_SSBO_MEMO (BindGraphicsStorageBuffer): bindings StorageBufferBindingAt resolved,
+    /// keyed by the two constant buffer words it read (address, then the size when packed), the
+    /// memory manager and its MappingEpoch read before, direct-mapped by address. Besides those
+    /// words the binding depends only on that manager's page table and kind map (both changed
+    /// only together with MappingEpoch) and on the device's storage buffer alignment (fixed), so
+    /// an entry matching all of them is what StorageBufferBindingAt would return again. Only
+    /// resolved bindings are kept: the failing ones still log as before.
+    struct StorageBindingMemo {
+        GPUVAddr gpu_addr;
+        u64 next_qword;
+        u64 map_epoch;
+        size_t owner;
+        Binding binding;
+        bool is_written;
+    };
+    static constexpr size_t STORAGE_BINDING_MEMO_SIZE = 256;
+    std::array<StorageBindingMemo, STORAGE_BINDING_MEMO_SIZE> storage_binding_memo{};
 
     MemoryTracker memory_tracker;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;

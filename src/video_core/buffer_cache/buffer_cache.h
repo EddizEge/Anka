@@ -534,7 +534,8 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     const auto& cbufs = maxwell3d->state.shader_stages[stage];
     const GPUVAddr ssbo_addr = cbufs.const_buffers[cbuf_index].address + cbuf_offset;
     channel_state->storage_buffers[stage][ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
+        g_nx2_ssbo_memo ? MemoStorageBufferBinding(ssbo_addr, cbuf_index, is_written)
+                        : StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
     return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
 }
 
@@ -1174,9 +1175,10 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
+        // Null unless the range has two or more segments (EDEN_NX2_SSBO_MEMO remembers it).
         const VirtualSegments* found =
-            virtual_ranges.Query(*gpu_memory, binding.gpu_addr, binding.size);
-        if (!found || found->size() < 2) {
+            virtual_ranges.QueryMultiRange(*gpu_memory, binding.gpu_addr, binding.size);
+        if (!found) {
             return;
         }
         const VirtualSegments segments = *found;
@@ -2453,10 +2455,57 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         return NULL_BINDING;
     }
 
+    const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+    return StorageBufferBindingAt(gpu_addr, next_qword, cbuf_index, is_written);
+}
+
+template <class P>
+Binding BufferCache<P>::MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                                 bool is_written) {
+    // EDEN_NX2_SSBO_MEMO: each draw resolved every storage buffer again (~1.4% of the split back
+    // on the wide view, mostly GetMemoryLayoutSize: a lock and a range map walk). The constant
+    // buffer words are still read every time; only what they resolve to is remembered.
+    const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    if (gpu_addr == 0) {
+        return NULL_BINDING;
+    }
+    const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+    const size_t owner = gpu_memory->GetID();
+    // Read before resolving: a page table change meanwhile leaves an entry no later call matches.
+    const u64 map_epoch = gpu_memory->MappingEpoch();
+    StorageBindingMemo& memo =
+        storage_binding_memo[static_cast<size_t>((gpu_addr >> 8) ^ (gpu_addr >> 20)) &
+                             (STORAGE_BINDING_MEMO_SIZE - 1)];
+    static u64 bindings{};
+    static u64 reused{};
+    if ((++bindings & ((u64{1} << 22) - 1)) == 0) {
+        LOG_INFO(HW_GPU, "Storage binding memo: {} of {} bindings reused", reused, bindings);
+    }
+    if (memo.gpu_addr == gpu_addr && memo.next_qword == next_qword &&
+        memo.map_epoch == map_epoch && memo.owner == owner && memo.is_written == is_written) {
+        ++reused;
+        return memo.binding;
+    }
+    const Binding binding = StorageBufferBindingAt(gpu_addr, next_qword, cbuf_index, is_written);
+    if (binding.buffer_id != NULL_BUFFER_ID) {
+        memo = StorageBindingMemo{
+            .gpu_addr = gpu_addr,
+            .next_qword = next_qword,
+            .map_epoch = map_epoch,
+            .owner = owner,
+            .binding = binding,
+            .is_written = is_written,
+        };
+    }
+    return binding;
+}
+
+template <class P>
+Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword, u32 cbuf_index,
+                                               bool is_written) const {
     const auto size = [&]() {
         const u32 memory_layout_size =
             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
