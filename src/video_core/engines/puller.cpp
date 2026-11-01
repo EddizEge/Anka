@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_mode_diag.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -226,6 +227,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                                     ? VideoCommon::QueryPropertiesFlags::IsAFence
                                     : VideoCommon::QueryPropertiesFlags::HasTimeout;
         OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, properties, payload] {
+            VideoCommon::Nx2ModeDiag::SourceScope diag_source{
+                VideoCommon::Nx2ModeDiag::Source::PullerLong};
             rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
         });
     } else if (g_nx2_ampere) {
@@ -342,6 +345,9 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
                              (regs.reg_array[0x17] & ~3U);
     const u32 payload = regs.reg_array[0x19];
     const u32 operation = argument & 7;
+    if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+        VideoCommon::Nx2ModeDiag::SemExecute(argument, address);
+    }
     if (operation == 1) { // RELEASE
         OnBack([rasterizer = dma_pusher.rasterizer, address, payload] {
             rasterizer->Query(address, VideoCommon::QueryType::Payload,

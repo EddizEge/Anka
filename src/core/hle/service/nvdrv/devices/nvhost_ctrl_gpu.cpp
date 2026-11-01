@@ -15,6 +15,7 @@
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl_gpu.h"
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_mode_diag.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 
 namespace Service::Nvidia::Devices {
@@ -498,6 +499,9 @@ NvResult nvhost_ctrl_gpu::FlushL2(IoctlFlushL2& params) {
 NvResult nvhost_ctrl_gpu::GetGpuTime(IoctlGetGpuTime& params) {
     LOG_DEBUG(Service_NVDRV, "called");
     params.gpu_time = static_cast<u64_le>(system.CoreTiming().GetGlobalTimeNs().count());
+    if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+        VideoCommon::Nx2ModeDiag::GpuTimeCall(params.gpu_time);
+    }
     return NvResult::Success;
 }
 

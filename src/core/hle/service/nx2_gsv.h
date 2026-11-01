@@ -53,6 +53,7 @@
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_busy_clock.h"
+#include "video_core/nx2_mode_diag.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -1051,6 +1052,10 @@ private:
         const auto paced = std::chrono::steady_clock::now();
         if (PresentDiagEnabled()) {
             DiagPresent(w, entered, waited, composited, paced);
+        }
+        if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2ModeDiag::Present(w, PresentInterval(w), entered, waited, composited,
+                                              paced);
         }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
         // game is blocked here while Eden's GPU thread catches up (fence) and composites.

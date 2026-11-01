@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_indirect_diag.h"
+#include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
@@ -822,6 +823,10 @@ void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_qu
 }
 
 void Maxwell3D::ProcessQueryGet() {
+    VideoCommon::Nx2ModeDiag::SourceScope diag_source{VideoCommon::Nx2ModeDiag::Source::Report3D};
+    if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+        VideoCommon::Nx2ModeDiag::Report3D(regs.report_semaphore.query.raw);
+    }
     VideoCommon::QueryPropertiesFlags flags{};
     if (regs.report_semaphore.query.short_query == 0) {
         flags |= VideoCommon::QueryPropertiesFlags::HasTimeout;

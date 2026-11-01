@@ -31,6 +31,7 @@
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_mode_diag.h"
 #include "video_core/textures/decoders.h"
 
 namespace VideoCommon {
@@ -682,6 +683,14 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
 
     if (render_targets != previous_render_targets) {
         ++render_targets_serial;
+    }
+    if (Nx2ModeDiag::Enabled()) [[unlikely]] {
+        // A dynamic resolution shows as other target or viewport sizes (nx2_mode_diag.h).
+        const ImageId sized = rt_image_id[0] ? rt_image_id[0] : rt_depth_image_id;
+        const auto& viewport = maxwell3d->regs.viewport_transform[0];
+        Nx2ModeDiag::RenderTarget(sized ? slot_images[sized].info.size.width : 0,
+                                  sized ? slot_images[sized].info.size.height : 0,
+                                  viewport.scale_x, viewport.scale_y);
     }
 
     flags[Dirty::DepthBiasGlobal] = true;

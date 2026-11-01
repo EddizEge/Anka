@@ -15,6 +15,7 @@
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_mode_diag.h"
 #include "video_core/renderer_base.h"
 #include "video_core/textures/decoders.h"
 
@@ -389,6 +390,8 @@ void MaxwellDMA::ReleaseSemaphore() {
         break;
     }
     case LaunchDMA::SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE: {
+        VideoCommon::Nx2ModeDiag::SourceScope diag_source{
+            VideoCommon::Nx2ModeDiag::Source::DmaFourWord};
         rasterizer->Query(address, VideoCommon::QueryType::Payload,
                           flags | VideoCommon::QueryPropertiesFlags::HasTimeout, payload, 0);
         break;

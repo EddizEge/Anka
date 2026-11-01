@@ -20,6 +20,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_mode_diag.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -114,6 +115,8 @@ void KeplerCompute::ProcessNativeReportSemaphore(u32 argument) {
         });
         return;
     }
+    VideoCommon::Nx2ModeDiag::SourceScope diag_source{
+        VideoCommon::Nx2ModeDiag::Source::ComputeReport};
     rasterizer->Query(address, VideoCommon::QueryType::Payload,
                       one_word ? VideoCommon::QueryPropertiesFlags::IsAFence
                                : VideoCommon::QueryPropertiesFlags::HasTimeout,
@@ -361,6 +364,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
+                if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+                    VideoCommon::Nx2ModeDiag::QmdRelease(flags, address);
+                }
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload] {
                         const u32 value = memory_manager.Read<u32>(address) + payload;
@@ -551,6 +557,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         static std::unordered_set<std::string> logged;
         if (logged.insert(error.what()).second) {
             LOG_ERROR(HW_GPU, "Native compute shader rejected: {}", error.what());
+        }
+        if (VideoCommon::Nx2ModeDiag::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2ModeDiag::RejectedCompute(regs.code_loc.Address());
         }
         if (std::string_view{error.what()}.find("matrix multiply") != std::string_view::npos) {
             DescribeNativeResources(qmd);
