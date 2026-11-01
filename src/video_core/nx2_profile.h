@@ -292,7 +292,11 @@ inline void Report(const char* thread_name = "GPU thread") {
                         rate(24), rate(25), rate(26), rate(27), rate(28), rate(29),
                         TopValues(histograms[static_cast<size_t>(Histogram::IndirectStep)], number),
                         TopValues(histograms[static_cast<size_t>(Histogram::IndirectGroupStride)], number));
-    line += fmt::format(" | image descriptor stages {:.0f} ({:.0f} reused)", rate(19), rate(20));
+    // Counted where draws are configured: with the split on, the back thread's line only (the
+    // front's would always read 0).
+    if (data.count[static_cast<size_t>(Zone::PushDescriptors)] != 0) {
+        line += fmt::format(" | image descriptor stages {:.0f} ({:.0f} reused)", rate(19), rate(20));
+    }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;
