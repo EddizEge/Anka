@@ -187,7 +187,7 @@ public:
         return {uniform_reuse_scratch.data(), size};
     }
 
-    bool BindMappedUniformBufferReuse(DAddr device_addr, u32 size);
+    bool BindMappedUniformBufferReuse(size_t stage, u32 index, DAddr device_addr, u32 size);
 
     /// EDEN_NX2_UBO_DIRECT (on unless =0): with EDEN_NX2_UBO_REUSE on, the buffer cache hands
     /// guest bytes that are contiguous in host memory to BindMappedUniformBufferReuseFrom, which
@@ -200,7 +200,27 @@ public:
         return enabled;
     }
 
-    bool BindMappedUniformBufferReuseFrom(DAddr device_addr, const u8* guest, u32 size);
+    bool BindMappedUniformBufferReuseFrom(size_t stage, u32 index, DAddr device_addr,
+                                          const u8* guest, u32 size);
+
+    /// EDEN_NX2_UBO_STAGE (on unless =0): with EDEN_NX2_UBO_REUSE on, a bind first tries the
+    /// slice its stage's slot was bound to last (constants written to a new address with the
+    /// same values every draw, slices the direct-mapped table lost to other ranges), and a slice
+    /// holding at least the bytes bound serves a shorter bind of them (one range bound to stages
+    /// that use different sizes of it).
+    [[nodiscard]] static bool UniformStageEnabled() noexcept {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_UBO_STAGE");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
+    /// Binds reused that EDEN_NX2_UBO_REUSE alone would have streamed (EDEN_NX2_UBO_STAGE), for
+    /// the log.
+    [[nodiscard]] u64 UniformStageReuses() const noexcept {
+        return uniform_stage_reuses;
+    }
 
     [[nodiscard]] VkDeviceSize SparseAlignmentFor(bool sparse_compatible) const noexcept {
         if (!sparse_compatible || !multi_range_buffers.use_sparse) {
@@ -312,11 +332,34 @@ private:
         VkDeviceAddress buffer_address{};
         u32 offset{};
         u32 size{};
+        u64 serial{}; ///< A new one each time the slice is streamed (EDEN_NX2_UBO_STAGE)
         std::vector<u8> bytes;
     };
     static constexpr u32 UNIFORM_SLICE_BITS = 7;
     std::array<UniformSlice, size_t{1} << UNIFORM_SLICE_BITS> uniform_slices{};
     std::vector<u8> uniform_reuse_scratch;
+
+    /// EDEN_NX2_UBO_STAGE: the slice each graphics stage's uniform buffer slot was bound to
+    /// last, valid while that slice keeps the serial it had then.
+    struct StageUniform {
+        u64 serial{}; ///< 0: none
+        u32 slot{};   ///< Index in uniform_slices
+    };
+    static constexpr size_t UNIFORM_STAGES = 5;
+    static constexpr size_t UNIFORM_STAGE_SLOTS = 18;
+    std::array<std::array<StageUniform, UNIFORM_STAGE_SLOTS>, UNIFORM_STAGES> stage_uniforms{};
+    u64 uniform_serial{};
+    u64 uniform_stage_reuses{};
+
+    /// A slice streamed in this tick whose bytes start with `bytes` (`size` of them), to bind
+    /// instead of streaming a new one, or null. `slice` is the range's slot in uniform_slices.
+    [[nodiscard]] const UniformSlice* FindUniformSlice(size_t stage, u32 index,
+                                                       const UniformSlice& slice,
+                                                       DAddr device_addr, const u8* bytes,
+                                                       u32 size);
+
+    /// Remembers `slice` as the one the stage's slot was bound to (EDEN_NX2_UBO_STAGE).
+    void NoteStageUniform(size_t stage, u32 index, const UniformSlice& slice);
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();

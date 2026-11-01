@@ -244,6 +244,7 @@ enum class Counter : u32 {
     SameWritesMade,    ///< Counted ones made all the same: across pages, or too many held
     SameWritesInvalidatedLater, ///< Skipped, then invalidated at FlushCaching (work in between)
     SameWritesUntracked, ///< Held bytes not counted: a page written around the caches
+    UniformStageReuses,  ///< Uniform binds EDEN_NX2_UBO_STAGE alone reused
     Count,
 };
 
@@ -459,6 +460,11 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::SameWritesInvalidatedLater),
                             counter(Counter::SameWritesMade),
                             counter(Counter::SameWritesUntracked));
+    }
+    // Counted where uniform buffers are bound: the back's line with the split on.
+    if (data.counters[static_cast<size_t>(Counter::UniformStageReuses)] != 0) {
+        line += fmt::format(" | uniform binds reused through the stage slot only {:.0f}",
+                            rate(static_cast<size_t>(Counter::UniformStageReuses)));
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",

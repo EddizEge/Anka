@@ -1133,6 +1133,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             // runtime binds the slice it streamed for this range earlier in the same scheduler
             // tick when size and bytes match (constants rebound every draw, one buffer bound to
             // several stages) and streams a new one otherwise. One descriptor per bind either way.
+            // EDEN_NX2_UBO_STAGE: also the slice this stage's slot was bound to last.
             if (runtime.UniformReuseEnabled()) {
                 // EDEN_NX2_UBO_DIRECT: when the guest bytes lie in one run of host memory (at most
                 // two device pages, the second right after the first), the runtime compares and
@@ -1149,11 +1150,12 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 }
                 bool reused;
                 if (guest != nullptr) {
-                    reused = runtime.BindMappedUniformBufferReuseFrom(device_addr, guest, size);
+                    reused = runtime.BindMappedUniformBufferReuseFrom(stage, index, device_addr,
+                                                                      guest, size);
                 } else {
                     const std::span<u8> bytes = runtime.UniformReuseScratch(size);
                     device_memory.ReadBlockUnsafe(device_addr, bytes.data(), size);
-                    reused = runtime.BindMappedUniformBufferReuse(device_addr, size);
+                    reused = runtime.BindMappedUniformBufferReuse(stage, index, device_addr, size);
                 }
                 static u64 binds{};
                 static u64 reuses{};
@@ -1164,8 +1166,10 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                     reused_bytes += size;
                 }
                 if ((binds & ((u64{1} << 22) - 1)) == 0) {
-                    LOG_INFO(HW_GPU, "Uniform buffer reuse: {} of {} streamed binds reused, {} MiB not copied",
-                             reuses, binds, reused_bytes >> 20);
+                    LOG_INFO(HW_GPU,
+                             "Uniform buffer reuse: {} of {} streamed binds reused, {} MiB not "
+                             "copied ({} only through EDEN_NX2_UBO_STAGE)",
+                             reuses, binds, reused_bytes >> 20, runtime.UniformStageReuses());
                 }
                 return;
             }

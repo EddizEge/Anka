@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -406,7 +407,63 @@ u32 BufferCacheRuntime::GetUniformBufferAlignment() const {
     return static_cast<u32>(device.GetUniformBufferAlignment());
 }
 
-bool BufferCacheRuntime::BindMappedUniformBufferReuse(DAddr device_addr, u32 size) {
+const BufferCacheRuntime::UniformSlice* BufferCacheRuntime::FindUniformSlice(
+    size_t stage, u32 index, const UniformSlice& slice, DAddr device_addr, const u8* bytes,
+    u32 size) {
+    const u64 tick = scheduler.CurrentTick();
+    if (!UniformStageEnabled()) {
+        if (slice.tick == tick && slice.device_addr == device_addr && slice.size == size &&
+            std::memcmp(slice.bytes.data(), bytes, size) == 0) {
+            return &slice;
+        }
+        return nullptr;
+    }
+    // EDEN_NX2_UBO_STAGE: the stage slot's last slice, whatever range it was streamed for, then
+    // the range's own. Either was streamed in this tick (its region stays until the host GPU
+    // passed the tick, as for any reused slice; the serial tells it was not streamed again
+    // since) and its record holds the bytes copied into it. Its first `size` bytes are the
+    // guest's, so `size` bytes bound at its offset give the shader what a new slice would.
+    // uniform_stage_reuses counts the binds EDEN_NX2_UBO_REUSE alone would have streamed.
+    const auto plain_match = [&] {
+        return slice.tick == tick && slice.device_addr == device_addr && slice.size == size &&
+               std::memcmp(slice.bytes.data(), bytes, size) == 0;
+    };
+    if (size != 0 && stage < UNIFORM_STAGES && index < UNIFORM_STAGE_SLOTS) {
+        const StageUniform& last = stage_uniforms[stage][index];
+        const UniformSlice& candidate = uniform_slices[last.slot];
+        if (last.serial != 0 && candidate.serial == last.serial && candidate.tick == tick &&
+            candidate.size >= size && std::memcmp(candidate.bytes.data(), bytes, size) == 0) {
+            if ((&candidate != &slice || candidate.device_addr != device_addr ||
+                 candidate.size != size) &&
+                !plain_match()) {
+                ++uniform_stage_reuses;
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::UniformStageReuses, 1);
+            }
+            return &candidate;
+        }
+    }
+    if (slice.tick == tick && slice.device_addr == device_addr && slice.size >= size &&
+        std::memcmp(slice.bytes.data(), bytes, size) == 0) {
+        if (slice.size != size) {
+            ++uniform_stage_reuses;
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::UniformStageReuses, 1);
+        }
+        return &slice;
+    }
+    return nullptr;
+}
+
+void BufferCacheRuntime::NoteStageUniform(size_t stage, u32 index, const UniformSlice& slice) {
+    if (stage < UNIFORM_STAGES && index < UNIFORM_STAGE_SLOTS) {
+        stage_uniforms[stage][index] = StageUniform{
+            .serial = slice.serial,
+            .slot = static_cast<u32>(&slice - uniform_slices.data()),
+        };
+    }
+}
+
+bool BufferCacheRuntime::BindMappedUniformBufferReuse(size_t stage, u32 index, DAddr device_addr,
+                                                      u32 size) {
     // A slice is reused only in the tick that streamed it: the stream buffer hands a range out
     // again once the host GPU passed the tick its region was stamped with (at least the tick it
     // was requested in, StagingBufferPool::GetStreamBuffer), staging buffers once IsFree(tick);
@@ -415,9 +472,11 @@ bool BufferCacheRuntime::BindMappedUniformBufferReuse(DAddr device_addr, u32 siz
     UniformSlice& slice =
         uniform_slices[((device_addr >> 8) * 0x9E3779B97F4A7C15ULL) >> (64 - UNIFORM_SLICE_BITS)];
     const u8* const bytes = uniform_reuse_scratch.data();
-    if (slice.tick == scheduler.CurrentTick() && slice.device_addr == device_addr &&
-        slice.size == size && std::memcmp(slice.bytes.data(), bytes, size) == 0) {
-        guest_descriptor_queue.AddBuffer(slice.buffer, slice.buffer_address, slice.offset, size);
+    if (const UniformSlice* const found =
+            FindUniformSlice(stage, index, slice, device_addr, bytes, size)) {
+        guest_descriptor_queue.AddBuffer(found->buffer, found->buffer_address, found->offset,
+                                         size);
+        NoteStageUniform(stage, index, *found);
         return true;
     }
     const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
@@ -432,10 +491,13 @@ bool BufferCacheRuntime::BindMappedUniformBufferReuse(DAddr device_addr, u32 siz
     slice.buffer_address = ref.device_address;
     slice.offset = static_cast<u32>(ref.offset);
     slice.size = size;
+    slice.serial = ++uniform_serial;
+    NoteStageUniform(stage, index, slice);
     return false;
 }
 
-bool BufferCacheRuntime::BindMappedUniformBufferReuseFrom(DAddr device_addr, const u8* guest,
+bool BufferCacheRuntime::BindMappedUniformBufferReuseFrom(size_t stage, u32 index,
+                                                          DAddr device_addr, const u8* guest,
                                                           u32 size) {
     // EDEN_NX2_UBO_DIRECT: BindMappedUniformBufferReuse with the bytes read from guest memory in
     // place. A new slice copies them into its own record first and streams the record, never
@@ -443,9 +505,11 @@ bool BufferCacheRuntime::BindMappedUniformBufferReuseFrom(DAddr device_addr, con
     // exactly the bytes later binds compare against (guest -> record -> stream, as before).
     UniformSlice& slice =
         uniform_slices[((device_addr >> 8) * 0x9E3779B97F4A7C15ULL) >> (64 - UNIFORM_SLICE_BITS)];
-    if (slice.tick == scheduler.CurrentTick() && slice.device_addr == device_addr &&
-        slice.size == size && std::memcmp(slice.bytes.data(), guest, size) == 0) {
-        guest_descriptor_queue.AddBuffer(slice.buffer, slice.buffer_address, slice.offset, size);
+    if (const UniformSlice* const found =
+            FindUniformSlice(stage, index, slice, device_addr, guest, size)) {
+        guest_descriptor_queue.AddBuffer(found->buffer, found->buffer_address, found->offset,
+                                         size);
+        NoteStageUniform(stage, index, *found);
         return true;
     }
     if (slice.bytes.size() < size) {
@@ -462,6 +526,8 @@ bool BufferCacheRuntime::BindMappedUniformBufferReuseFrom(DAddr device_addr, con
     slice.buffer_address = ref.device_address;
     slice.offset = static_cast<u32>(ref.offset);
     slice.size = size;
+    slice.serial = ++uniform_serial;
+    NoteStageUniform(stage, index, slice);
     return false;
 }
 

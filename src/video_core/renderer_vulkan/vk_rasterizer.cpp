@@ -744,7 +744,8 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
     // pipeline (not bound again), push constants, render pass and dynamic state, and the same
     // descriptors. A uniform buffer the full setup streamed again may lie elsewhere (the
     // direct-mapped reuse slots of EDEN_NX2_UBO_REUSE hold one size per range: a range bound to
-    // two stages with different used sizes, or two ranges in one slot, stream again); it counts
+    // two stages with different used sizes, or two ranges in one slot, stream again; with
+    // EDEN_NX2_UBO_STAGE the slot's last slice may hold the bytes for another range); it counts
     // as the same when it holds the same bytes.
     namespace Profile = VideoCommon::Nx2Profile;
     Profile::Add(Profile::Counter::LightUniformVerified, 1);
