@@ -52,6 +52,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_busy_clock.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -1237,7 +1238,8 @@ private:
     // 18 and fence words changed (the first 200 times; changed words marked '*'), with the time
     // since the previous present; (b) once a second, a histogram of the shown frame intervals, the
     // average fence and pacing waits, the presents per requested interval (PresentInterval), the
-    // vsync ticks and how often each vi2 command ran; (c) every 600
+    // GPU pipeline's busy time (Nx2BusyClock: what EDEN_NX2_GPU_BUSY_CLOCK would time; "-" with
+    // single core), the vsync ticks and how often each vi2 command ran; (c) every 600
     // presents, the values each 229 word took so far; (d) each vi2 request the first time its
     // data words are seen (the first 256).
     static bool PresentDiagEnabled() {
@@ -1261,6 +1263,7 @@ private:
         u32 presents{};
         long long min_us{}, max_us{}, fence_us{}, pace_us{};
         u32 vsync_ticks{};
+        u64 busy_ticks{}; // Nx2BusyClock::Ticks at the start of the second
         std::map<u32, u32> calls;
         std::set<std::vector<u32>> requests;
     } m_diag;
@@ -1369,22 +1372,32 @@ private:
         ++d.intervals[PresentInterval(w)];
         d.fence_us += to_us(waited - entered);
         d.pace_us += to_us(paced - composited);
+        const bool busy_tracked = VideoCommon::Nx2BusyClock::Tracked();
         if (d.second == std::chrono::steady_clock::time_point{}) {
             d.second = paced;
+            d.busy_ticks = busy_tracked ? VideoCommon::Nx2BusyClock::Ticks() : 0;
         } else if (paced - d.second >= std::chrono::seconds{1}) {
             const u32 ticks = m_vsync->ticks.load(std::memory_order_relaxed);
             std::string calls;
             for (const auto& [command, count] : d.calls) {
                 calls += fmt::format(" {}x{}", command, count);
             }
+            std::string busy = "-";
+            if (busy_tracked) {
+                const u64 busy_ticks = VideoCommon::Nx2BusyClock::Ticks();
+                busy = fmt::format("{:.1f}", static_cast<double>(busy_ticks - d.busy_ticks) * 1000.0 /
+                                                 Common::WallClock::GPUTickFreq);
+                d.busy_ticks = busy_ticks;
+            }
             LOG_INFO(Service,
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "
-                     "requested interval 1x{} 2x{} 3x{} 4x{}, vsync ticks {}, vi2 calls{}",
+                     "requested interval 1x{} 2x{} 3x{} 4x{}, gpu busy {} ms, vsync ticks {}, "
+                     "vi2 calls{}",
                      to_us(paced - d.second) / 1e6, d.presents, d.shown[0], d.shown[1], d.shown[2],
                      d.shown[3], d.shown[4], d.min_us / 1000.0, d.max_us / 1000.0,
                      d.fence_us / 1000.0 / d.presents, d.pace_us / 1000.0 / d.presents,
-                     d.intervals[1], d.intervals[2], d.intervals[3], d.intervals[4],
+                     d.intervals[1], d.intervals[2], d.intervals[3], d.intervals[4], busy,
                      ticks - d.vsync_ticks, calls);
             d.vsync_ticks = ticks;
             d.second = paced;

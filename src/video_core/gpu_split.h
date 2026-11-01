@@ -142,6 +142,11 @@ public:
     /// Waits until the back executed everything sent so far. Returns whether it had to wait.
     bool Drain();
 
+    /// Whether the back ran everything published (so while the split is off). Any thread.
+    [[nodiscard]] bool BackCaughtUp() const {
+        return consumed.load(std::memory_order_seq_cst) == published.load(std::memory_order_seq_cst);
+    }
+
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start

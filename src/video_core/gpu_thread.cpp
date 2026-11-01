@@ -18,6 +18,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
@@ -58,6 +59,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto last_progress = std::chrono::steady_clock::now();
         namespace Profile = VideoCommon::Nx2Profile;
         auto& split = VideoCommon::GpuSplit::Get();
+        const bool busy_clock = VideoCommon::Nx2BusyClock::Tracked();
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
@@ -82,7 +84,14 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
             } else {
                 Profile::Scope scope{Profile::Zone::Idle};
-                state.queue.PopWait(next, stop_token);
+                if (busy_clock) {
+                    // EDEN_NX2_GPU_BUSY_CLOCK: idle from here if the back caught up too.
+                    VideoCommon::Nx2BusyClock::FrontWaits(true);
+                    state.queue.PopWait(next, stop_token);
+                    VideoCommon::Nx2BusyClock::FrontWaits(false);
+                } else {
+                    state.queue.PopWait(next, stop_token);
+                }
             }
             if (stop_token.stop_requested()) {
                 break;

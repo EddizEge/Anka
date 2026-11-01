@@ -36,6 +36,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_busy_clock.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -166,6 +167,9 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
+        if (VideoCommon::Nx2BusyClock::Enabled()) [[unlikely]] {
+            return GetBusyTicks();
+        }
         const u64 gpu_tick = system.CoreTiming().GetGPUTicks();
         // EDEN_NX2_GPU_TICK_DIV=<d> (decimal, 1-512): divide the GPU timer by d instead of the
         // fast_gpu_time setting's 1, 256 or 512. Donkey Kong Bananza picks its 60 / 30 / 20 fps
@@ -185,6 +189,23 @@ struct GPU::Impl {
             return static_cast<u64>(static_cast<double>(gpu_tick) / tick_div);
         }
         return gpu_tick / GpuClockMultiplier(Settings::values.gpu_clock.GetValue());
+    }
+
+    /// EDEN_NX2_GPU_BUSY_CLOCK (nx2_busy_clock.h): the GPU ticks the pipeline worked, divided by
+    /// EDEN_NX2_GPU_TICK_DIV if set, else by 1 (fast_gpu_time's 256 would hide the work again).
+    /// Monotonic: Nx2BusyClock::Ticks never goes back, and the division keeps the order.
+    [[nodiscard]] u64 GetBusyTicks() const {
+        static const double tick_div = [] {
+            const char* text = std::getenv("EDEN_NX2_GPU_TICK_DIV");
+            const double value = text != nullptr ? std::strtod(text, nullptr) : 0.0;
+            const double div = value >= 1.0 && value <= 512.0 ? value : 1.0;
+            LOG_INFO(HW_GPU,
+                     "GPU timer counts busy time only (EDEN_NX2_GPU_BUSY_CLOCK), divided by {}",
+                     div);
+            return div;
+        }();
+        const u64 busy = VideoCommon::Nx2BusyClock::Ticks();
+        return tick_div == 1.0 ? busy : static_cast<u64>(static_cast<double>(busy) / tick_div);
     }
 
     void RendererFrameEndNotify() {

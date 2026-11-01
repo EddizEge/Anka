@@ -23,6 +23,7 @@
 #include "video_core/engines/engine_interface.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -414,6 +415,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
     u64 read_position = 0;
+    const bool busy_clock = Nx2BusyClock::Tracked();
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
@@ -451,6 +453,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         }
         g_back_busy.store(false, std::memory_order_release);
         consumed.store(read_position, std::memory_order_release);
+        if (busy_clock) {
+            // EDEN_NX2_GPU_BUSY_CLOCK: caught up while the front waits for a command?
+            Nx2BusyClock::BackStored();
+        }
     }
 }
 
