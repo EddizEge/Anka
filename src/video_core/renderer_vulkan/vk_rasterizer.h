@@ -212,8 +212,11 @@ private:
     template <typename Func>
     bool TryLightDraw(bool is_indexed, bool indirect, bool invalidated, Func& draw_func);
     /// TryLightDraw: whether nothing a full setup reads changed but constant buffer data the
-    /// uniform way sets up again (counts why not, profiling).
-    [[nodiscard]] bool LightUniformOk(GraphicsPipeline& pipeline, bool invalidated);
+    /// uniform way sets up again (counts why not, profiling). rebind_storage: storage buffer
+    /// descriptors hold other values too, which ConfigureUniforms then binds again
+    /// (EDEN_NX2_LIGHT_STORAGE).
+    [[nodiscard]] bool LightUniformOk(GraphicsPipeline& pipeline, bool invalidated,
+                                      bool& rebind_storage);
     [[nodiscard]] bool LightFeedbackOff() const;
     /// What may follow this fully set up draw (counts why not a plain light draw, profiling).
     [[nodiscard]] LightLevel LightFollowable(const GraphicsPipeline& pipeline);
@@ -316,6 +319,7 @@ private:
         bool active{};
         GraphicsPipeline* pipeline{};
         std::vector<DescriptorUpdateEntry> payload; ///< What ConfigureUniforms built
+        std::vector<u32> values; ///< The pipeline's descriptor word values it left
     };
     LightVerify light_verify;
 };

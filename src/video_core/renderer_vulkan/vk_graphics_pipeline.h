@@ -136,9 +136,11 @@ public:
     /// each stage's image descriptors as it last pushed them (EDEN_NX2_DESC_REUSE), and the
     /// descriptor set; no pipeline, image, render target or push constant work. False, with
     /// nothing recorded, where that does not hold or buffers were uploaded (Configure then
-    /// follows and adds the barrier).
-    bool ConfigureUniforms(bool is_indexed) {
-        return configure_uniforms_func(this, is_indexed);
+    /// follows and adds the barrier). rebind_storage (EDEN_NX2_LIGHT_STORAGE): storage buffer
+    /// descriptors in constant buffers changed; each stage's storage buffers are bound again from
+    /// them as Configure binds them, and the words read kept (descriptor_values).
+    bool ConfigureUniforms(bool is_indexed, bool rebind_storage) {
+        return configure_uniforms_func(this, is_indexed, rebind_storage);
     }
 
     /// Kinds of the constant buffer words Configure reads descriptors from (DescriptorWord).
@@ -149,15 +151,30 @@ public:
     struct LightWords {
         u32 rewritten{};        ///< Kinds of words the ranges overlap or in slots bound elsewhere
         u32 changed{};          ///< Kinds of those whose value differs (all, not compared)
-        bool rebound_changed{}; ///< A word that differs lies in a slot bound elsewhere
+        u32 rebound_changed{};  ///< Kinds of those that differ in a slot bound elsewhere
+        // With scan_storage and the profile on, of the storage buffer descriptors that differ:
+        u32 storage_buffers{};  ///< How many
+        bool storage_address{}; ///< An address word among them (else size words only)
+        bool storage_written{}; ///< One the pipeline writes through
+        u32 storage_first{};    ///< The first: stage << 24 | constant buffer slot << 16 | offset
     };
 
     /// EDEN_NX2_LIGHT_UNIFORM: reads again the descriptor words that the GPU ranges overlap or
     /// that lie in a constant buffer slot bound elsewhere since (rebound: slot bits per stage)
     /// and compares them with what the last Configure read (with compare off, or no values,
-    /// such a word counts as changed). Stops at the first word that changed.
+    /// such a word counts as changed). Stops at the first word that changed; with scan_storage
+    /// (EDEN_NX2_LIGHT_STORAGE, or profiling) storage buffer descriptor words that changed do
+    /// not stop it, and what they were is noted (profiling).
     [[nodiscard]] LightWords CheckDescriptorWords(std::span<const std::pair<GPUVAddr, u32>> written,
-                                                  std::span<const u32> rebound, bool compare) const;
+                                                  std::span<const u32> rebound, bool compare,
+                                                  bool scan_storage) const;
+
+    /// The descriptor words' values the bound descriptors were made of (descriptor_words'
+    /// order): what the last Configure read, with storage buffer descriptors ConfigureUniforms
+    /// bound again since. EDEN_NX2_LIGHT_UNIFORM=2 compares them with what a full setup reads.
+    [[nodiscard]] std::span<const u32> DescriptorValues() const noexcept {
+        return descriptor_values;
+    }
 
     /// Texture header and sampler pool indices the last Configure used (EDEN_NX2_LIGHT_UNIFORM).
     [[nodiscard]] std::span<const u32> UsedTextureHeaders() const noexcept {
@@ -216,8 +233,8 @@ public:
 
     template <typename Spec>
     static auto MakeConfigureUniformsSpecFunc() {
-        return [](GraphicsPipeline* pl, bool is_indexed) {
-            return pl->ConfigureUniformsImpl<Spec>(is_indexed);
+        return [](GraphicsPipeline* pl, bool is_indexed, bool rebind_storage) {
+            return pl->ConfigureUniformsImpl<Spec>(is_indexed, rebind_storage);
         };
     }
 
@@ -231,7 +248,7 @@ private:
     bool ConfigureImpl(bool is_indexed);
 
     template <typename Spec>
-    bool ConfigureUniformsImpl(bool is_indexed);
+    bool ConfigureUniformsImpl(bool is_indexed, bool rebind_storage);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
@@ -265,7 +282,7 @@ private:
     DescriptorBufferRing& descriptor_buffer_ring;
 
     bool (*configure_func)(GraphicsPipeline*, bool){};
-    bool (*configure_uniforms_func)(GraphicsPipeline*, bool){};
+    bool (*configure_uniforms_func)(GraphicsPipeline*, bool, bool){};
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
@@ -295,6 +312,9 @@ private:
     };
     std::vector<DescriptorWord> descriptor_words;
     std::vector<u32> descriptor_values;
+    /// Index of each stage's first storage buffer descriptor word in descriptor_words (its 4 words
+    /// per descriptor follow in the order of storage_buffers_descriptors).
+    std::array<u32, NUM_STAGES> storage_word_begin{};
     bool descriptor_values_valid{};
     std::vector<u32> used_tics;
     std::vector<u32> used_tscs;

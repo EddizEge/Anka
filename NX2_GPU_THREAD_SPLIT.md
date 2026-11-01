@@ -285,3 +285,42 @@ buffer data and fixed function state, the first reason that applies (the four re
 ones another pipeline key (with dynamic vertex input off, vertex attribute formats are part of
 it). Decision rule (rapor_boru): 3.0·E + 1.4·(D−E) + 1.15·F ≥ ~10 ms/s with D same pipeline, E
 without uniforms, F same programs (per second). Built; not measured yet.
+
+## Light draws that bind storage buffers again (EDEN_NX2_LIGHT_STORAGE, 2026-11-01)
+
+Wide area, evening profile (30b853451): of the draws the uniform way looked at, ~16,600 a second
+went light and ~81,700 were refused as "storage descriptors": constant buffer data written since
+the previous draw changed the address or size words of a storage buffer descriptor the pipeline
+reads (NVN keeps them in the driver constant buffer, c0 bytes 0x100-0x6FF, 16 each: the
+recompiler's NVN bias; most likely it binds a storage buffer per draw by rewriting one, the
+indirect draw reset's list at c0[0x110] being one). Such a draw keeps its pipeline (no state
+register changed: the same programs, descriptor layout, storage buffer count, stages, slots and
+written flags) and, where they hold their values, its texture handles; only its storage bindings
+differ. A full setup makes those from the 16 bytes at each descriptor
+(BufferCache::BindGraphicsStorageBuffer -> StorageBufferBinding:
+the words, the page table and kind map, the device's alignment), then UpdateGraphicsBuffers finds
+their buffers and multi-range segments and BindHostStageBuffers synchronizes them, marks their
+usage and written ranges (GPU-modified, Nx2MarkGpuWritten) and pushes their descriptors; the
+uniform way already makes those two calls for every draw.
+
+`EDEN_NX2_LIGHT_STORAGE` (on with the uniform way; `=0` refuses as before; `=2` sets the draws
+that bound storage buffers again up in full after all and compares, as `EDEN_NX2_LIGHT_UNIFORM=2`
+does for every light draw with uniforms): where the only descriptor words that changed are
+storage buffer ones (handles written over must still hold their values), ConfigureUniforms first
+does config_stage's storage part for every stage the pipeline configures: unbind, then bind each
+descriptor from its words at the bound constant buffer's address now (a rebound slot is no
+different), in order (the dynamic storage buffer limit counts the same), keeping the words read in
+descriptor_values, which later draws compare with (the values the bound descriptors were made of).
+The rest is as before; handles, pool entries, uploads (a new range over CPU-written pages) and an
+ended render pass still refuse or fall back. CheckDescriptorWords scans past changed storage words
+(with the switch or the profile on), so the refusals count "handles" whenever a handle changed.
+
+`=2` (either switch) also compares the descriptor words the light way left with those the full
+setup read ("descriptor word N: light X full Y"). The back's profile line adds "storage
+descriptors changed in N draws (B buffers; A addresses, W written, H with handles too); bound
+again R, fell back F (first: ...)", counted whether this way took them or not (also with `=0`);
+first: stage << 24 | constant buffer slot << 16 | offset of the first descriptor that changed.
+With `=2` the draws that bound them again are verified instead of drawn: "bound again" stays 0 and
+"verified" counts them. `EDEN_NX2_LIGHT_UNIFORM_VALUES=0` treats every storage descriptor word
+written over as changed, so with this switch on those draws bind again rather than refuse.
+Built; not measured yet.

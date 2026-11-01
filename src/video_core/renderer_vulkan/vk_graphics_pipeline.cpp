@@ -193,10 +193,11 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
 }
 
 using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
+using ConfigureUniformsFuncPtr = bool (*)(GraphicsPipeline*, bool, bool);
 
 struct ConfigureFuncs {
     ConfigureFuncPtr configure;
-    ConfigureFuncPtr uniforms; ///< GraphicsPipeline::ConfigureUniforms
+    ConfigureUniformsFuncPtr uniforms; ///< GraphicsPipeline::ConfigureUniforms
 };
 
 template <typename Spec, typename... Specs>
@@ -334,6 +335,7 @@ GraphicsPipeline::GraphicsPipeline(
             descriptor_words.push_back({static_cast<u8>(stage), static_cast<u8>(slot),
                                         static_cast<u8>(kind), offset});
         };
+        storage_word_begin[stage] = static_cast<u32>(descriptor_words.size());
         for (const auto& desc : info->storage_buffers_descriptors) {
             for (u32 word = 0; word < 4; ++word) {
                 add_word(desc.cbuf_index, desc.cbuf_offset + word * 4, StorageWords);
@@ -730,7 +732,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 }
 
 template <typename Spec>
-bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed) {
+bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed, bool rebind_storage) {
     // The image descriptors each stage pushed last (the previous draw's: it used this pipeline)
     // are what ConfigureImpl would push again: the caller checked that no handle, descriptor
     // table or image changed, and they are kept while no image view was freed, no image changed
@@ -751,9 +753,50 @@ bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed) {
         }
     }
     // The buffers as ConfigureImpl binds them: storage and texture buffer bindings are the
-    // previous draw's (their descriptors in constant buffers and the views did not change),
-    // uniform buffers are resolved and uploaded or streamed again.
+    // previous draw's (their descriptors in constant buffers and the views did not change; but
+    // see rebind_storage below), uniform buffers are resolved and uploaded or streamed again.
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    // EDEN_NX2_LIGHT_STORAGE: storage buffer descriptors written with other values (the caller
+    // let only those through, the texture handles held) are bound again as ConfigureImpl's
+    // config_stage binds them: each stage it configures unbound, then each descriptor bound from
+    // the words at its constant buffer address, in order (the same driver limit count), the
+    // words read kept as config_stage keeps them (descriptor_values: later draws compare with
+    // them). UpdateGraphicsBuffers below finds their buffers and segments, BindHostStageBuffers
+    // synchronizes them, marks written ones and pushes their descriptors, as after ConfigureImpl.
+    if constexpr (Spec::has_storage_buffers) {
+        if (rebind_storage) {
+            const auto bind_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+                buffer_cache.UnbindGraphicsStorageBuffers(stage);
+                const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
+                u32* value_it = descriptor_values.data() + storage_word_begin[stage];
+                size_t ssbo_index{};
+                for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                    const GPUVAddr ssbo_addr{cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                    for (u32 word = 0; word < 4; ++word) {
+                        *value_it++ = gpu_memory->Read<u32>(ssbo_addr + word * 4);
+                    }
+                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                           desc.cbuf_offset, desc.is_written);
+                    ++ssbo_index;
+                }
+            }};
+            if constexpr (Spec::enabled_stages[0]) {
+                bind_stage(0);
+            }
+            if constexpr (Spec::enabled_stages[1]) {
+                bind_stage(1);
+            }
+            if constexpr (Spec::enabled_stages[2]) {
+                bind_stage(2);
+            }
+            if constexpr (Spec::enabled_stages[3]) {
+                bind_stage(3);
+            }
+            if constexpr (Spec::enabled_stages[4]) {
+                bind_stage(4);
+            }
+        }
+    }
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
     buffer_cache.BindHostGeometryBuffers(is_indexed);
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
@@ -801,15 +844,19 @@ bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed) {
 
 GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
     std::span<const std::pair<GPUVAddr, u32>> written, std::span<const u32> rebound,
-    bool compare) const {
+    bool compare, bool scan_storage) const {
     // ConfigureImpl's descriptor setup is a function of these words' values (with registers,
     // pools and images unchanged): read_handle gives TexturePair(word) (or of the two words
     // shifted and or'ed), so the same pool indices, image views and samplers; a storage buffer
     // binding is made from the 16 bytes at its descriptor (address, size), so the same binding.
     // Where they hold what the last ConfigureImpl read, it would set up what it did then.
+    // With scan_storage a storage buffer descriptor word that differs does not end the scan:
+    // EDEN_NX2_LIGHT_STORAGE binds such buffers again (ConfigureUniforms) and needs the handles
+    // only to hold their values; which descriptors differed is noted (profiling only).
     LightWords result;
     const bool values = compare && descriptor_values_valid;
     const auto& stages = maxwell3d->state.shader_stages;
+    u32 last_descriptor = ~0U; // First word of the last storage descriptor counted
     for (size_t i = 0; i < descriptor_words.size(); ++i) {
         const DescriptorWord& word = descriptor_words[i];
         const GPUVAddr address = stages[word.stage].const_buffers[word.slot].address + word.offset;
@@ -822,10 +869,32 @@ GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
             continue;
         }
         result.rewritten |= word.kind;
-        if (!values || gpu_memory->Read<u32>(address) != descriptor_values[i]) {
-            result.changed |= word.kind;
-            result.rebound_changed = moved;
+        if (values && gpu_memory->Read<u32>(address) == descriptor_values[i]) {
+            continue;
+        }
+        result.changed |= word.kind;
+        if (moved) {
+            result.rebound_changed |= word.kind;
+        }
+        if (!scan_storage || word.kind != StorageWords) {
             break;
+        }
+        if (!VideoCommon::Nx2Profile::Enabled()) {
+            continue;
+        }
+        // A descriptor's words 0-1 are its address, 2-3 its size (StorageBufferBinding).
+        const u32 part = static_cast<u32>(i) - storage_word_begin[word.stage];
+        const Shader::StorageBufferDescriptor& storage_desc =
+            stage_infos[word.stage].storage_buffers_descriptors[part / 4];
+        result.storage_address |= part % 4 < 2;
+        result.storage_written |= storage_desc.is_written;
+        const u32 descriptor = static_cast<u32>(i) - part % 4;
+        if (descriptor != last_descriptor) {
+            last_descriptor = descriptor;
+            if (result.storage_buffers++ == 0) {
+                result.storage_first = (u32{word.stage} << 24) | (storage_desc.cbuf_index << 16) |
+                                       storage_desc.cbuf_offset;
+            }
         }
     }
     return result;

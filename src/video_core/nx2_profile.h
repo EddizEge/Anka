@@ -118,6 +118,9 @@ enum class Histogram : u32 {
     LightBlocking,       ///< First register that kept a draw off the light path (EDEN_NX2_LIGHT_DRAW)
     LightUniformBlocking, ///< First register outside what a light draw with uniforms sets up again
     LightPipelineFirst,   ///< The same, for draws that kept only it from that way (counted only)
+    /// First storage buffer descriptor a light draw with uniforms found changed: its stage << 24 |
+    /// constant buffer slot << 16 | offset (EDEN_NX2_LIGHT_STORAGE)
+    LightStorageFirst,
     Count,
 };
 
@@ -258,6 +261,15 @@ enum class Counter : u32 {
     LightPipelineSame,        ///< The previous pipeline: only dynamic state changed
     LightPipelineSamePlain,   ///< Of LightPipelineSame: no uniform data or binds changed either
     LightPipelineSwitch,      ///< Another pipeline with the same programs
+    // EDEN_NX2_LIGHT_STORAGE: draws whose storage buffer descriptors (address and size words) the
+    // uniform way found written with other values (whether that way took them or not), and of them:
+    LightStorageChanged,
+    LightStorageBuffers,     ///< Descriptors that changed, summed (per draw: / LightStorageChanged)
+    LightStorageAddress,     ///< An address changed (the others changed size words only)
+    LightStorageWritten,     ///< One the pipeline writes through changed
+    LightStorageWithHandles, ///< A texture handle changed too (set up in full, as "handles")
+    LightStorageDraws,       ///< Of LightUniformDraws: bound their storage buffers again
+    LightStorageFellBack,    ///< Bound them again, then fell back (uploads, render pass ended)
     Count,
 };
 
@@ -466,6 +478,20 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::LightUniformSlicesSame),
                             TopValues(histograms[static_cast<size_t>(Histogram::LightUniformBlocking)],
                                       method, 6));
+        if (data.counters[static_cast<size_t>(Counter::LightStorageChanged)] != 0) {
+            line += fmt::format(" | storage descriptors changed in {:.0f} draws ({:.0f} buffers; "
+                                "{:.0f} addresses, {:.0f} written, {:.0f} with handles too); "
+                                "bound again {:.0f}, fell back {:.0f} (first: {})",
+                                counter(Counter::LightStorageChanged),
+                                counter(Counter::LightStorageBuffers),
+                                counter(Counter::LightStorageAddress),
+                                counter(Counter::LightStorageWritten),
+                                counter(Counter::LightStorageWithHandles),
+                                counter(Counter::LightStorageDraws),
+                                counter(Counter::LightStorageFellBack),
+                                TopValues(histograms[static_cast<size_t>(Histogram::LightStorageFirst)],
+                                          method, 6));
+        }
         line += fmt::format(" | constant buffer writes of held bytes skipped {:.0f} (invalidated "
                             "later {:.0f}), made {:.0f}, not counted (pages written around the "
                             "caches) {:.0f}",

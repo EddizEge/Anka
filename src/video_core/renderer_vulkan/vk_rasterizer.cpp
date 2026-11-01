@@ -226,6 +226,21 @@ bool LightUniformValues() {
     return enabled;
 }
 
+// EDEN_NX2_LIGHT_STORAGE=0: a light draw with uniforms refuses storage buffer descriptors written
+// with other values (set up in full) instead of binding those buffers again; =2 sets the draws
+// that bound them again up in full after all and compares, as EDEN_NX2_LIGHT_UNIFORM=2 does for
+// every light draw with uniforms.
+u32 LightStorageMode() {
+    static const u32 mode = [] {
+        const char* value = std::getenv("EDEN_NX2_LIGHT_STORAGE");
+        if (value == nullptr) {
+            return 1U;
+        }
+        return value[0] == '0' ? 0U : value[0] == '2' ? 2U : 1U;
+    }();
+    return mode;
+}
+
 // Light draws bind index buffers as they are: no quad index pass (BindQuadIndexBuffer, quad
 // topologies) and no 8-bit index conversion.
 bool LightDrawShape(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_state,
@@ -694,7 +709,8 @@ RasterizerVulkan::LightLevel RasterizerVulkan::LightFollowable(const GraphicsPip
     return LightLevel::None;
 }
 
-bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidated) {
+bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidated,
+                                      bool& rebind_storage) {
     // The full setup reads, besides what TryLightDraw checked: the shaders (their memory), the
     // texture header and sampler pools, texture handles and storage buffer descriptors in
     // constant buffers, the images it samples, stores to and renders to, and buffers through the
@@ -735,12 +751,29 @@ bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidat
     // The texture handles and storage buffer descriptors the pipeline reads from constant
     // buffers: those written over, or in a slot bound elsewhere (a bind that changed its
     // address, size or enable), must hold what the full setup read
-    // (GraphicsPipeline::CheckDescriptorWords).
-    const GraphicsPipeline::LightWords words =
-        pipeline.CheckDescriptorWords(written, light.rebound, LightUniformValues());
-    if (words.changed != 0) {
-        Profile::Add(words.rebound_changed ? Profile::Counter::LightUniformBinds
-                     : (words.changed & GraphicsPipeline::HandleWords) != 0
+    // (GraphicsPipeline::CheckDescriptorWords). EDEN_NX2_LIGHT_STORAGE: the storage buffer
+    // descriptors may hold other values; ConfigureUniforms then binds those buffers again as the
+    // full setup binds them (from the words at the bound constant buffers' addresses now, so a
+    // rebound slot is no different). With the profile on the scan goes past storage words that
+    // changed either way, and the refusals count a handle that changed first.
+    const u32 storage_mode = LightStorageMode();
+    const GraphicsPipeline::LightWords words = pipeline.CheckDescriptorWords(
+        written, light.rebound, LightUniformValues(), storage_mode != 0 || Profile::Enabled());
+    const bool storage_changed = (words.changed & GraphicsPipeline::StorageWords) != 0;
+    if (storage_changed && Profile::Enabled()) {
+        Profile::Add(Profile::Counter::LightStorageChanged, 1);
+        Profile::Add(Profile::Counter::LightStorageBuffers, words.storage_buffers);
+        Profile::Add(Profile::Counter::LightStorageAddress, words.storage_address ? 1 : 0);
+        Profile::Add(Profile::Counter::LightStorageWritten, words.storage_written ? 1 : 0);
+        Profile::Add(Profile::Counter::LightStorageWithHandles,
+                     (words.changed & GraphicsPipeline::HandleWords) != 0 ? 1 : 0);
+        Profile::Note(Profile::Histogram::LightStorageFirst, s64{words.storage_first});
+    }
+    const u32 refusing =
+        storage_mode != 0 ? words.changed & GraphicsPipeline::HandleWords : words.changed;
+    if (refusing != 0) {
+        Profile::Add((words.rebound_changed & refusing) != 0 ? Profile::Counter::LightUniformBinds
+                     : (refusing & GraphicsPipeline::HandleWords) != 0
                          ? Profile::Counter::LightUniformHandles
                          : Profile::Counter::LightUniformStorage,
                      1);
@@ -788,9 +821,10 @@ bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidat
     if ((words.rewritten & GraphicsPipeline::HandleWords) != 0) {
         Profile::Add(Profile::Counter::LightUniformSameHandles, 1);
     }
-    if ((words.rewritten & GraphicsPipeline::StorageWords) != 0) {
+    if ((words.rewritten & GraphicsPipeline::StorageWords) != 0 && !storage_changed) {
         Profile::Add(Profile::Counter::LightUniformSameStorage, 1);
     }
+    rebind_storage = storage_changed;
     return true;
 }
 
@@ -847,6 +881,20 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
             mismatch = fmt::format("descriptor {} of {}: light {:016x} full {:016x}", entry,
                                    entries, fmt::join(light_words, " "),
                                    fmt::join(full_words, " "));
+        }
+        // The descriptor words later light draws compare with: as the light way left them (with
+        // storage buffer descriptors it bound again, EDEN_NX2_LIGHT_STORAGE) and as the full
+        // setup read them now.
+        const std::span<const u32> full_values = pipeline.DescriptorValues();
+        const std::vector<u32>& light_values = light_verify.values;
+        if (light_values.size() == full_values.size()) {
+            const auto [light_it, full_it] =
+                std::mismatch(light_values.begin(), light_values.end(), full_values.begin());
+            if (light_it != light_values.end()) {
+                mismatch += fmt::format("{}descriptor word {}: light {:#x} full {:#x}",
+                                        mismatch.empty() ? "" : "; ",
+                                        light_it - light_values.begin(), *light_it, *full_it);
+            }
         }
         if (const u32 changes = pipeline.LastDrawChanges(); changes != 0) {
             mismatch += fmt::format("{}draw changes {:#x} (1 pipeline, 2 rescaling, 4 render area)",
@@ -926,7 +974,8 @@ void RasterizerVulkan::NoteLightPipeline(const GraphicsPipeline& pipeline, bool 
     }
     const std::span<const std::pair<GPUVAddr, u32>> written{light.written.data(),
                                                             light.written_count};
-    if (previous.CheckDescriptorWords(written, light.rebound, LightUniformValues()).changed != 0) {
+    if (previous.CheckDescriptorWords(written, light.rebound, LightUniformValues(), false)
+            .changed != 0) {
         Profile::Add(Profile::Counter::LightPipelineDescriptors, 1);
         return;
     }
@@ -984,7 +1033,9 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     // it last did, while the data written lies outside handles, storage buffer descriptors and
     // the texture pools, no constant buffer they are read from moved, and no image or shader saw
     // the writes (LightUniformOk). Pipeline, images, render targets, push constants and dynamic
-    // state stay the anchor's, as above.
+    // state stay the anchor's, as above. EDEN_NX2_LIGHT_STORAGE: storage buffer descriptors may
+    // have changed too; ConfigureUniforms binds those buffers again from them as the full setup
+    // does (what else it sets up does not read them: same pipeline, layout, handles and images).
     namespace Profile = VideoCommon::Nx2Profile;
     using LightChange = Tegra::Engines::Maxwell3D::LightChange;
     const LightAnchor& last = light_anchor;
@@ -1027,19 +1078,25 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
             return false;
         }
         GraphicsPipeline& pipeline = *last.pipeline;
-        if (!LightUniformOk(pipeline, invalidated)) {
+        bool rebind_storage = false;
+        if (!LightUniformOk(pipeline, invalidated, rebind_storage)) {
             return false;
         }
         Profile::Scope scope{Profile::Zone::LightDraw};
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-        if (!pipeline.ConfigureUniforms(is_indexed)) {
+        if (!pipeline.ConfigureUniforms(is_indexed, rebind_storage)) {
             Profile::Add(Profile::Counter::LightUniformFellBack, 1);
+            if (rebind_storage) {
+                Profile::Add(Profile::Counter::LightStorageFellBack, 1);
+            }
             return false;
         }
-        if (uniform_mode == 2) {
+        if (uniform_mode == 2 || (rebind_storage && LightStorageMode() == 2)) {
             // Set up in full after all (PrepareDraw), then compared (CheckLightVerify).
             const DescriptorUpdateEntry* const payload = guest_descriptor_queue.UpdateData();
             light_verify.payload.assign(payload, payload + pipeline.DescriptorEntryCount());
+            const std::span<const u32> left_values = pipeline.DescriptorValues();
+            light_verify.values.assign(left_values.begin(), left_values.end());
             light_verify.pipeline = &pipeline;
             light_verify.active = true;
             return false;
@@ -1055,6 +1112,9 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         Profile::Add(Profile::Counter::LightUniformDraws, 1);
         if (indirect) {
             Profile::Add(Profile::Counter::LightUniformIndirectDraws, 1);
+        }
+        if (rebind_storage) {
+            Profile::Add(Profile::Counter::LightStorageDraws, 1);
         }
         return true;
     }
