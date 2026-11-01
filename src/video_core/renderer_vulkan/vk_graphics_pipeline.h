@@ -105,6 +105,12 @@ public:
     bool UsesExtendedDynamicState() const noexcept {
         return key.state.extended_dynamic_state != 0;
     }
+
+    /// Whether a stage writes memory other than its attachments (storage buffers, images,
+    /// global memory): EDEN_NX2_LIGHT_DRAW sets up every draw of such a pipeline in full.
+    bool WritesMemory() const noexcept {
+        return writes_memory;
+    }
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
 
@@ -180,6 +186,7 @@ private:
     size_t num_image_elements{};
     u32 num_textures{};
     bool fragment_has_color0_output{};
+    bool writes_memory{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

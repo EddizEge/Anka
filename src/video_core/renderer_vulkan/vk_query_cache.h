@@ -48,6 +48,9 @@ public:
 
     void ResumeHostConditionalRendering();
 
+    /// Whether draws are conditional on a host query (EDEN_NX2_LIGHT_DRAW draws them in full).
+    [[nodiscard]] bool HostConditionalRenderingSet() const;
+
     bool HostConditionalRenderingCompareValue(VideoCommon::LookupData object_1, bool qc_dirty);
 
     bool HostConditionalRenderingCompareValues(VideoCommon::LookupData object_1,

@@ -258,6 +258,11 @@ public:
 
     void UpdateGraphicsBuffers(bool is_indexed);
 
+    /// EDEN_NX2_LIGHT_DRAW: updates the index, vertex and indirect buffers only, what a draw
+    /// that changed nothing else needs. Returns false when a buffer was deleted on the way (the
+    /// other bindings may have named it): the draw then needs the full setup.
+    [[nodiscard]] bool UpdateGeometryBuffers(bool is_indexed);
+
     void UpdateComputeBuffers();
 
     void BindHostGeometryBuffers(bool is_indexed);

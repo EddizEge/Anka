@@ -446,6 +446,7 @@ void Scheduler::AllocateNewContext() {
 }
 
 void Scheduler::InvalidateState() {
+    ++record_count;
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;

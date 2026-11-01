@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 
 #include <boost/container/static_vector.hpp>
 
@@ -102,6 +103,10 @@ public:
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
+    bool HoldsGpuWrittenData(DAddr addr, u64 size) override;
+    void NoteEngineWork() override {
+        NoteLightWork();
+    }
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
@@ -158,7 +163,38 @@ private:
     static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
     template <typename Func>
-    void PrepareDraw(bool is_indexed, Func&&);
+    void PrepareDraw(bool is_indexed, bool indirect, Func&&);
+
+    // EDEN_NX2_LIGHT_DRAW (PrepareDraw): a draw that changed only vertex/index buffer addresses
+    // and draw parameters since the last one binds those buffers and draws; the rest of the last
+    // draw's setup is still in the command buffer.
+    /// What a draw left behind, for the next one.
+    struct LightAnchor {
+        Tegra::Engines::Maxwell3D* maxwell3d{};
+        Tegra::MemoryManager* gpu_memory{};
+        u64 record_count{};  ///< Scheduler::RecordCount once it was recorded
+        u64 epoch{};         ///< light_epoch when its setup began
+        u64 cached_writes{}; ///< gpu_memory->CachedWrites() when its setup began
+        u64 same_writes{};   ///< maxwell3d->light.same_writes when its setup began
+        Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology topology{};
+        Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format{};
+        bool is_indexed{};
+        bool indirect{};
+        bool armed{}; ///< Set up in full or light with a shape a light draw can follow
+    };
+    /// Draw / DrawIndirect for PrepareDraw.
+    struct LightEntry {
+        u64 record_count{}; ///< Scheduler::RecordCount before the draw recorded anything
+        bool shape_ok{};    ///< The draw's own shape allows the light setup
+    };
+    void BeginLightDraw(bool indirect, bool shape_ok);
+    template <typename Func>
+    bool TryLightDraw(bool is_indexed, bool indirect, bool invalidated, Func& draw_func);
+    [[nodiscard]] bool LightQueriesOff() const;
+    /// Work outside draws that may change what the next draw would bind (any thread).
+    void NoteLightWork() noexcept {
+        light_epoch.fetch_add(1, std::memory_order_seq_cst);
+    }
 
     void FlushWork();
 
@@ -232,6 +268,10 @@ private:
     boost::container::static_vector<VkSampler, MAX_TEXTURES> sampler_handles;
 
     u32 draw_counter = 0;
+
+    LightAnchor light_anchor;
+    LightEntry light_entry;
+    std::atomic<u64> light_epoch{};
 };
 
 } // namespace Vulkan

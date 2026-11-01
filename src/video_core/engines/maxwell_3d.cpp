@@ -23,6 +23,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
@@ -34,6 +35,83 @@ namespace Tegra::Engines {
 
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
+
+namespace {
+
+// EDEN_NX2_LIGHT_DRAW=0: every draw is set up in full (vk_rasterizer.cpp). Its changes are still
+// tracked while profiling (EDEN_NX2_GPU_PROFILE), for the "draw changes" counts.
+bool LightTrackingEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        return value == nullptr || value[0] != '0' || VideoCommon::Nx2Profile::Enabled();
+    }();
+    return enabled;
+}
+
+// The Maxwell3D::LightChange class of each register: what a change of it means for the next
+// draw. Constant buffer data (ProcessCBMultiData) and inline data (CallMultiMethod) are noted
+// where they are written.
+const std::array<u16, Maxwell3D::Regs::NUM_REGS>& LightClasses() {
+    static const auto table = [] {
+        using LightChange = Maxwell3D::LightChange;
+        std::array<u16, Maxwell3D::Regs::NUM_REGS> classes;
+        classes.fill(LightChange::State);
+        const auto fill = [&classes](size_t begin, size_t count, u32 kind) {
+            std::fill_n(classes.begin() + begin, count, static_cast<u16>(kind));
+        };
+        for (size_t i = 0; i < Maxwell3D::Regs::NumVertexArrays; ++i) {
+            // Address high and low; the stride/enable word and the frequency stay State.
+            fill(MAXWELL3D_REG_INDEX(vertex_streams) + i * 4 + 1, 2, LightChange::VertexStreams);
+            fill(MAXWELL3D_REG_INDEX(vertex_stream_limits) + i * 2, 2, LightChange::VertexStreams);
+        }
+        // Start and limit; the format stays State.
+        fill(MAXWELL3D_REG_INDEX(index_buffer), 4, LightChange::IndexBuffer);
+        for (const size_t method :
+             {MAXWELL3D_REG_INDEX(index_buffer.first), MAXWELL3D_REG_INDEX(index_buffer.count),
+              MAXWELL3D_REG_INDEX(vertex_buffer.first), MAXWELL3D_REG_INDEX(vertex_buffer.count),
+              MAXWELL3D_REG_INDEX(vertex_id_base), MAXWELL3D_REG_INDEX(global_base_vertex_index),
+              MAXWELL3D_REG_INDEX(global_base_instance_index), MAXWELL3D_REG_INDEX(draw.begin),
+              MAXWELL3D_REG_INDEX(draw.end)}) {
+            classes[method] = LightChange::DrawParams;
+        }
+        // Size, address and offset: read only by constant buffer binds and data writes.
+        fill(MAXWELL3D_REG_INDEX(const_buffer), 4, LightChange::UniformSelect);
+        fill(MAXWELL3D_REG_INDEX(const_buffer.buffer), Maxwell3D::Regs::NumCBData, 0);
+        for (size_t stage = 0; stage < Maxwell3D::Regs::MaxShaderStage; ++stage) {
+            classes[MAXWELL3D_REG_INDEX(bind_groups) + stage * 8 + 4] = LightChange::UniformBind;
+        }
+        fill(MAXWELL3D_REG_INDEX(tex_header),
+             sizeof(Maxwell3D::Regs::tex_header) / sizeof(u32), LightChange::Textures);
+        fill(MAXWELL3D_REG_INDEX(tex_sampler),
+             sizeof(Maxwell3D::Regs::tex_sampler) / sizeof(u32), LightChange::Textures);
+        classes[MAXWELL3D_REG_INDEX(sampler_binding)] = LightChange::Textures;
+        for (const size_t method :
+             {MAXWELL3D_REG_INDEX(inline_data), MAXWELL3D_REG_INDEX(launch_dma),
+              MAXWELL3D_REG_INDEX(report_semaphore.query), MAXWELL3D_REG_INDEX(sync_info),
+              MAXWELL3D_REG_INDEX(clear_report_value), MAXWELL3D_REG_INDEX(render_enable.mode),
+              MAXWELL3D_REG_INDEX(wait_for_idle), MAXWELL3D_REG_INDEX(fragment_barrier),
+              MAXWELL3D_REG_INDEX(invalidate_texture_data_cache),
+              MAXWELL3D_REG_INDEX(tiled_cache_barrier), MAXWELL3D_REG_INDEX(clear_surface),
+              MAXWELL3D_REG_INDEX(draw_texture.src_y0), MAXWELL3D_REG_INDEX(falcon[4]),
+              MAXWELL3D_REG_INDEX(load_mme.instruction_ptr), MAXWELL3D_REG_INDEX(load_mme.instruction),
+              MAXWELL3D_REG_INDEX(load_mme.start_address), MAXWELL3D_REG_INDEX(shadow_ram_control),
+              MAXWELL3D_REG_INDEX(draw_inline_index), MAXWELL3D_REG_INDEX(inline_index_2x16.even),
+              MAXWELL3D_REG_INDEX(inline_index_4x8.index0),
+              MAXWELL3D_REG_INDEX(vertex_array_instance_first),
+              MAXWELL3D_REG_INDEX(vertex_array_instance_subsequent),
+              MAXWELL3D_REG_INDEX(index_buffer32_first), MAXWELL3D_REG_INDEX(index_buffer16_first),
+              MAXWELL3D_REG_INDEX(index_buffer8_first),
+              MAXWELL3D_REG_INDEX(index_buffer32_subsequent),
+              MAXWELL3D_REG_INDEX(index_buffer16_subsequent),
+              MAXWELL3D_REG_INDEX(index_buffer8_subsequent)}) {
+            classes[method] = LightChange::Command;
+        }
+        return classes;
+    }();
+    return table;
+}
+
+} // Anonymous namespace
 
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     : draw_manager()
@@ -347,6 +425,9 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
+    if (LightTrackingEnabled()) {
+        NoteLightChange(LightClasses()[method], method);
+    }
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
@@ -430,6 +511,8 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
 void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters) {
     // Reset the current macro.
     executing_macro = 0;
+    // HLE macros change registers and dirty flags directly: no light draw after them.
+    NoteLightChange(LightChange::State, method);
 
     // Lookup the macro offset
     const u32 entry =
@@ -549,6 +632,7 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
         break;
     case MAXWELL3D_REG_INDEX(inline_data): {
         ASSERT(methods_pending == amount);
+        NoteLightChange(LightChange::Command, method);
         upload_state.ProcessData(base_start, amount);
         return;
     }
@@ -748,6 +832,11 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
     const GPUVAddr address{buffer_address + regs.const_buffer.offset};
     const size_t copy_size = amount * sizeof(u32);
+    if (LightTrackingEnabled()) {
+        NoteLightChange(IsLightSameWrite(address, start_base, copy_size) ? LightChange::UniformSame
+                                                                         : LightChange::UniformData,
+                        MAXWELL3D_REG_INDEX(const_buffer.buffer));
+    }
     memory_manager.WriteBlockCached(address, start_base, copy_size);
 
     // Increment the current buffer position.
@@ -756,6 +845,36 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
 
 void Maxwell3D::ProcessCBData(u32 value) {
     ProcessCBMultiData(&value, 1);
+}
+
+bool Maxwell3D::IsLightSameWrite(GPUVAddr address, const u32* data, size_t size) {
+    // NVN's draw macros write the base vertex and instance into c[0][0x640] and reset them after
+    // the draw; FrontIndirectDraw sends the resets. Mostly the bytes are already there. Such a
+    // write still goes to memory and its range is invalidated at the next FlushCaching, but a
+    // draw after it sees what it would without the write, as long as no cache holds data for
+    // the range that guest memory lacks (GPU-written buffer data or images): then nothing
+    // uploads anything else over it. Those writes are counted (light.same_writes); the
+    // rasterizer takes the next draw the light way only if every cached write since the last
+    // one is such a write.
+    const bool may_be_light = light.armed && (light.changes & ~LightChange::Light) == 0;
+    if (!may_be_light && !VideoCommon::Nx2Profile::Enabled()) {
+        return false;
+    }
+    const u8* const memory = memory_manager.GetSpan(address, size);
+    if (memory == nullptr || std::memcmp(memory, data, size) != 0) {
+        return false;
+    }
+    // A sparse region's first write gives it memory (Nx2BackSparseWrite).
+    const bool sparse =
+        address + size > Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) &&
+        address < Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed);
+    if (may_be_light && !sparse) {
+        const std::optional<DAddr> device_address = memory_manager.GpuToCpuAddress(address);
+        if (device_address && !rasterizer->HoldsGpuWrittenData(*device_address, size)) {
+            ++light.same_writes;
+        }
+    }
+    return true;
 }
 
 void Maxwell3D::ProcessInlineIndexMultiData(u32 method, const u32* start_base, u32 amount) {
@@ -836,12 +955,23 @@ struct Maxwell3D::FrontState {
     /// EDEN_NX2_GPU_PROFILE: the first entry written after held_indirect (kind << 16 | method,
     /// see Nx2Profile::Report; 0: none or not a 3D method).
     u32 indirect_interposer{};
+    /// EDEN_NX2_GPU_PROFILE: methods noted since the last indirect draw (~0: none yet).
+    u32 gap_methods{~0U};
 
     /// Profiling: remembers what was written first after the held indirect draw.
     void NoteInterposer(const VideoCommon::GpuSplit& split, u32 kind, u32 method) {
         if (held_indirect.payload != nullptr && indirect_interposer == 0 &&
             split.WritePosition() == held_indirect.end) {
             indirect_interposer = (kind << 16) | (method & 0xffff);
+        }
+    }
+    /// Profiling: the first 16 methods written (or macros called, kind 4) after each indirect
+    /// draw, whether or not they change a register.
+    void NoteGapMethod(u32 kind, u32 method) {
+        if (gap_methods < 16) {
+            ++gap_methods;
+            VideoCommon::Nx2Profile::Note(VideoCommon::Nx2Profile::Histogram::IndirectGapMethods,
+                                          (kind << 16) | (method & 0xffff));
         }
     }
 };
@@ -984,6 +1114,7 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     }
     if (Profile::Enabled()) [[unlikely]] {
         Profile::Add(Profile::Counter::MethodWrites, 1);
+        fs.NoteGapMethod(from_macro ? 3 : 1, method);
     }
     if (method == MAXWELL3D_REG_INDEX(shadow_ram_control) && FrontVerifyEnabled()) [[unlikely]] {
         fs.control_writes[fs.control_count++ % fs.control_writes.size()] = {
@@ -1052,6 +1183,9 @@ void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& spl
     if (method >= MacroRegistersStart) {
         if (fs.executing_macro == 0) {
             fs.executing_macro = method;
+            if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+                fs.NoteGapMethod(4, method);
+            }
         }
         fs.parameters.push_back(argument);
         if (is_last_call) {
@@ -1069,6 +1203,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     if (method >= MacroRegistersStart) {
         if (fs.executing_macro == 0) {
             fs.executing_macro = method;
+            if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+                fs.NoteGapMethod(4, method);
+            }
         }
         fs.parameters.insert(fs.parameters.end(), base_start, base_start + amount);
         if (amount == methods_pending) {
@@ -1150,6 +1287,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
         fs.NoteInterposer(split, 2, method);
+        fs.NoteGapMethod(2, method);
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
 }
@@ -1368,6 +1506,7 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
     Profile::Add(Profile::Counter::HleIndirectDraws, 1);
     const u32 topology = fs.parameters[0];
     fs.draw_pending = false;
+    fs.gap_methods = ~0U;
     // NVN's multi-draw calls the macro once per record, with nothing in between. While the last
     // call's entry is still invisible to the back and nothing followed it but its resets, a
     // call whose record comes next in memory joins it: one draw setup on the back and one
@@ -1440,6 +1579,7 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
     }
     held = {payload, start, split.WritePosition(), split.Session()};
     fs.indirect_interposer = 0;
+    fs.gap_methods = 0;
 }
 
 void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record,

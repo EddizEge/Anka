@@ -568,6 +568,7 @@ void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buf
 
 void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    ++cached_writes;
     accumulator.Add(gpu_dest_addr, size);
 }
 
@@ -840,7 +841,7 @@ void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, b
     split(0, 0, 0);
 }
 
-void MemoryManager::FlushCaching() {
+bool MemoryManager::FlushCaching() {
     // EDEN_NX2_INVAL_SKIP=0: every accumulated range translated page by page and handed to the
     // caches as collected.
     static const bool merge_ranges = [] {
@@ -854,8 +855,9 @@ void MemoryManager::FlushCaching() {
         })) {
             rasterizer->InnerInvalidation(page_stash2);
             page_stash2.clear();
+            return true;
         }
-        return;
+        return false;
     }
     // This runs before every draw (~5% of the GPU thread on title 1). The accumulator hands out
     // overlapping ranges (it rounds to 32 bytes from the unaligned start, so words written one by
@@ -870,7 +872,7 @@ void MemoryManager::FlushCaching() {
                 ranges.emplace_back(addr, size);
             }
         })) {
-        return;
+        return false;
     }
     const size_t collected = ranges.size();
     if (collected > 1) {
@@ -928,6 +930,7 @@ void MemoryManager::FlushCaching() {
         rasterizer->InnerInvalidation(page_stash2);
         page_stash2.clear();
     }
+    return true;
 }
 
 const u8* MemoryManager::GetSpan(const GPUVAddr src_addr, const std::size_t size) const {

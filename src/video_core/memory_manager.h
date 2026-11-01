@@ -169,12 +169,20 @@ public:
     size_t GetMemoryLayoutSize(GPUVAddr gpu_addr,
                                size_t max_size = (std::numeric_limits<size_t>::max)()) const;
 
-    void FlushCaching();
+    /// Hands the ranges written since the last call to the caches. Returns whether there were any.
+    bool FlushCaching();
 
     /// Leaves the caches' invalidation of a range already written for the next FlushCaching
     /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
     void AccumulateInvalidation(GPUVAddr gpu_addr, std::size_t size) {
+        ++cached_writes;
         accumulator.Add(gpu_addr, size);
+    }
+
+    /// EDEN_NX2_LIGHT_DRAW: writes left for FlushCaching so far (WriteBlockCached,
+    /// AccumulateInvalidation).
+    [[nodiscard]] u64 CachedWrites() const noexcept {
+        return cached_writes;
     }
 
     const u8* GetSpan(const GPUVAddr src_addr, const std::size_t size) const;
@@ -258,6 +266,7 @@ private:
 
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
+    u64 cached_writes{};
 
     static std::atomic<size_t> unique_identifier_generator;
 

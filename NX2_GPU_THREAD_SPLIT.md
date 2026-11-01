@@ -90,3 +90,31 @@ or the device mapping changes), `EDEN_NX2_TEX_TOUCH_SKIP` (one LRU touch per ima
 descriptors; the profile line counts reused stages), `EDEN_NX2_INVAL_HULL`,
 `EDEN_NX2_SHADER_BOUNDS`, `EDEN_NX2_QUERY_BOUNDS` (pre-draw invalidations skip lookups and locks
 outside what the caches hold). Built; not measured yet.
+
+## Light draws (2026-11-01, Donkey Kong Bananza)
+
+Most of the ~34,000 indirect draws a second change only vertex stream addresses between them
+(the merge profile's first entry after a call: `p0x702`, stream 0's address). A draw then needs
+none of the pipeline, descriptor, uniform, render target and dynamic state setup the last one
+recorded: the command buffer still holds it. `EDEN_NX2_LIGHT_DRAW` (on; `=0` off) sets up such a
+draw by updating and binding its vertex, index and indirect buffers only, then records the draw
+(RasterizerVulkan::TryLightDraw). It applies when all of these hold, else the full setup runs:
+- the previous draw was set up (in full, or light after one) with the same draw kind (direct or
+  indirect, indexed or not), topology and index format; one instance, no inline indices, no
+  quads, no 8-bit indices, no count buffer or byte count; its pipeline writes no memory; no
+  transform feedback, pixel counting or host conditional rendering; its render targets have no
+  aliased images and no feedback loop barrier;
+- only vertex stream addresses/limits, index buffer start/limit, draw parameters and the
+  constant buffer selection were written since (Maxwell3D::LightChange; HLE macros on the back,
+  texture pools, binds and any other register count as state);
+- nothing was recorded since (Scheduler::RecordCount: barriers, uploads, render pass changes,
+  submissions), nothing invalidated, flushed, unmapped, fenced, cleared, dispatched, copied or
+  ticked a frame (light_epoch), no inline data, DMA or semaphore, and each constant buffer write
+  stored the bytes memory already held, over pages no cache holds GPU-written data for (NVN's
+  resets of c[0][0x640]);
+- binding the buffers deleted, uploaded nothing and left the render pass active.
+With `EDEN_NX2_GPU_PROFILE` the back's line adds "draw changes direct/indirect" (what changed
+since the previous draw, widest first) and "light draws N (M indirect); full: ..." (why the others
+were set up in full, with the most frequent first blocking register); the front's line adds
+"methods between indirect draws" (the 16 most frequent of the first 16 methods after each
+indirect draw: p/r/m as above, c = macro call). Built; not run or measured yet.

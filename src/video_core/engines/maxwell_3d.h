@@ -3208,6 +3208,32 @@ public:
         Tables tables{};
     } dirty;
 
+    /// EDEN_NX2_LIGHT_DRAW (vk_rasterizer.cpp): what the back changed since the last draw.
+    struct LightChange {
+        enum : u32 {
+            VertexStreams = 1 << 0, ///< Vertex stream addresses and limits
+            IndexBuffer = 1 << 1,   ///< Index buffer start and limit addresses
+            DrawParams = 1 << 2,    ///< First/count, base vertex/instance, draw begin/end
+            UniformSelect = 1 << 3, ///< Constant buffer address, size, offset (no draw reads them)
+            UniformSame = 1 << 4,   ///< Constant buffer data rewritten with the bytes it held
+            UniformData = 1 << 5,   ///< Constant buffer data changed (or not compared)
+            UniformBind = 1 << 6,   ///< Constant buffer binds
+            Textures = 1 << 7,      ///< Texture header and sampler pools
+            State = 1 << 8,         ///< Any other register: pipeline, fixed function state
+            Command = 1 << 9,       ///< Memory writes (inline, DMA, semaphores), clears, barriers
+            /// What a light draw sets up again or no draw reads.
+            Light = VertexStreams | IndexBuffer | DrawParams | UniformSelect | UniformSame,
+        };
+    };
+    struct LightTracking {
+        u32 changes{};        ///< LightChange bits since the last draw
+        u32 first_blocking{}; ///< First register written outside LightChange::Light, plus 1
+        /// Constant buffer writes of the bytes guest memory held, over memory no cache holds
+        /// GPU-written data for (they change nothing a draw sees). Counted only while `armed`.
+        u64 same_writes{};
+        bool armed{}; ///< The rasterizer may set up the next draw the light way
+    } light;
+
     DrawManager draw_manager;
 
     GPUVAddr GetMacroAddress(size_t index) const {
@@ -3256,6 +3282,16 @@ private:
     u32 ProcessShadowRam(u32 method, u32 argument);
 
     void ProcessDirtyRegisters(u32 method, u32 argument);
+
+    /// EDEN_NX2_LIGHT_DRAW: notes a change of `kind` (LightChange) made by `method`.
+    void NoteLightChange(u32 kind, u32 method) {
+        if ((kind & ~LightChange::Light) != 0 && light.first_blocking == 0) {
+            light.first_blocking = method + 1;
+        }
+        light.changes |= kind;
+    }
+    /// Whether a constant buffer write of `data` at `address` changes nothing a draw sees.
+    bool IsLightSameWrite(GPUVAddr address, const u32* data, size_t size);
 
     void ConsumeSinkImpl(Core::System& system) override;
 

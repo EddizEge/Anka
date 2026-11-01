@@ -203,6 +203,24 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
             (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsPatchListPrimitiveRestartSupported()));
 }
+
+// EDEN_NX2_LIGHT_DRAW=0: every draw goes through the full setup (PrepareDraw).
+bool LightDrawEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LIGHT_DRAW");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+// Light draws bind index buffers as they are: no quad index pass (BindQuadIndexBuffer, quad
+// topologies) and no 8-bit index conversion.
+bool LightDrawShape(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_state,
+                    bool is_indexed) {
+    return draw_state.topology != Maxwell::PrimitiveTopology::Quads &&
+           draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip &&
+           (!is_indexed || draw_state.index_buffer.format != Maxwell::IndexFormat::UnsignedByte);
+}
 } // Anonymous namespace
 
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
@@ -242,7 +260,7 @@ RasterizerVulkan::~RasterizerVulkan() {
 }
 
 template <typename Func>
-void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
+void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_func) {
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -256,10 +274,40 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         }
     };
     namespace Profile = VideoCommon::Nx2Profile;
+    bool invalidated;
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
         FlushWork();
-        gpu_memory->FlushCaching();
+        invalidated = gpu_memory->FlushCaching();
+    }
+    // EDEN_NX2_LIGHT_DRAW: what the next draw compares with, taken before this one binds
+    // anything; it becomes the anchor however this draw ends (armed only if it was recorded and
+    // a light draw may follow it).
+    LightAnchor anchor{
+        .maxwell3d = maxwell3d,
+        .gpu_memory = gpu_memory,
+        .epoch = light_epoch.load(std::memory_order_seq_cst),
+        .cached_writes = gpu_memory->CachedWrites(),
+        .same_writes = maxwell3d->light.same_writes,
+        .topology = maxwell3d->draw_manager.draw_state.topology,
+        .index_format = maxwell3d->draw_manager.draw_state.index_buffer.format,
+        .is_indexed = is_indexed,
+        .indirect = indirect,
+    };
+    bool light_follows = false;
+    SCOPE_EXIT {
+        anchor.record_count = scheduler.RecordCount();
+        anchor.armed = light_follows;
+        light_anchor = anchor;
+        auto& light = maxwell3d->light;
+        light.changes = 0;
+        light.first_blocking = 0;
+        light.armed = light_follows;
+    };
+    if (LightDrawEnabled() && TryLightDraw(is_indexed, indirect, invalidated, draw_func)) {
+        submitted = true;
+        light_follows = true;
+        return;
     }
 
     const auto report_failure = [&](std::string_view reason) {
@@ -410,6 +458,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
         draw_func();
     }
     submitted = true;
+    light_follows = LightDrawEnabled() && light_entry.shape_ok && !pipeline->WritesMemory() &&
+                    LightQueriesOff() && !texture_cache.RenderTargetsNeedRepeat();
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
@@ -453,6 +503,131 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     }
 }
 
+void RasterizerVulkan::BeginLightDraw(bool indirect, bool shape_ok) {
+    light_entry.record_count = scheduler.RecordCount();
+    light_entry.shape_ok = shape_ok;
+    namespace Profile = VideoCommon::Nx2Profile;
+    if (!Profile::Enabled()) {
+        return;
+    }
+    // What changed since the previous draw, the widest change first.
+    using LightChange = Tegra::Engines::Maxwell3D::LightChange;
+    const LightAnchor& last = light_anchor;
+    const u32 changes = maxwell3d->light.changes;
+    const bool other_work = last.record_count != light_entry.record_count ||
+                            last.epoch != light_epoch.load(std::memory_order_seq_cst) ||
+                            last.maxwell3d != maxwell3d || last.gpu_memory != gpu_memory;
+    Profile::DrawChange change = Profile::DrawChange::Nothing;
+    if (other_work || (changes & LightChange::Command) != 0) {
+        change = Profile::DrawChange::OtherWork;
+    } else if ((changes & LightChange::State) != 0) {
+        change = Profile::DrawChange::State;
+    } else if ((changes & LightChange::Textures) != 0) {
+        change = Profile::DrawChange::Textures;
+    } else if ((changes & (LightChange::UniformData | LightChange::UniformBind)) != 0) {
+        change = Profile::DrawChange::Uniforms;
+    } else if ((changes & LightChange::IndexBuffer) != 0) {
+        change = Profile::DrawChange::IndexBuffer;
+    } else if ((changes & LightChange::VertexStreams) != 0) {
+        change = Profile::DrawChange::VertexStreams;
+    }
+    const u32 base = static_cast<u32>(indirect ? Profile::Counter::DrawChangeIndirect
+                                               : Profile::Counter::DrawChangeDirect);
+    Profile::Add(static_cast<Profile::Counter>(base + static_cast<u32>(change)), 1);
+}
+
+bool RasterizerVulkan::LightQueriesOff() const {
+    const auto& regs = maxwell3d->regs;
+    return regs.transform_feedback_enabled == 0 && regs.zpass_pixel_count_enable == 0 &&
+           !query_cache_runtime.HostConditionalRenderingSet();
+}
+
+template <typename Func>
+bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalidated,
+                                    Func& draw_func) {
+    // The last draw (the anchor) was set up in full, or light after one: its pipeline, image
+    // and buffer descriptors, push constants, render pass and dynamic state are still what the
+    // command buffer holds, as nothing was recorded since (Scheduler::RecordCount; a submission
+    // or InvalidateState counts too). A full setup now would produce the same, because what it
+    // reads did not change:
+    // - registers: only vertex stream addresses/limits, the index buffer start/limit and draw
+    //   parameters were written (Maxwell3D::LightChange). The pipeline key, the shaders, the
+    //   texture and sampler pools, the render targets and the dynamic state do not read those
+    //   (their dirty flags are the buffer cache's own: VertexBuffer*, IndexBuffer). Topology,
+    //   index format and draw kind are the anchor's.
+    // - memory: nothing was invalidated or flushed (light_epoch: CPU writes, unmaps, flushes,
+    //   fences, frames, channel changes, clears, dispatches, copies), no other engine or method
+    //   wrote memory (LightChange::Command) and every cached write since the anchor began was a
+    //   constant buffer write of the bytes memory held, with no cache holding newer data there
+    //   (Maxwell3D::IsLightSameWrite): its invalidation at FlushCaching above makes a full setup
+    //   upload the same bytes. Uniform data, storage buffer addresses and texture handles read
+    //   from constant buffers are therefore what the anchor read.
+    // - the anchor's pipeline writes no memory (no storage buffer, image or global stores) and
+    //   no queries, transform feedback or conditional rendering are active, so skipping its
+    //   per-draw bookkeeping (written ranges, image modification marks) loses nothing.
+    // What a full setup would do differently is then the vertex/index/indirect buffers, done
+    // here as it does them. Anything else falls back to the full setup (also from the middle:
+    // what was bound so far stays valid and the full setup repeats it).
+    namespace Profile = VideoCommon::Nx2Profile;
+    using LightChange = Tegra::Engines::Maxwell3D::LightChange;
+    const LightAnchor& last = light_anchor;
+    const auto& light = maxwell3d->light;
+    if (!last.armed) {
+        Profile::Add(Profile::Counter::LightNotArmed, 1);
+        return false;
+    }
+    if ((light.changes & ~LightChange::Light) != 0) {
+        Profile::Add((light.changes & LightChange::Command) != 0 ? Profile::Counter::LightOtherWork
+                                                                 : Profile::Counter::LightStateChanged,
+                     1);
+        Profile::Note(Profile::Histogram::LightBlocking, s64{light.first_blocking} - 1);
+        return false;
+    }
+    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
+    const u64 same_writes = light.same_writes - last.same_writes;
+    if (last.maxwell3d != maxwell3d || last.gpu_memory != gpu_memory ||
+        last.record_count != light_entry.record_count ||
+        scheduler.RecordCount() != light_entry.record_count ||
+        last.epoch != light_epoch.load(std::memory_order_seq_cst) ||
+        cached_writes != same_writes || (invalidated && cached_writes == 0)) {
+        Profile::Add(Profile::Counter::LightOtherWork, 1);
+        return false;
+    }
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    if (!light_entry.shape_ok || indirect != last.indirect || is_indexed != last.is_indexed ||
+        draw_state.topology != last.topology ||
+        (is_indexed && draw_state.index_buffer.format != last.index_format) ||
+        !LightQueriesOff()) {
+        Profile::Add(Profile::Counter::LightShape, 1);
+        return false;
+    }
+    Profile::Scope scope{Profile::Zone::LightDraw};
+    std::scoped_lock lock{buffer_cache.mutex};
+    // What ConfigureImpl does for these buffers (UpdateGraphicsBuffers, BindHostGeometryBuffers).
+    if (!buffer_cache.UpdateGeometryBuffers(is_indexed)) {
+        Profile::Add(Profile::Counter::LightFellBack, 1);
+        return false;
+    }
+    buffer_cache.BindHostGeometryBuffers(is_indexed);
+    // An upload needs ConfigureImpl's barrier after it and ends the render pass.
+    if (buffer_cache.any_buffer_uploaded || !scheduler.IsRenderPassActive()) {
+        Profile::Add(Profile::Counter::LightFellBack, 1);
+        return false;
+    }
+    query_cache.NotifySegment(true);
+    HandleTransformFeedback();
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              maxwell3d->regs.zpass_pixel_count_enable);
+    {
+        Profile::Scope draw_scope{Profile::Zone::DrawRecord};
+        draw_func();
+    }
+    Profile::Add(Profile::Counter::LightDraws, 1);
+    if (indirect) {
+        Profile::Add(Profile::Counter::LightIndirectDraws, 1);
+    }
+    return true;
+}
 
 namespace {
 // EDEN_NX2_WINDOW_TRACE: describe clears and draws into screen-sized colour targets (debug aid).
@@ -537,6 +712,15 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    {
+        // Light draws are plain: one instance, no instancing loop, no inline indices.
+        const auto& draw_state = maxwell3d->draw_manager.draw_state;
+        BeginLightDraw(false, instance_count == 1 &&
+                                  draw_state.draw_mode ==
+                                      Tegra::Engines::Maxwell3D::DrawManager::DrawMode::General &&
+                                  draw_state.inline_index_draw_indexes.empty() &&
+                                  LightDrawShape(draw_state, is_indexed));
+    }
     TraceWindowTarget(*maxwell3d, *gpu_memory, is_indexed ? "draw-indexed" : "draw",
                       is_indexed ? maxwell3d->draw_manager.draw_state.index_buffer.count
                                  : maxwell3d->draw_manager.draw_state.vertex_buffer.count);
@@ -646,7 +830,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                      regs.blend.enable[0], seen.size());
         }
     }
-    PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+    PrepareDraw(is_indexed, false, [this, is_indexed, instance_count] {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         const u32 num_instances{instance_count};
         const DrawParams draw_params{MakeDrawParams(draw_state, num_instances, is_indexed)};
@@ -681,6 +865,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 void RasterizerVulkan::DrawIndirect() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
+    // Light indirect draws take indexed records from memory (no count buffer, no byte count).
+    BeginLightDraw(true, params.is_indexed && !params.include_count && !params.is_byte_count &&
+                             LightDrawShape(maxwell3d->draw_manager.draw_state, true));
     // The arguments may be what a dispatch or draw just wrote (Donkey Kong Bananza's terrain
     // records, Maxwell3D::BackDrawIndexedIndirect): the indirect read must wait for it.
     if (buffer_cache.TakeIndirectBarrier()) {
@@ -698,7 +885,7 @@ void RasterizerVulkan::DrawIndirect() {
         });
     }
     buffer_cache.SetDrawIndirect(&params);
-    PrepareDraw(params.is_indexed, [this, &params] {
+    PrepareDraw(params.is_indexed, true, [this, &params] {
         const auto indirect_buffer = buffer_cache.GetDrawIndirectBuffer();
         const auto& buffer = indirect_buffer.first;
         const auto& offset = indirect_buffer.second;
@@ -754,6 +941,7 @@ void RasterizerVulkan::DrawIndirect() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    NoteLightWork();
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -801,6 +989,7 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    NoteLightWork();
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
@@ -995,6 +1184,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    NoteLightWork();
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();
@@ -1061,6 +1251,7 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    NoteLightWork();
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -1076,6 +1267,7 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    NoteLightWork();
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
@@ -1095,6 +1287,7 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1128,6 +1321,21 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
     return false;
 }
 
+bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
+    // An invalidation marks whole pages CPU-modified (and uploads them whole): look at the
+    // pages the area touches.
+    const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+    const size_t span = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - begin;
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (buffer_cache.IsRegionGpuModified(begin, span)) {
+            return true;
+        }
+    }
+    std::scoped_lock lock{texture_cache.mutex};
+    return texture_cache.IsRegionGpuModified(begin, span);
+}
+
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     {
         // Guest CPU reads of buffer memory decide which GPU-written buffer data is copied back.
@@ -1152,6 +1360,7 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1191,6 +1400,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
+    NoteLightWork();
     DEBUG_ASSERT(addr != 0 || size != 0);
     {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -1207,6 +1417,7 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
+    NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1223,6 +1434,7 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCachedWrite(DAddr addr, u64 size) {
+    NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
     }
@@ -1240,6 +1452,7 @@ void RasterizerVulkan::OnCachedWrite(DAddr addr, u64 size) {
 }
 
 bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
+    NoteLightWork();
     if (addr == 0 || size == 0) return true;
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -1252,10 +1465,12 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::InvalidateGPUCache() {
+    NoteLightWork();
     gpu.InvalidateGPUCache();
 }
 
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
+    NoteLightWork();
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapMemory(addr, size);
@@ -1268,6 +1483,7 @@ void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
+    NoteLightWork();
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.UnmapGPUMemory(as_id, addr, size);
@@ -1276,22 +1492,27 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    NoteLightWork();
     fence_manager.SignalFence(std::move(func));
 }
 
 void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
+    NoteLightWork();
     fence_manager.SyncOperation(std::move(func));
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
+    NoteLightWork();
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
+    NoteLightWork();
     fence_manager.SignalReference();
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    NoteLightWork();
     fence_manager.WaitPendingFences(force);
 }
 
@@ -1304,6 +1525,7 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    NoteLightWork();
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -1327,6 +1549,7 @@ void RasterizerVulkan::WaitForIdle() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    NoteLightWork();
     // We already put barriers when a render pass finishes
     scheduler.RequestOutsideRenderPassOperationContext();
 }
@@ -1336,6 +1559,7 @@ void RasterizerVulkan::TiledCacheBarrier() {
 }
 
 void RasterizerVulkan::FlushCommands() {
+    NoteLightWork();
     if (draw_counter == 0) {
         return;
     }
@@ -1344,6 +1568,7 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    NoteLightWork();
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
@@ -1361,6 +1586,7 @@ void RasterizerVulkan::TickFrame() {
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
+    NoteLightWork();
     gpu_memory->FlushCaching();
     return query_cache.AccelerateHostConditionalRendering();
 }
@@ -1372,6 +1598,7 @@ bool RasterizerVulkan::HasDrawTransformFeedback() {
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    NoteLightWork();
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
@@ -1382,6 +1609,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    NoteLightWork();
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};
@@ -2436,6 +2664,7 @@ void RasterizerVulkan::UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs) 
 }
 
 void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) {
+    NoteLightWork();
     CreateChannel(channel);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -2448,6 +2677,7 @@ void RasterizerVulkan::InitializeChannel(Tegra::Control::ChannelState& channel) 
 }
 
 void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
+    NoteLightWork();
     const s32 channel_id = channel.bind_id;
     BindToChannel(channel_id);
     {
@@ -2462,6 +2692,7 @@ void RasterizerVulkan::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 
 void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
+    NoteLightWork();
     EraseChannel(channel_id);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};

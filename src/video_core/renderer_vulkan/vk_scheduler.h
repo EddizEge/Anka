@@ -107,6 +107,7 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        ++record_count;
         if (chunk->Record(command)) {
             return;
         }
@@ -133,6 +134,12 @@ public:
             std::this_thread::sleep_for(std::chrono::microseconds{100});
         }
         return true;
+    }
+
+    /// EDEN_NX2_LIGHT_DRAW: changes with every command recorded and every state invalidation:
+    /// while it stays the same, the command buffer's state is what the last recording left.
+    [[nodiscard]] u64 RecordCount() const noexcept {
+        return record_count;
     }
 
     /// Returns the current command buffer tick.
@@ -329,6 +336,7 @@ private:
     DeferredClear deferred_clear;
 
     std::unique_ptr<CommandChunk> chunk;
+    u64 record_count{}; ///< See RecordCount
     std::function<void()> on_submit;
 
     State state;

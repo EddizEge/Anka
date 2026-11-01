@@ -97,6 +97,16 @@ public:
     virtual bool MustFlushRegion(DAddr addr, u64 size,
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
 
+    /// EDEN_NX2_LIGHT_DRAW: whether a cache holds GPU-written data for the area that guest memory
+    /// lacks (buffer data or images): a write of the bytes memory holds then still changes it.
+    virtual bool HoldsGpuWrittenData([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {
+        return true;
+    }
+
+    /// EDEN_NX2_LIGHT_DRAW: another engine is about to change memory (DMA, some of whose writes
+    /// reach no cache).
+    virtual void NoteEngineWork() {}
+
     virtual RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be invalidated

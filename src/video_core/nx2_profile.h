@@ -55,6 +55,7 @@ enum class Zone : u32 {
     SplitDrain,   ///< Split GPU thread: the front waits for the back (gpu_split.h)
     SplitWait,    ///< Split GPU thread: the back waits for work
     ParameterFlush, ///< Macro parameters / command lists downloaded from the GPU (full GPU wait)
+    LightDraw,      ///< Draws set up the light way (EDEN_NX2_LIGHT_DRAW, vk_rasterizer.cpp)
     Count,
 };
 
@@ -65,7 +66,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "sync descriptors", "read handles", "fill image views", "texture buffers", "update buffers",
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
-    "fence skipped", "method", "split drain", "split wait", "parameter flush",
+    "fence skipped", "method", "split drain", "split wait", "parameter flush", "light draw",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
@@ -86,11 +87,13 @@ enum class Histogram : u32 {
     IndirectInterposer,  ///< First entry after an unmerged indirect draw (see FrontIndirectDraw)
     IndirectStep,        ///< Record address step of indirect draws that did not follow
     IndirectGroupStride, ///< Stride of the group a step did not match
+    IndirectGapMethods,  ///< Methods written between two indirect draws (the first 16 of each gap)
+    LightBlocking,       ///< First register that kept a draw off the light path (EDEN_NX2_LIGHT_DRAW)
     Count,
 };
 
 struct HistogramData {
-    std::array<std::pair<s64, u64>, 16> slots{}; ///< Value and times seen
+    std::array<std::pair<s64, u64>, 32> slots{}; ///< Value and times seen
     u32 used{};
     u64 dropped{}; ///< Notes of values that found no free slot
 };
@@ -98,7 +101,7 @@ struct HistogramData {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 40> counters{}; ///< See Counter
+    std::array<u64, 64> counters{}; ///< See Counter
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
@@ -172,6 +175,30 @@ enum class Counter : u32 {
     IndirectNotAfter,     ///< The record is not after the previous one
     IndirectStepRange,    ///< Step to a single previous record outside 20-256 bytes or unaligned
     IndirectStepMismatch, ///< Step other than the previous group's stride
+    // EDEN_NX2_LIGHT_DRAW (split back): what changed since the previous draw, by draw kind, one of
+    // the DrawChange categories (vk_rasterizer.cpp).
+    DrawChangeDirect,
+    DrawChangeIndirect = DrawChangeDirect + 7,
+    LightDraws = DrawChangeIndirect + 7, ///< Draws set up the light way
+    LightIndirectDraws,  ///< Of LightDraws: indirect draws
+    // Draws set up in full, why (the first reason that applies):
+    LightNotArmed,       ///< The previous draw was not one a light draw can follow
+    LightStateChanged,   ///< Registers other than vertex/index buffers and draw parameters changed
+    LightOtherWork,      ///< Other work in between: commands recorded, caches invalidated, memory written
+    LightShape,          ///< Another kind of draw (indexed, indirect, topology, instances, queries)
+    LightFellBack,       ///< Buffers deleted, uploaded or the render pass ended on the way
+    Count,
+};
+
+/// Categories of DrawChangeDirect / DrawChangeIndirect, the widest change that applies.
+enum class DrawChange : u32 {
+    Nothing,       ///< Draw parameters at most
+    VertexStreams, ///< Vertex stream addresses and limits
+    IndexBuffer,   ///< + index buffer start and limit
+    Uniforms,      ///< + constant buffer data or binds
+    Textures,      ///< + texture and sampler pools
+    State,         ///< + any other register (pipeline, fixed function state)
+    OtherWork,     ///< Memory written in between (inline, DMA, semaphores), other commands or engines
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -207,17 +234,17 @@ inline void Note(Histogram histogram, s64 value) {
     }
 }
 
-/// The three most frequent values of a histogram, "value x times, ...".
+/// The `shown` most frequent values of a histogram, "value x times, ...".
 template <typename Format>
-std::string TopValues(const HistogramData& data, Format&& format) {
+std::string TopValues(const HistogramData& data, Format&& format, u32 shown = 3) {
     auto slots = data.slots;
     const auto end = slots.begin() + data.used;
     std::sort(slots.begin(), end, [](const auto& a, const auto& b) { return a.second > b.second; });
     std::string text;
-    for (auto it = slots.begin(); it != end && it != slots.begin() + 3; ++it) {
+    for (auto it = slots.begin(); it != end && it != slots.begin() + shown; ++it) {
         text += fmt::format("{}{} x{}", text.empty() ? "" : ", ", format(it->first), it->second);
     }
-    if (data.used > 3 || data.dropped != 0) {
+    if (data.used > shown || data.dropped != 0) {
         text += ", ...";
     }
     return text.empty() ? "-" : text;
@@ -278,9 +305,9 @@ inline void Report(const char* thread_name = "GPU thread") {
     const auto& histograms = data.histograms;
     const auto interposer = [](s64 key) {
         // FrontIndirectDraw's key: kind << 16 | method (p: pushbuffer method, r: pushbuffer
-        // run, m: macro write, ?: an entry of another kind or engine).
-        constexpr std::array<const char*, 4> kinds{"?", "p", "r", "m"};
-        return fmt::format("{}{:#x}", kinds[static_cast<size_t>(key >> 16) & 3], key & 0xffff);
+        // run, m: macro write, c: macro call, ?: an entry of another kind or engine).
+        constexpr std::array<const char*, 8> kinds{"?", "p", "r", "m", "c", "?", "?", "?"};
+        return fmt::format("{}{:#x}", kinds[static_cast<size_t>(key >> 16) & 7], key & 0xffff);
     };
     const auto number = [](s64 value) { return fmt::format("{}", value); };
     line += fmt::format(" | indirect not merged: {:.0f} no previous, {:.0f} ring restarted, "
@@ -293,6 +320,34 @@ inline void Report(const char* thread_name = "GPU thread") {
                         TopValues(histograms[static_cast<size_t>(Histogram::IndirectStep)], number),
                         TopValues(histograms[static_cast<size_t>(Histogram::IndirectGroupStride)], number));
     line += fmt::format(" | image descriptor stages {:.0f} ({:.0f} reused)", rate(19), rate(20));
+    // EDEN_NX2_LIGHT_DRAW: per draw kind (direct/indirect), the widest change since the previous
+    // draw; then how many were set up the light way and why the others were not.
+    const auto changes = [&](DrawChange change) {
+        const size_t index = static_cast<size_t>(change);
+        return fmt::format("{:.0f}/{:.0f}",
+                           rate(static_cast<size_t>(Counter::DrawChangeDirect) + index),
+                           rate(static_cast<size_t>(Counter::DrawChangeIndirect) + index));
+    };
+    const auto counter = [&](Counter c) { return rate(static_cast<size_t>(c)); };
+    line += fmt::format(" | draw changes direct/indirect: nothing {}, vertex streams {}, + index "
+                        "buffer {}, + uniforms {}, + textures {}, + state {}, other work {}",
+                        changes(DrawChange::Nothing), changes(DrawChange::VertexStreams),
+                        changes(DrawChange::IndexBuffer), changes(DrawChange::Uniforms),
+                        changes(DrawChange::Textures), changes(DrawChange::State),
+                        changes(DrawChange::OtherWork));
+    const auto method = [](s64 value) { return fmt::format("{:#x}", value); };
+    line += fmt::format(" | light draws {:.0f} ({:.0f} indirect); full: {:.0f} not after one, "
+                        "{:.0f} state (first: {}), {:.0f} other work, {:.0f} draw kind, {:.0f} fell back",
+                        counter(Counter::LightDraws), counter(Counter::LightIndirectDraws),
+                        counter(Counter::LightNotArmed), counter(Counter::LightStateChanged),
+                        TopValues(histograms[static_cast<size_t>(Histogram::LightBlocking)], method),
+                        counter(Counter::LightOtherWork), counter(Counter::LightShape),
+                        counter(Counter::LightFellBack));
+    if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
+        line += fmt::format(" | methods between indirect draws (first 16 of each): {}",
+                            TopValues(histograms[static_cast<size_t>(Histogram::IndirectGapMethods)],
+                                      interposer, 16));
+    }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};
     data.window_start = now;

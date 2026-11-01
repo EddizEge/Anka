@@ -283,6 +283,14 @@ GraphicsPipeline::GraphicsPipeline(
         num_image_elements += Shader::NumDescriptors(info->texture_descriptors);
         num_image_elements += Shader::NumDescriptors(info->image_descriptors);
         num_descriptor_entries += NumDescriptorEntries(*info);
+        const auto any_written = [](const auto& descriptors) {
+            return std::any_of(descriptors.begin(), descriptors.end(),
+                               [](const auto& desc) { return desc.is_written; });
+        };
+        writes_memory |= info->stores_global_memory ||
+                         any_written(info->storage_buffers_descriptors) ||
+                         any_written(info->image_buffer_descriptors) ||
+                         any_written(info->image_descriptors);
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 

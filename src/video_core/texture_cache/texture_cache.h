@@ -1244,6 +1244,21 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
 }
 
 template <class P>
+bool TextureCache<P>::RenderTargetsNeedRepeat() const {
+    if (Settings::values.barrier_feedback_loops.GetValue() && last_feedback_loop_result) {
+        return true;
+    }
+    for (size_t index = 0; index < NUM_RT; ++index) {
+        if ((rt_active_mask & (1u << index)) != 0 &&
+            !slot_images[rt_image_id[index]].aliased_images.empty()) {
+            return true;
+        }
+    }
+    return (rt_active_mask & (1u << NUM_RT)) != 0 &&
+           !slot_images[rt_depth_image_id].aliased_images.empty();
+}
+
+template <class P>
 bool TextureCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     bool is_modified = false;
     ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {

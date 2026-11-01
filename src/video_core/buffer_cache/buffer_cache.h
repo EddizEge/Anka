@@ -429,6 +429,23 @@ void BufferCache<P>::UpdateGraphicsBuffers(bool is_indexed) {
 }
 
 template <class P>
+bool BufferCache<P>::UpdateGeometryBuffers(bool is_indexed) {
+    bool deleted = false;
+    do {
+        channel_state->has_deleted_buffers = false;
+        if (is_indexed) {
+            UpdateIndexBuffer();
+        }
+        UpdateVertexBuffers();
+        if (current_draw_indirect) {
+            UpdateDrawIndirect();
+        }
+        deleted |= channel_state->has_deleted_buffers;
+    } while (channel_state->has_deleted_buffers);
+    return !deleted;
+}
+
+template <class P>
 void BufferCache<P>::UpdateComputeBuffers() {
     do {
         channel_state->has_deleted_buffers = false;
