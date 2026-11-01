@@ -133,6 +133,7 @@ struct GPU::Impl {
         std::unique_lock lck{sync_request_mutex};
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
+        requested_sync_fence.store(fence, std::memory_order_release);
         return fence;
     }
 
@@ -154,6 +155,15 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        // EDEN_NX2_TICK_SKIP=0: the queue is looked at under its lock every time. This runs after
+        // every draw (~300,000 a second) and nearly always finds it empty. Every request queued so
+        // far has run when the two counts are equal (one is counted as queued before its lock is
+        // released, as run after it ran); then the lock would find nothing. A request queued
+        // meanwhile runs at the next tick, as one queued just after the lock was taken does.
+        if (tick_skip && requested_sync_fence.load(std::memory_order_acquire) ==
+                             current_sync_fence.load(std::memory_order_acquire)) {
+            return;
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
@@ -391,6 +401,13 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     u64 last_sync_fence{};
+    /// last_sync_fence, for TickWork to read without the lock (EDEN_NX2_TICK_SKIP).
+    std::atomic<u64> requested_sync_fence{};
+    /// EDEN_NX2_TICK_SKIP (default on), read once per session: no guarded static per TickWork.
+    const bool tick_skip = [] {
+        const char* value = std::getenv("EDEN_NX2_TICK_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
 
