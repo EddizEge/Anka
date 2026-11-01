@@ -141,16 +141,31 @@ public:
         return configure_uniforms_func(this, is_indexed);
     }
 
-    /// Constant buffer slots of a stage Configure reads texture handles or storage buffer
-    /// descriptors from.
-    [[nodiscard]] u32 DescriptorSlots(size_t stage) const noexcept {
-        return descriptor_slots[stage];
-    }
+    /// Kinds of the constant buffer words Configure reads descriptors from (DescriptorWord).
+    static constexpr u32 HandleWords = 1;  ///< Texture handles (read_handle)
+    static constexpr u32 StorageWords = 2; ///< Storage buffer descriptors (address and size)
 
-    /// Whether none of the GPU ranges overlaps what Configure reads from constant buffers
-    /// (handles and storage buffer descriptors, at the bound constant buffers' addresses).
-    [[nodiscard]] bool DescriptorReadsMiss(
-        std::span<const std::pair<GPUVAddr, u32>> written) const;
+    /// What CheckDescriptorWords found.
+    struct LightWords {
+        u32 rewritten{};        ///< Kinds of words the ranges overlap or in slots bound elsewhere
+        u32 changed{};          ///< Kinds of those whose value differs (all, not compared)
+        bool rebound_changed{}; ///< A word that differs lies in a slot bound elsewhere
+    };
+
+    /// EDEN_NX2_LIGHT_UNIFORM: reads again the descriptor words that the GPU ranges overlap or
+    /// that lie in a constant buffer slot bound elsewhere since (rebound: slot bits per stage)
+    /// and compares them with what the last Configure read (with compare off, or no values,
+    /// such a word counts as changed). Stops at the first word that changed.
+    [[nodiscard]] LightWords CheckDescriptorWords(std::span<const std::pair<GPUVAddr, u32>> written,
+                                                  std::span<const u32> rebound, bool compare) const;
+
+    /// Texture header and sampler pool indices the last Configure used (EDEN_NX2_LIGHT_UNIFORM).
+    [[nodiscard]] std::span<const u32> UsedTextureHeaders() const noexcept {
+        return used_tics;
+    }
+    [[nodiscard]] std::span<const u32> UsedSamplers() const noexcept {
+        return used_tscs;
+    }
 
     /// Whether the images the last Configure sampled or stored to need it again (see
     /// TextureCache::ViewsNeedRepeat); computed with EDEN_NX2_LIGHT_DRAW on.
@@ -158,14 +173,19 @@ public:
         return views_repeat;
     }
 
-    /// EDEN_NX2_LIGHT_UNIFORM=2: payload size, the first entry where two payloads differ
-    /// (DescriptorEntryCount if none) and what the last ConfigureDraw changed besides the
-    /// descriptors (1 bound the pipeline, 2 rescaling push constants, 4 render area).
+    /// EDEN_NX2_LIGHT_UNIFORM=2: payload size, the first entry from start on where two payloads
+    /// differ (DescriptorEntryCount if none; uniform: whether it holds a uniform buffer) and what
+    /// the last ConfigureDraw changed besides the descriptors (1 bound the pipeline, 2 rescaling
+    /// push constants, 4 render area).
     [[nodiscard]] u32 DescriptorEntryCount() const noexcept {
         return num_descriptor_entries;
     }
     [[nodiscard]] u32 FirstPayloadDifference(const DescriptorUpdateEntry* a,
-                                             const DescriptorUpdateEntry* b) const;
+                                             const DescriptorUpdateEntry* b, u32 start,
+                                             bool& uniform) const;
+    [[nodiscard]] bool UsesDescriptorBuffer() const noexcept {
+        return uses_descriptor_buffer;
+    }
     [[nodiscard]] u32 LastDrawChanges() const noexcept {
         return last_draw_changes;
     }
@@ -258,16 +278,23 @@ private:
     bool fragment_has_color0_output{};
     bool writes_memory{};
 
-    /// What Configure reads from constant buffers per stage and slot: texture handles and
-    /// storage buffer descriptors, as byte offsets [begin, end) (see DescriptorReadsMiss).
-    struct DescriptorRead {
-        u32 stage;
-        u32 slot;
-        u32 begin;
-        u32 end;
+    /// A constant buffer word Configure reads descriptors from, in the order ConfigureImpl reads
+    /// them: per stage the storage buffer descriptors (4 words each: address and size, see
+    /// BufferCache::StorageBufferBinding), then texture handles (texture buffers, image buffers,
+    /// textures, images; a secondary handle right after its primary). descriptor_values holds
+    /// what the last ConfigureImpl read (with EDEN_NX2_LIGHT_UNIFORM on), used_tics and used_tscs
+    /// the pool indices those handles gave.
+    struct DescriptorWord {
+        u8 stage;
+        u8 slot;
+        u8 kind; ///< HandleWords or StorageWords
+        u32 offset;
     };
-    std::vector<DescriptorRead> descriptor_reads;
-    std::array<u32, NUM_STAGES> descriptor_slots{};
+    std::vector<DescriptorWord> descriptor_words;
+    std::vector<u32> descriptor_values;
+    bool descriptor_values_valid{};
+    std::vector<u32> used_tics;
+    std::vector<u32> used_tscs;
     bool views_repeat{};
     u32 last_draw_changes{};
     std::remove_cvref_t<decltype(std::declval<const RescalingPushConstant&>().Data())>

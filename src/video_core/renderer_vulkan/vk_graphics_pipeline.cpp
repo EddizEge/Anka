@@ -329,31 +329,26 @@ GraphicsPipeline::GraphicsPipeline(
                          any_written(info->storage_buffers_descriptors) ||
                          any_written(info->image_buffer_descriptors) ||
                          any_written(info->image_descriptors);
-        // What config_stage reads from constant buffers (ConfigureImpl): storage buffer
-        // descriptors (address and size, 16 bytes) and texture handles (read_handle).
-        const auto add_read = [&](u32 slot, u32 begin, u32 end) {
-            descriptor_slots[stage] |= 1U << slot;
-            for (DescriptorRead& read : descriptor_reads) {
-                if (read.stage == stage && read.slot == slot) {
-                    read.begin = (std::min)(read.begin, begin);
-                    read.end = (std::max)(read.end, end);
-                    return;
-                }
-            }
-            descriptor_reads.push_back({static_cast<u32>(stage), slot, begin, end});
+        // The words config_stage reads from constant buffers (ConfigureImpl), in its order.
+        const auto add_word = [&](u32 slot, u32 offset, u32 kind) {
+            descriptor_words.push_back({static_cast<u8>(stage), static_cast<u8>(slot),
+                                        static_cast<u8>(kind), offset});
         };
         for (const auto& desc : info->storage_buffers_descriptors) {
-            add_read(desc.cbuf_index, desc.cbuf_offset,
-                     desc.cbuf_offset + 16 * (std::max)(desc.count, 1U));
+            for (u32 word = 0; word < 4; ++word) {
+                add_word(desc.cbuf_index, desc.cbuf_offset + word * 4, StorageWords);
+            }
         }
         const auto add_handles = [&](const auto& descriptors) {
             for (const auto& desc : descriptors) {
-                const u32 span = ((std::max)(desc.count, 1U) - 1) << desc.size_shift;
-                add_read(desc.cbuf_index, desc.cbuf_offset, desc.cbuf_offset + span + 4);
-                if constexpr (requires { desc.has_secondary; }) {
-                    if (desc.has_secondary) {
-                        add_read(desc.secondary_cbuf_index, desc.secondary_cbuf_offset,
-                                 desc.secondary_cbuf_offset + span + 4);
+                for (u32 index = 0; index < desc.count; ++index) {
+                    const u32 index_offset = index << desc.size_shift;
+                    add_word(desc.cbuf_index, desc.cbuf_offset + index_offset, HandleWords);
+                    if constexpr (requires { desc.has_secondary; }) {
+                        if (desc.has_secondary) {
+                            add_word(desc.secondary_cbuf_index,
+                                     desc.secondary_cbuf_offset + index_offset, HandleWords);
+                        }
                     }
                 }
             }
@@ -363,6 +358,7 @@ GraphicsPipeline::GraphicsPipeline(
         add_handles(info->texture_descriptors);
         add_handles(info->image_descriptors);
     }
+    descriptor_values.resize(descriptor_words.size());
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 
     DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
@@ -459,19 +455,42 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    // EDEN_NX2_LIGHT_UNIFORM: the descriptor words read here (descriptor_words' order) and the
+    // pool indices they give, which a light draw with uniforms compares with.
+    const bool capture = LightUniformMode() != 0;
+    u32* value_it = descriptor_values.data();
+    u32* const value_end = value_it + descriptor_values.size();
+    bool values_fit = true;
+    const auto capture_value{[&](u32 value) LAMBDA_FORCEINLINE {
+        if (value_it != value_end) {
+            *value_it++ = value;
+        } else {
+            values_fit = false;
+        }
+    }};
+    if (capture) {
+        used_tscs.clear();
+    }
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
+        const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
         if constexpr (Spec::has_storage_buffers) {
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
+                if (capture) {
+                    // What BufferCache::StorageBufferBinding reads: address, then size.
+                    const GPUVAddr ssbo_addr{cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                    for (u32 word = 0; word < 4; ++word) {
+                        capture_value(gpu_memory->Read<u32>(ssbo_addr + word * 4));
+                    }
+                }
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
                                                        desc.cbuf_offset, desc.is_written);
                 ++ssbo_index;
             }
         }
-        const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
         const auto read_handle{[&](const auto& desc, u32 index) {
             ASSERT(cbufs[desc.cbuf_index].enabled);
             const u32 index_offset{index << desc.size_shift};
@@ -484,14 +503,23 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
                     const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
                                                  second_offset};
-                    const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
-                    const u32 rhs_raw{gpu_memory->Read<u32>(separate_addr)
-                                      << desc.secondary_shift_left};
+                    const u32 lhs_word{gpu_memory->Read<u32>(addr)};
+                    const u32 rhs_word{gpu_memory->Read<u32>(separate_addr)};
+                    if (capture) {
+                        capture_value(lhs_word);
+                        capture_value(rhs_word);
+                    }
+                    const u32 lhs_raw{lhs_word << desc.shift_left};
+                    const u32 rhs_raw{rhs_word << desc.secondary_shift_left};
                     const u32 raw{lhs_raw | rhs_raw};
                     return TexturePair(raw, via_header_index);
                 }
             }
-            return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
+            const u32 word{gpu_memory->Read<u32>(addr)};
+            if (capture) {
+                capture_value(word);
+            }
+            return TexturePair(word, via_header_index);
         }};
         const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
             for (u32 index = 0; index < desc.count; ++index) {
@@ -517,6 +545,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             for (u32 index = 0; index < desc.count; ++index) {
                 const auto handle{read_handle(desc, index)};
                 views.push_back({handle.first});
+                if (capture) {
+                    used_tscs.push_back(handle.second);
+                }
 
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
                 samplers.push_back(sampler);
@@ -549,6 +580,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
     }
     ASSERT(views.size() == num_image_elements);
+    if (capture) {
+        used_tics.clear();
+        for (const VideoCommon::ImageViewInOut& view : views) {
+            used_tics.push_back(view.index);
+        }
+    }
+    descriptor_values_valid = capture && values_fit && value_it == value_end;
     ASSERT(samplers.size() == num_textures);
     {
         Profile::Scope scope{Profile::Zone::FillImageViews};
@@ -761,30 +799,51 @@ bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed) {
     return RecordDescriptors();
 }
 
-bool GraphicsPipeline::DescriptorReadsMiss(
-    std::span<const std::pair<GPUVAddr, u32>> written) const {
+GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
+    std::span<const std::pair<GPUVAddr, u32>> written, std::span<const u32> rebound,
+    bool compare) const {
+    // ConfigureImpl's descriptor setup is a function of these words' values (with registers,
+    // pools and images unchanged): read_handle gives TexturePair(word) (or of the two words
+    // shifted and or'ed), so the same pool indices, image views and samplers; a storage buffer
+    // binding is made from the 16 bytes at its descriptor (address, size), so the same binding.
+    // Where they hold what the last ConfigureImpl read, it would set up what it did then.
+    LightWords result;
+    const bool values = compare && descriptor_values_valid;
     const auto& stages = maxwell3d->state.shader_stages;
-    for (const DescriptorRead& read : descriptor_reads) {
-        const GPUVAddr base = stages[read.stage].const_buffers[read.slot].address;
-        const GPUVAddr begin = base + read.begin;
-        const GPUVAddr end = base + read.end;
-        for (const auto& [address, size] : written) {
-            if (address < end && begin < address + size) {
-                return false;
-            }
+    for (size_t i = 0; i < descriptor_words.size(); ++i) {
+        const DescriptorWord& word = descriptor_words[i];
+        const GPUVAddr address = stages[word.stage].const_buffers[word.slot].address + word.offset;
+        const bool moved = ((rebound[word.stage] >> word.slot) & 1) != 0;
+        bool rewritten = moved;
+        for (const auto& [begin, size] : written) {
+            rewritten |= address < begin + size && begin < address + 4;
+        }
+        if (!rewritten) {
+            continue;
+        }
+        result.rewritten |= word.kind;
+        if (!values || gpu_memory->Read<u32>(address) != descriptor_values[i]) {
+            result.changed |= word.kind;
+            result.rebound_changed = moved;
+            break;
         }
     }
-    return true;
+    return result;
 }
 
 u32 GraphicsPipeline::FirstPayloadDifference(const DescriptorUpdateEntry* a,
-                                             const DescriptorUpdateEntry* b) const {
+                                             const DescriptorUpdateEntry* b, u32 start,
+                                             bool& uniform) const {
     // Entries are compared by the member each was written through (their unions' other bytes
     // are undefined): per stage uniform and storage buffers, texture and image buffers, then
     // texture and image descriptors (DescriptorLayoutBuilder's order).
     u32 entry = 0;
+    uniform = false;
     const auto buffers = [&](u32 count, bool texel) {
         for (u32 i = 0; i < count; ++i, ++entry) {
+            if (entry < start) {
+                continue;
+            }
             const DescriptorUpdateEntry& lhs = a[entry];
             const DescriptorUpdateEntry& rhs = b[entry];
             bool same;
@@ -806,6 +865,9 @@ u32 GraphicsPipeline::FirstPayloadDifference(const DescriptorUpdateEntry* a,
     };
     const auto images = [&](u32 count) {
         for (u32 i = 0; i < count; ++i, ++entry) {
+            if (entry < start) {
+                continue;
+            }
             const VkDescriptorImageInfo& lhs = a[entry].image;
             const VkDescriptorImageInfo& rhs = b[entry].image;
             if (lhs.sampler != rhs.sampler || lhs.imageView != rhs.imageView ||
@@ -816,8 +878,11 @@ u32 GraphicsPipeline::FirstPayloadDifference(const DescriptorUpdateEntry* a,
         return true;
     };
     for (const Shader::Info& info : stage_infos) {
-        if (!buffers(Shader::NumDescriptors(info.constant_buffer_descriptors), false) ||
-            !buffers(Shader::NumDescriptors(info.storage_buffers_descriptors), false) ||
+        if (!buffers(Shader::NumDescriptors(info.constant_buffer_descriptors), false)) {
+            uniform = true;
+            return entry;
+        }
+        if (!buffers(Shader::NumDescriptors(info.storage_buffers_descriptors), false) ||
             !buffers(Shader::NumDescriptors(info.texture_buffer_descriptors), true) ||
             !buffers(Shader::NumDescriptors(info.image_buffer_descriptors), true) ||
             !images(Shader::NumDescriptors(info.texture_descriptors) +

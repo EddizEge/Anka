@@ -7,6 +7,7 @@
 #pragma once
 
 #include <climits>
+#include <span>
 #include <vector>
 
 #include "common/common_types.h"
@@ -43,6 +44,14 @@ public:
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;
     }
+
+    /// The host bytes of an upload range handed out (the stream buffer or an upload staging
+    /// buffer), by buffer and offset or by device address; empty if none holds it. Slow:
+    /// verification only (EDEN_NX2_LIGHT_UNIFORM=2).
+    [[nodiscard]] std::span<const u8> MappedBytes(VkBuffer buffer, VkDeviceSize offset,
+                                                  VkDeviceSize size) const;
+    [[nodiscard]] std::span<const u8> MappedBytesAt(VkDeviceAddress address,
+                                                    VkDeviceSize size) const;
 
     void TickFrame();
 

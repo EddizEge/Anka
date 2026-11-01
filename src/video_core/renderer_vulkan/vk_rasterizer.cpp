@@ -216,6 +216,16 @@ bool LightDrawEnabled() {
     return enabled;
 }
 
+// EDEN_NX2_LIGHT_UNIFORM_VALUES=0: a light draw with uniforms refuses any constant buffer write
+// over a descriptor word (or bind of its slot) instead of reading the word again and comparing.
+bool LightUniformValues() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_LIGHT_UNIFORM_VALUES");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 // Light draws bind index buffers as they are: no quad index pass (BindQuadIndexBuffer, quad
 // topologies) and no 8-bit index conversion.
 bool LightDrawShape(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_state,
@@ -666,30 +676,58 @@ bool RasterizerVulkan::LightUniformOk(GraphicsPipeline& pipeline, bool invalidat
         Profile::Add(Profile::Counter::LightUniformCaches, 1);
         return false;
     }
-    // A constant buffer the pipeline reads handles or storage buffer descriptors from now lies
-    // elsewhere (a bind that changed its address, size or enable).
-    for (size_t stage = 0; stage < light.rebound.size(); ++stage) {
-        if ((light.rebound[stage] & pipeline.DescriptorSlots(stage)) != 0) {
-            Profile::Add(Profile::Counter::LightUniformBinds, 1);
-            return false;
-        }
+    // The texture handles and storage buffer descriptors the pipeline reads from constant
+    // buffers: those written over, or in a slot bound elsewhere (a bind that changed its
+    // address, size or enable), must hold what the full setup read
+    // (GraphicsPipeline::CheckDescriptorWords).
+    const GraphicsPipeline::LightWords words =
+        pipeline.CheckDescriptorWords(written, light.rebound, LightUniformValues());
+    if (words.changed != 0) {
+        Profile::Add(words.rebound_changed ? Profile::Counter::LightUniformBinds
+                     : (words.changed & GraphicsPipeline::HandleWords) != 0
+                         ? Profile::Counter::LightUniformHandles
+                         : Profile::Counter::LightUniformStorage,
+                     1);
+        return false;
     }
-    // The data written over handles, storage buffer descriptors or the pools they index.
+    // The texture header and sampler pool entries those handles index (32 bytes each) must not
+    // have been written; other entries the full setup does not read.
     const auto& regs = maxwell3d->regs;
-    const auto pool_written = [&](GPUVAddr pool, u32 limit) {
-        const GPUVAddr end = pool + (u64{limit} + 1) * 32; // TIC and TSC entries: 32 bytes
+    const auto overlaps = [&](GPUVAddr begin, GPUVAddr end) {
         for (const auto& [address, size] : written) {
-            if (address < end && pool < address + size) {
+            if (address < end && begin < address + size) {
                 return true;
             }
         }
         return false;
     };
-    if (!pipeline.DescriptorReadsMiss(written) ||
-        pool_written(regs.tex_header.Address(), regs.tex_header.limit) ||
-        pool_written(regs.tex_sampler.Address(), regs.tex_sampler.limit)) {
-        Profile::Add(Profile::Counter::LightUniformDescriptors, 1);
+    const auto entries_written = [&](GPUVAddr pool, u32 limit, std::span<const u32> used) {
+        if (!overlaps(pool, pool + (u64{limit} + 1) * 32)) {
+            return false;
+        }
+        for (const u32 index : used) {
+            const GPUVAddr entry = pool + u64{index} * 32;
+            if (overlaps(entry, entry + 32)) {
+                return true;
+            }
+        }
         return false;
+    };
+    if (entries_written(regs.tex_header.Address(), regs.tex_header.limit,
+                        pipeline.UsedTextureHeaders())) {
+        Profile::Add(Profile::Counter::LightUniformTic, 1);
+        return false;
+    }
+    if (entries_written(regs.tex_sampler.Address(), regs.tex_sampler.limit,
+                        pipeline.UsedSamplers())) {
+        Profile::Add(Profile::Counter::LightUniformTsc, 1);
+        return false;
+    }
+    if ((words.rewritten & GraphicsPipeline::HandleWords) != 0) {
+        Profile::Add(Profile::Counter::LightUniformSameHandles, 1);
+    }
+    if ((words.rewritten & GraphicsPipeline::StorageWords) != 0) {
+        Profile::Add(Profile::Counter::LightUniformSameStorage, 1);
     }
     return true;
 }
@@ -698,8 +736,10 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
                                         u64 dynamic_records) {
     // The full setup must bind what the light one did and change nothing else: the same
     // pipeline (not bound again), push constants, render pass and dynamic state, and the same
-    // descriptors (uniform buffer slices are the same with EDEN_NX2_UBO_REUSE: the bytes were
-    // just streamed for the same ranges).
+    // descriptors. A uniform buffer the full setup streamed again may lie elsewhere (the
+    // direct-mapped reuse slots of EDEN_NX2_UBO_REUSE hold one size per range: a range bound to
+    // two stages with different used sizes, or two ranges in one slot, stream again); it counts
+    // as the same when it holds the same bytes.
     namespace Profile = VideoCommon::Nx2Profile;
     Profile::Add(Profile::Counter::LightUniformVerified, 1);
     std::string mismatch;
@@ -709,7 +749,33 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
     } else {
         const auto* const full = guest_descriptor_queue.UpdateData();
         const u32 entries = pipeline.DescriptorEntryCount();
-        const u32 entry = pipeline.FirstPayloadDifference(light_verify.payload.data(), full);
+        const auto bytes = [&](const DescriptorUpdateEntry& entry, VkDeviceSize& range) {
+            if (pipeline.UsesDescriptorBuffer()) {
+                range = entry.address.range;
+                return staging_pool.MappedBytesAt(entry.address.address, range);
+            }
+            range = entry.buffer.range;
+            return staging_pool.MappedBytes(entry.buffer.buffer, entry.buffer.offset, range);
+        };
+        u32 entry = 0;
+        for (;; ++entry) {
+            bool uniform;
+            entry = pipeline.FirstPayloadDifference(light_verify.payload.data(), full, entry,
+                                                    uniform);
+            if (entry == entries || !uniform) {
+                break;
+            }
+            VkDeviceSize light_range;
+            VkDeviceSize full_range;
+            const std::span<const u8> light_bytes = bytes(light_verify.payload[entry], light_range);
+            const std::span<const u8> full_bytes = bytes(full[entry], full_range);
+            if (light_range != full_range || light_bytes.empty() ||
+                light_bytes.size() != full_bytes.size() ||
+                std::memcmp(light_bytes.data(), full_bytes.data(), light_bytes.size()) != 0) {
+                break;
+            }
+            Profile::Add(Profile::Counter::LightUniformSlicesSame, 1);
+        }
         if (entry != entries) {
             std::array<u64, 3> light_words{};
             std::array<u64, 3> full_words{};

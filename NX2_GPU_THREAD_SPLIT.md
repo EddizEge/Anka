@@ -162,4 +162,29 @@ with `EDEN_NX2_UBO_REUSE` on, the default); the same push constants; no render p
 dynamic state recorded. Differences go to the log ("Light uniform draw differs from its full
 setup", first 64). The back's profile line adds "light uniform draws N (M indirect); full: memory,
 caches, binds, descriptors, fell back; verified V (W mismatches)" and the registers that first
-kept draws off this way. Built; not measured yet.
+kept draws off this way.
+
+First run (75628f3c0, wide area): 3,000-4,100 light uniform draws a second; 35,000-54,000 a second
+were refused as "descriptors" (about 92% of those that got that far): the constant buffer data
+written overlapped what the pipeline reads descriptors from. NVN rewrites the block holding the
+bound textures' handles (and storage buffer descriptors) with the data around it, mostly with the
+values already there. `=2` found no difference but uniform buffer slices: the same buffer and
+size 0x1C00 bytes further. Most likely the full setup after the light one streamed the range
+again: the reuse slots of `EDEN_NX2_UBO_REUSE` are direct-mapped and hold one size per guest
+range, and a range bound to two stages streams each stage's used size (or two ranges share a
+slot).
+
+Now the uniform way reads such words again instead of refusing: ConfigureImpl keeps the words it
+reads descriptors from (descriptor_words / descriptor_values: per stage 4 words per storage buffer
+descriptor, the address and size BufferCache::StorageBufferBinding reads, then every texture handle
+word, a secondary one after its primary) and the texture header and sampler indices they gave.
+ConfigureImpl's descriptor setup is a function of those values, the registers, the pools and the
+images (read_handle -> TexturePair -> FillImageViews / GetSamplerId; the storage binding from the
+16 bytes), so a word written over, or in a slot bound elsewhere, that holds what the last setup
+read changes nothing (GraphicsPipeline::CheckDescriptorWords). A written pool refuses only where
+the range meets an entry the draw uses (32 bytes each). The refusals are split: binds (a changed
+word in a rebound slot), handles, storage descriptors, TIC, TSC; "rewritten with the same value"
+counts the draws the comparison let through. `EDEN_NX2_LIGHT_UNIFORM_VALUES=0` refuses on any
+overlap as before. `=2` compares a uniform buffer the full setup streamed elsewhere by its bytes
+(StagingBufferPool::MappedBytes) and counts "uniform slices moved, same bytes". Built; not
+measured yet.

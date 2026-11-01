@@ -288,4 +288,57 @@ void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
     }
 }
 
+namespace {
+std::span<const u8> Within(std::span<u8> mapped, VkDeviceSize offset, VkDeviceSize size) {
+    if (offset > mapped.size() || size > mapped.size() - offset) {
+        return {};
+    }
+    return mapped.subspan(static_cast<size_t>(offset), static_cast<size_t>(size));
+}
+} // Anonymous namespace
+
+std::span<const u8> StagingBufferPool::MappedBytes(VkBuffer buffer, VkDeviceSize offset,
+                                                   VkDeviceSize size) const {
+    if (buffer == VK_NULL_HANDLE) {
+        return {};
+    }
+    if (buffer == *stream_buffer) {
+        return Within(stream_pointer, offset, size);
+    }
+    for (const StagingBuffers& level : upload_cache) {
+        for (const StagingBuffer& entry : level.entries) {
+            if (*entry.buffer == buffer) {
+                return Within(entry.mapped_span, offset, size);
+            }
+        }
+    }
+    return {};
+}
+
+std::span<const u8> StagingBufferPool::MappedBytesAt(VkDeviceAddress address,
+                                                     VkDeviceSize size) const {
+    if (address == 0) {
+        return {};
+    }
+    if (stream_buffer_address != 0 && address >= stream_buffer_address) {
+        const std::span<const u8> bytes =
+            Within(stream_pointer, address - stream_buffer_address, size);
+        if (!bytes.empty()) {
+            return bytes;
+        }
+    }
+    for (const StagingBuffers& level : upload_cache) {
+        for (const StagingBuffer& entry : level.entries) {
+            if (entry.device_address != 0 && address >= entry.device_address) {
+                const std::span<const u8> bytes =
+                    Within(entry.mapped_span, address - entry.device_address, size);
+                if (!bytes.empty()) {
+                    return bytes;
+                }
+            }
+        }
+    }
+    return {};
+}
+
 } // namespace Vulkan

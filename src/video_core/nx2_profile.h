@@ -200,11 +200,18 @@ enum class Counter : u32 {
     // Draws that could only go the uniform way but were set up in full, why:
     LightUniformMemory,      ///< Cached writes other than constant buffer data, or too many ranges
     LightUniformCaches,      ///< A write reached an image or a shader
-    LightUniformBinds,       ///< A constant buffer slot the draw reads handles or storage buffers from was bound
-    LightUniformDescriptors, ///< Constant buffer data over handles, storage buffer descriptors or TIC/TSC
+    LightUniformBinds,       ///< A descriptor word changed in a slot bound elsewhere
+    LightUniformHandles,     ///< A texture handle written with another value
+    LightUniformStorage,     ///< A storage buffer descriptor (address, size) written with another value
+    LightUniformTic,         ///< A texture header pool entry the draw uses was written
+    LightUniformTsc,         ///< A sampler pool entry the draw uses was written
     LightUniformFellBack,    ///< Image descriptors not kept, buffers uploaded or the render pass ended
+    // Draws that passed the descriptor checks with words written or rebound, same value:
+    LightUniformSameHandles,
+    LightUniformSameStorage,
     LightUniformVerified,    ///< EDEN_NX2_LIGHT_UNIFORM=2: decided light, set up in full and compared
     LightUniformMismatches,  ///< Of LightUniformVerified: the full setup differed (logged)
+    LightUniformSlicesSame,  ///< Uniform buffers the full setup streamed elsewhere, same bytes
     Count,
 };
 
@@ -382,16 +389,24 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::LightRefusedTargets),
                             counter(Counter::LightRefusedCutShort));
         line += fmt::format(" | light uniform draws {:.0f} ({:.0f} indirect); full: {:.0f} memory, "
-                            "{:.0f} caches, {:.0f} binds, {:.0f} descriptors, {:.0f} fell back; "
-                            "verified {:.0f} ({:.0f} mismatches) (first register outside: {})",
+                            "{:.0f} caches, {:.0f} binds, {:.0f} handles, {:.0f} storage "
+                            "descriptors, {:.0f} TIC, {:.0f} TSC, {:.0f} fell back; rewritten with "
+                            "the same value: {:.0f} handles, {:.0f} storage descriptors; verified "
+                            "{:.0f} ({:.0f} mismatches; {:.0f} uniform slices moved, same bytes) "
+                            "(first register outside: {})",
                             counter(Counter::LightUniformDraws),
                             counter(Counter::LightUniformIndirectDraws),
                             counter(Counter::LightUniformMemory), counter(Counter::LightUniformCaches),
                             counter(Counter::LightUniformBinds),
-                            counter(Counter::LightUniformDescriptors),
+                            counter(Counter::LightUniformHandles),
+                            counter(Counter::LightUniformStorage), counter(Counter::LightUniformTic),
+                            counter(Counter::LightUniformTsc),
                             counter(Counter::LightUniformFellBack),
+                            counter(Counter::LightUniformSameHandles),
+                            counter(Counter::LightUniformSameStorage),
                             counter(Counter::LightUniformVerified),
                             counter(Counter::LightUniformMismatches),
+                            counter(Counter::LightUniformSlicesSame),
                             TopValues(histograms[static_cast<size_t>(Histogram::LightUniformBlocking)],
                                       method, 6));
     }
