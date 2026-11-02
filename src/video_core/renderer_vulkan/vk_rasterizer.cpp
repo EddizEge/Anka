@@ -2335,6 +2335,12 @@ void RasterizerVulkan::WaitForIdleRecord() {
 }
 
 void RasterizerVulkan::FragmentBarrier() {
+    if (SplitOnB()) [[unlikely]] {
+        // C's (the scheduler).
+        NoteLightWork();
+        StageToC([this] { FragmentBarrier(); });
+        return;
+    }
     NoteLightWork();
     // We already put barriers when a render pass finishes
     scheduler.RequestOutsideRenderPassOperationContext();
@@ -2345,6 +2351,12 @@ void RasterizerVulkan::TiledCacheBarrier() {
 }
 
 void RasterizerVulkan::FlushCommands() {
+    if (SplitOnB()) [[unlikely]] {
+        // C's (its draw counter and the scheduler).
+        NoteLightWork();
+        StageToC([this] { FlushCommands(); });
+        return;
+    }
     NoteLightWork();
     if (draw_counter == 0) {
         return;
