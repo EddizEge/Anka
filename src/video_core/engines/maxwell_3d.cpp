@@ -1447,17 +1447,35 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         // still holds in its method sink first).
         VideoCommon::Nx2Profile::CountDrain(split,
                                             VideoCommon::Nx2Profile::DrainSite::Front3DOther);
-        ConsumeSink(system);
+        const bool staged = stage_capture != nullptr;
+        if (!staged) {
+            ConsumeSink(system);
+        }
         front = std::make_unique<FrontState>();
         std::memcpy(front->regs.data(), regs.reg_array.data(), sizeof(front->regs));
         std::memcpy(front->shadow.data(), shadow_state.reg_array.data(), sizeof(front->shadow));
         front->control = shadow_state.shadow_ram_control;
+        if (staged) [[unlikely]] {
+            // Staged (T2, R1 sahiplik-2): the sink's writes go to the capture and ring 2, and a
+            // deferred instanced draw they issue to the proxy, all A's: A consumes it, before
+            // anything sent after this. The copy holds them already.
+            using Control = Regs::ShadowRamControl;
+            VideoCommon::Nx2RegReplica::SinkInto(
+                front->regs.data(), front->shadow.data(),
+                front->control == Control::Track || front->control == Control::TrackWithFilter,
+                front->control == Control::Replay, method_sink);
+        }
         front->skip_same = SkipSameValueWrites() && FrontSkipSame();
         front->executing_macro = executing_macro;
         front->parameters = std::move(macro_params);
         macro_params.clear();
         executing_macro = 0;
         front_macros = true;
+        if (staged) [[unlikely]] {
+            // Last: A may run it at once, and the front has read the primary.
+            split.DeferTo<VideoCommon::DeferTarget::OnA>(
+                [this, system_ptr = &system] { ConsumeSink(*system_ptr); });
+        }
     }
     return *front;
 }
