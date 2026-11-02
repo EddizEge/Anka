@@ -44,7 +44,8 @@ constexpr u32 DeltaValue(u64 word) {
 
 /// A's register capture: the Maxwell3D writes since the last record A sent, one word per register
 /// (its last value, Dirty and Changed ORed over its writes), in the order of their first writes.
-/// Maxwell3D's stage_capture points at it while staged (Nx2Stages::Capture, nx2_stage_api.h).
+/// Maxwell3D's stage_capture points at it while staged (Nx2Stages::Capture, nx2_stage_api.h);
+/// Maxwell3D's hooks test stage_capture, not Nx2Stages::Active() (K1: =3 stages no channel).
 class RegCapture {
 public:
     /// ProcessDirtyRegisters' write, made after its DrawDeferred (S18). Writes

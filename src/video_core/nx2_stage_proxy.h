@@ -98,14 +98,15 @@ private:
     VideoCore::RasterizerInterface& real;
 };
 
-/// Start (nothing runs behind the front): makes the proxy for `real` and stages every channel the
-/// GPU has, not only the bound one (StageChannel; S3). T5 enumerates them (Control::Scheduler's
-/// channels).
+/// Start at =1 and =2, never at =3 (K1; nothing runs behind the front): makes the proxy for
+/// `real` and stages every channel the GPU has, not only the bound one (StageChannel; S3). T5
+/// enumerates them (Control::Scheduler's channels).
 void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real);
 /// Stop (the stages stopped): unstages every channel, frees the proxy.
 void UninstallProxy(Core::System& system);
-/// The proxy while installed, else null: a channel bound first after Start is staged in its
-/// BindChannel join (S3).
+/// The proxy while installed (=1 and =2, Start to Stop), else null (stages off, =3). A channel
+/// bound first after Start is staged in its BindChannel join (S3). The front tags BindChannel as
+/// before (Defer, the same thunk) while it is null (T5, K1).
 Nx2StageProxy* Proxy();
 
 } // namespace VideoCommon::Nx2Stages

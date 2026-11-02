@@ -27,11 +27,15 @@ class RegCapture;
 // Back stages: what the stages need of the channels and Maxwell3D between them (S14). Owner of
 // the bodies: T2 (nx2_stage_api.cpp, maxwell_3d.*, control/channel_state*); callers: T1, T5, the
 // integration. A channel is staged when it has its replicas and its engines' rasterizer is the
-// proxy.
+// proxy; only at =1 and =2 (at =3 none is, K1). Maxwell3D's stage hooks (ProcessDirtyRegisters'
+// Note, ProcessCBMultiData's PostCbData, ProcessQueryCondition's join) test its stage_capture:
+// set, it is a staged primary, which only A runs; never Nx2Stages::Active() (K1: at =3 BC runs the
+// unstaged primaries with GpuSplit::Execute).
 namespace VideoCommon::Nx2Stages {
 
 /// Whether the channel is staged. Any thread (acquire): the front tags BindChannel's deferral
-/// with it (T5: Join when not staged or another channel, Owner otherwise; S3, S9/1).
+/// with it (T5: Join when not staged or another channel, Owner otherwise; S3, S9/1; while
+/// Proxy() is null, stages off or =3, the deferral of today, K1).
 bool ChannelStaged(const Tegra::Control::ChannelState& channel);
 
 /// Stages parked (Start, or A in a join for a channel bound first after Start, S3): makes the

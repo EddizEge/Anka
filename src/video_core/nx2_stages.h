@@ -38,7 +38,8 @@ enum class Role : u8 { Memory, Record };
 
 struct Config {
     /// EDEN_NX2_BACK_STAGES: 0 off, 1 on, 2 verify (lockstep, depth 1, replicas compared),
-    /// 3 pass-through (A forwards ring 1 ranges for BC to run with GpuSplit::Execute)
+    /// 3 pass-through (A forwards ring 1 ranges for BC to run with GpuSplit::Execute; no channel
+    /// is staged and the proxy is not installed: BC runs the primaries as the unstaged back, K1)
     u8 mode{};
     bool cut_a{};        ///< EDEN_NX2_BACK_CUTS holds 'a' (default with mode != 0: "a" in K1)
     bool cut_c{};        ///< ... holds 'c' (K2)
@@ -58,7 +59,9 @@ inline thread_local u8 t_stage = NoStage;
 inline thread_local bool t_in_join{};
 } // namespace Detail
 
-/// Whether the stages run (Start to Stop). Any thread.
+/// Whether the stages run (Start to Stop), =3 included. Any thread. What depends on staged
+/// channels tests them, never Active() alone (K1): Maxwell3D's hooks its stage_capture
+/// (nx2_stage_api.h), the front's BindChannel tag ChannelStaged and Proxy() (nx2_stage_proxy.h).
 inline bool Active() {
     return Detail::g_active.load(std::memory_order_relaxed);
 }
@@ -178,14 +181,17 @@ void CheckStage(Stage stage, const char* where);
 Stage RecordOwner();
 
 /// GpuSplit::MaybeStart, before the back thread starts (nothing runs behind the front): when
-/// Get().mode != 0, makes the rings, starts B (and C), installs the proxy and stages every channel
-/// (InstallProxy, S3); Active() is true from here on and the back thread runs A (RunStagedBack).
-/// The real rasterizer's NoteEngineWork: no light draw follows one from before (S18).
+/// Get().mode != 0, makes the rings and starts B (and C); at =1 and =2 it also installs the proxy
+/// and stages every channel (InstallProxy, S3), at =3 neither (K1: BC runs the primaries with
+/// GpuSplit::Execute, a staged channel's hooks would send records from BC to its own ring and its
+/// caches would read replicas no delta reaches). Active() is true from here on and the back
+/// thread runs A (RunStagedBack). The real rasterizer's NoteEngineWork: no light draw follows one
+/// from before (S18).
 void Start(Core::System& system);
 /// GpuSplit::Stop, after the back thread (A) stopped: B and C run what they hold and stop (at
 /// shutdown, with the stop request alone, they stop without it: NotifyShutdown, gpu_thread.cpp),
-/// the channels are unstaged (UninstallProxy), the rings freed, NoteEngineWork as at Start;
-/// Active() false.
+/// the channels are unstaged (UninstallProxy, =1 and =2), the rings freed, NoteEngineWork as at
+/// Start; Active() false.
 void Stop();
 
 } // namespace VideoCommon::Nx2Stages
