@@ -10,6 +10,7 @@
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/nx2_event_diag.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc_results.h"
 
@@ -37,7 +38,15 @@ Result ResetSignal(Core::System& system, Handle handle) {
     {
         KScopedAutoObject readable_event = handle_table.GetObject<KReadableEvent>(system.Kernel(), handle);
         if (readable_event.IsNotNull()) {
-            R_RETURN(readable_event->Reset(system.Kernel()));
+            const Result result = readable_event->Reset(system.Kernel());
+            // EDEN_NX2_VI2_DIAG: resets of the vi2 events.
+            if (Nx2EventDiag::Any()) {
+                if (const int slot = Nx2EventDiag::Find(readable_event.GetPointerUnsafe()); slot >= 0) {
+                    Nx2EventDiag::Record(slot, GetCurrentThread(system.Kernel()), Nx2EventDiag::Op::Reset,
+                                         R_SUCCEEDED(result));
+                }
+            }
+            R_RETURN(result);
         }
     }
 
@@ -96,6 +105,17 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
 
     // Wait on the objects.
     Result res = KSynchronizationObject::Wait(system.Kernel(), out_index, objs.data(), num_handles, timeout);
+
+    // EDEN_NX2_VI2_DIAG: polls (a zero timeout) and waits on the vi2 events.
+    if (Nx2EventDiag::Any()) {
+        for (int32_t i = 0; i < num_handles; ++i) {
+            if (const int slot = Nx2EventDiag::Find(objs[i]); slot >= 0) {
+                Nx2EventDiag::Record(slot, GetCurrentThread(system.Kernel()),
+                                     timeout_ns == 0 ? Nx2EventDiag::Op::Poll : Nx2EventDiag::Op::Wait,
+                                     R_SUCCEEDED(res) && *out_index == i);
+            }
+        }
+    }
 
     R_SUCCEED_IF(res == ResultSessionClosed);
     R_RETURN(res);

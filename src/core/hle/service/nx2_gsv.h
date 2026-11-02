@@ -68,6 +68,7 @@
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/arm/debug.h"
 #include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/nx2_event_diag.h"
 #include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
@@ -1010,6 +1011,9 @@ public:
         // its lock first (it holds the state, not this session), then close the events.
         {
             std::scoped_lock lk{m_vsync->mutex};
+            for (const auto& tracked : m_vsync->events) {
+                Kernel::Nx2EventDiag::Untrack(tracked.calls_slot);
+            }
             m_vsync->events.clear();
         }
         if (m_vsync_timer) {
@@ -1040,8 +1044,10 @@ private:
     // (with a backtrace unless EDEN_NX2_IPC_TRACE traces it anyway) when Bananza was never seen
     // sending it; (b) the handle each 11/31/32 reply carries and the event behind it; (c) the
     // notification flow: Notify, 21's handed-over bits; (d) every 10 s, per event: signals, clears
-    // by the guest (signalled at one vblank, no longer at the next: a thread consumed it, a
-    // 0-timeout poll included) and the threads seen waiting on it.
+    // by the guest (signalled at one vblank, no longer at the next: a thread consumed it), the
+    // threads seen waiting on it at a vblank, and each guest thread's calls on it
+    // (Kernel::Nx2EventDiag: polls with a zero timeout, waits, resets, clears, how many found it
+    // signalled).
     static bool Vi2DiagEnabled() {
         static const bool enabled = [] {
             const char* text = std::getenv("EDEN_NX2_VI2_DIAG");
@@ -2200,6 +2206,7 @@ private:
                 tracked.event = m_notification_event;
                 tracked.on_vsync = false;
                 tracked.name = fmt::format("{} (11)", name);
+                tracked.calls_slot = Kernel::Nx2EventDiag::Track(&m_notification_event->GetReadableEvent());
             }
         }
         if (Vi2DiagEnabled()) {
@@ -2571,6 +2578,7 @@ private:
             tracked.on_vsync = mode == Nx2Vi2Events::KindMode::Vsync;
             if (Vi2DiagEnabled()) {
                 tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
+                tracked.calls_slot = Kernel::Nx2EventDiag::Track(&event->GetReadableEvent());
                 m_diag_event = event;
             }
         }
@@ -2616,6 +2624,7 @@ private:
             u32 handle{};
             bool was_signalled{}; // after the previous vblank
             bool handing_over{};  // 21 is clearing it
+            int calls_slot{-1};   // Kernel::Nx2EventDiag: the guest's polls, waits and resets
             u32 signalled{};
             u32 cleared{};       // by the guest: signalled at one vblank, not at the next
             u32 handed_over{};   // 21 (GetNotifications) cleared it
@@ -2715,11 +2724,12 @@ private:
                 waiters += fmt::format("{}{} {:#x}", waiters.empty() ? "" : ", ", thread_name, id);
             }
             text += fmt::format("; {} handle {:#x} {}: signalled {}, cleared by the guest {}{}, "
-                                "waited on at {} vblanks{}",
+                                "waited on at {} vblanks{}, guest calls: {}",
                                 tracked.name, tracked.handle, tracked.on_vsync ? "on vblanks" : "not on vblanks",
                                 tracked.signalled, tracked.cleared,
                                 tracked.handed_over != 0 ? fmt::format(", handed over by 21 {}", tracked.handed_over) : "",
-                                tracked.waited, waiters.empty() ? "" : fmt::format(" (ever: {})", waiters));
+                                tracked.waited, waiters.empty() ? "" : fmt::format(" (ever: {})", waiters),
+                                Kernel::Nx2EventDiag::Take(tracked.calls_slot));
             tracked.signalled = 0;
             tracked.cleared = 0;
             tracked.handed_over = 0;
