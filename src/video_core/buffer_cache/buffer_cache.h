@@ -971,6 +971,26 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const u32 index = std::countr_zero(enabled_mask);
             enabled_mask &= (enabled_mask - 1);
             // index is a bit of the u32 enabled_vertex_buffers_mask: below v_buffer's 32.
+            // EDEN_NX2_LIGHT_SYNC_SKIP: a plain light draw's clean stream binds what the draw
+            // before bound, synchronized and touched (this frame, no memory written since but
+            // the same bytes): nothing to do for it, as below where the flag is clean.
+            if (plain_light_draw && !flags[Dirty::VertexBuffer0 + index]) {
+                if (g_nx2_light_sync_skip == 2) {
+                    const Binding& clean = v_buffer[index];
+                    if (!SynchronizeBuffer(slot_buffers[clean.buffer_id], clean.device_addr,
+                                           clean.size)) {
+                        static u32 reported{};
+                        if (reported++ < 16) {
+                            LOG_ERROR(HW_GPU,
+                                      "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain light "
+                                      "draw uploaded",
+                                      index);
+                        }
+                    }
+                }
+                flush_bindings();
+                continue;
+            }
             const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
@@ -1622,6 +1642,34 @@ void BufferCache<P>::UpdateVertexBuffers() {
     flags[Dirty::VertexBuffers] = false;
 
     const bool vertex_skip = VertexSkipEnabled();
+    if (g_nx2_vertex_clean == 2) {
+        // A cleaned stream must stay disabled until one of its registers is written. Checked
+        // where the streams are resolved again (Dirty::VertexBuffers set): what =0 would resolve
+        // here and =1 no longer does.
+        const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+        for (u32 mask = vertex_clean_mask; mask != 0; mask &= mask - 1) {
+            const u32 index = static_cast<u32>(std::countr_zero(mask));
+            if (flags[Dirty::VertexBuffer0 + index]) {
+                vertex_clean_mask &= ~(1u << index);
+                continue;
+            }
+            const auto& array = maxwell3d->regs.vertex_streams[index];
+            const GPUVAddr begin = array.Address();
+            const GPUVAddr end =
+                native ? begin + maxwell3d->regs.NativeVertexStreamSize(index)
+                       : maxwell3d->regs.vertex_stream_limits[index].Address() + 1;
+            if (array.enable != 0 && static_cast<u32>(end - begin) != 0) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU,
+                              "EDEN_NX2_VERTEX_CLEAN: stream {} enabled without its dirty flag",
+                              index);
+                }
+                flags[Dirty::VertexBuffer0 + index] = true;
+                vertex_clean_mask &= ~(1u << index);
+            }
+        }
+    }
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
         // Clean streams cost a flag test here instead of a call each.
         if (!vertex_skip || flags[Dirty::VertexBuffer0 + index]) {
@@ -1654,6 +1702,14 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         if (array.enable == 0 || static_cast<u32>(gpu_addr_end - gpu_addr_begin) == 0) {
             channel_state->vertex_buffers[index] = NULL_BINDING;
             UpdateVertexBufferSlot(index, NULL_BINDING);
+            // EDEN_NX2_VERTEX_CLEAN: a function of this stream's registers only (enable, address,
+            // limit or native size), all in its dirty block: nothing to resolve again until one
+            // is written. Disabled streams are never bound (BindHostVertexBuffers), so nothing
+            // else clears this flag.
+            if (g_nx2_vertex_clean != 0) {
+                maxwell3d->dirty.flags[Dirty::VertexBuffer0 + index] = false;
+                vertex_clean_mask |= 1u << index;
+            }
             return;
         }
         // With accurate GPU fences FindBuffer also synchronizes the buffer's writes.

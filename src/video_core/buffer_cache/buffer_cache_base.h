@@ -64,6 +64,30 @@ inline const bool g_nx2_vertex_fast = [] {
     const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
     return value == nullptr || value[0] != '0';
 }();
+/// EDEN_NX2_VERTEX_CLEAN (with EDEN_NX2_VERTEX_SKIP): a stream its registers disable (enable bit
+/// clear or an empty range) is resolved to NULL_BINDING once and its VertexBuffer<n> flag cleared.
+/// BindHostVertexBuffers visits enabled streams only, so that flag was never cleared before and
+/// every draw with Dirty::VertexBuffers set resolved each disabled stream again (~18 of 32 a draw
+/// in title 4). Those registers are in the stream's dirty block (dirty_flags.cpp), so writing any
+/// of them sets the flag again; InvalidateCommandBufferState does too.
+/// =0 as before; =2 also checks, each time the streams are resolved again, that no cleaned stream
+/// got enabled without its flag (logs "EDEN_NX2_VERTEX_CLEAN: stream N enabled without its dirty
+/// flag", first 16, and resolves it).
+inline const int g_nx2_vertex_clean = [] {
+    const char* value = std::getenv("EDEN_NX2_VERTEX_CLEAN");
+    return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
+}();
+/// EDEN_NX2_LIGHT_SYNC_SKIP: in a plain light draw (RasterizerVulkan::TryLightDraw: nothing but
+/// stream/index/draw registers changed, no memory changed but same-byte constant buffer writes,
+/// same frame) an enabled stream whose flag is clean keeps the binding the draw before
+/// synchronized and touched; BindHostVertexBuffers skips its TouchBuffer and SynchronizeBuffer.
+/// =0 as before; =2 synchronizes them anyway and logs any that uploaded ("EDEN_NX2_LIGHT_SYNC_SKIP:
+/// clean stream N of a plain light draw uploaded"; same-byte constant buffer writes over vertex
+/// data can upload the bytes the buffer holds, the only expected case).
+inline const int g_nx2_light_sync_skip = [] {
+    const char* value = std::getenv("EDEN_NX2_LIGHT_SYNC_SKIP");
+    return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
+}();
 
 using BufferId = Common::SlotId;
 
@@ -413,6 +437,11 @@ public:
     Runtime& runtime;
     bool any_buffer_uploaded = false;
     bool written_since_indirect = false; ///< See TakeIndirectBarrier
+    /// EDEN_NX2_LIGHT_SYNC_SKIP: set by the rasterizer around a plain light draw's
+    /// BindHostGeometryBuffers only.
+    bool plain_light_draw = false;
+    /// EDEN_NX2_VERTEX_CLEAN=2: streams whose flag UpdateVertexBuffer cleared as disabled.
+    u32 vertex_clean_mask = 0;
 
 private:
     template <typename Func>

@@ -1159,7 +1159,11 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         Profile::Add(Profile::Counter::LightFellBack, 1);
         return false;
     }
+    // EDEN_NX2_LIGHT_SYNC_SKIP: plain here (checked above): the anchor chain synchronized every
+    // enabled stream after the last memory change; only streams flagged dirty bind anew.
+    buffer_cache.plain_light_draw = VideoCommon::g_nx2_light_sync_skip != 0;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    buffer_cache.plain_light_draw = false;
     // An upload needs ConfigureImpl's barrier after it and ends the render pass.
     if (buffer_cache.any_buffer_uploaded || !scheduler.IsRenderPassActive()) {
         Profile::Add(Profile::Counter::LightFellBack, 1);
