@@ -161,6 +161,7 @@ inline Params ReadParams() {
     number("EDEN_NX2_MODE_PACE_VERIFY60", p.verify60_s, 0.0, 60.0);
     number("EDEN_NX2_MODE_PACE_STABLE60", p.stable60_s, 10.0, 600.0);
     number("EDEN_NX2_MODE_PACE_TO30", p.to30_ms, 15.0, 33.0);
+    number("EDEN_NX2_MODE_PACE_VERIFY30", p.verify30_s, 0.0, 60.0);
     number("EDEN_NX2_MODE_PACE_UP20_DWELL", p.up20_dwell_s, 0.5, 10.0);
     number("EDEN_NX2_MODE_PACE_AFTER_UP20", p.after_up20_s, 0.0, 60.0);
     number("EDEN_NX2_MODE_PACE_HOLD", p.hold_ms, 34.5, 60.0);
@@ -223,8 +224,10 @@ inline std::string Ms(double value) {
 }
 
 struct State {
-    State(const Params& params, std::optional<Probe> probe) : controller{params, probe} {}
+    State(const Params& params_, std::optional<Probe> probe)
+        : params{params_}, controller{params_, probe} {}
 
+    Params params;
     std::mutex mutex;
     Controller controller;
     Meter meter;
@@ -248,20 +251,21 @@ inline State& GetState() {
         const Params p = ReadParams();
         const std::optional<Probe> probe = ReadProbe();
         LOG_INFO(HW_GPU,
-                 "nx2 mode pace: on (from60 {}, self60 {}, to60 {} over {} s, to30 {} over {} s, "
-                 "hold {}/{}/{} ms, frames {}/{}/{}, spin {} us, auto {}, 60 {}, to20 {}, probe "
-                 "{}); up20's hold climbs {} ms every {} presents to {}, rests {}/{}/{} s doubling "
-                 "(at most {}/{}/{}), {}/{}/{} tries, quiet {} s at 60 and {} s else, stall {} ms",
+                 "nx2 mode pace: on (from60 {}, self60 {}, to60 {} over {} s, to30 {} over {} s "
+                 "verified over {} s, hold {}/{}/{} ms, frames {}/{}/{}, spin {} us, auto {}, 60 "
+                 "{}, to20 {}, probe {}); up20's hold climbs {} ms every {} presents to {}, rests "
+                 "{}/{}/{} s doubling (at most {}/{}/{}), {}/{}/{} tries, quiet {} s at 60 and {} "
+                 "s else, stall {} ms",
                  p.from60_ms, p.self60_ms, p.to60_ms, p.up_dwell_s, p.to30_ms, p.up20_dwell_s,
-                 p.hold_ms, p.hold_late_ms, p.hold20_ms, p.down_frames, p.up_frames,
+                 p.verify30_s, p.hold_ms, p.hold_late_ms, p.hold20_ms, p.down_frames, p.up_frames,
                  p.up20_frames, SpinUs(), p.auto_push ? 1 : 0, p.allow60 ? 1 : 0, p.to20 ? 1 : 0,
                  probe ? fmt::format("{}:{}", probe->cycle ? "cycle" : PushName(probe->kind),
                                      probe->every_s)
                        : std::string{"-"},
                  p.hold20_step_ms, p.hold20_step_frames, p.hold20_max_ms, p.down_rest_s,
-                 p.up_rest_s, p.up20_rest_s, p.down_rest_max_s, p.up_rest_max_s,
-                 p.up20_rest_max_s, p.down_tries, p.up_tries, p.up20_tries, p.mode_quiet60_s,
-                 p.mode_quiet_s, p.stall_ms);
+                 p.up_rest_s, p.up20_rest_s, p.down_rest_max_s, p.up_rest_max_s, p.up20_rest_max_s,
+                 p.down_tries, p.up_tries, p.up20_tries, p.mode_quiet60_s, p.mode_quiet_s,
+                 p.stall_ms);
         return State{p, probe};
     }();
     return state;
@@ -342,17 +346,27 @@ inline void Present(u32 mode, std::chrono::steady_clock::time_point entered,
         ++s.gaps30;
         s.late_gaps30 += gap_ms >= 34.0 ? 1 : 0;
     }
+    // The rest, tries, aborts and block of a failed push (probe pushes have none).
+    const auto backoff = [&out] {
+        return fmt::format(" (rest {:.0f} s, tries {}, aborted {}{})", out.rest_s, out.tries,
+                           out.aborts,
+                           out.blocked ? ", blocked until the game changes its mode itself" : "");
+    };
     if (out.ended != Push::None) {
-        if (out.result == Result::GaveUp || out.result == Result::Other) {
-            LOG_INFO(HW_GPU,
-                     "nx2 mode pace: end {} {} after {} presents, game mode {} (rest {:.0f} s, "
-                     "tries {}{})",
-                     PushName(out.ended), ResultName(out.result), out.frames, mode, out.rest_s,
-                     out.tries, out.blocked ? ", blocked until the game changes its mode itself" : "");
-        } else {
-            LOG_INFO(HW_GPU, "nx2 mode pace: end {} {} after {} presents, game mode {}",
-                     PushName(out.ended), ResultName(out.result), out.frames, mode);
+        const bool failed = out.result == Result::GaveUp || out.result == Result::Other ||
+                            out.result == Result::Aborted;
+        std::string detail;
+        if (failed && out.ended == Push::To20) {
+            detail = fmt::format(" (rest {:.0f} s)", out.rest_s);
+        } else if (failed && (out.tries != 0 || out.aborts != 0)) {
+            detail = backoff();
         }
+        LOG_INFO(HW_GPU, "nx2 mode pace: end {} {} after {} presents, game mode {}{}",
+                 PushName(out.ended), ResultName(out.result), out.frames, mode, detail);
+    }
+    if (out.unverified != Push::None) {
+        LOG_INFO(HW_GPU, "nx2 mode pace: {} did not last: game mode {} by itself within {} s{}",
+                 PushName(out.unverified), mode, s.params.verify30_s, backoff());
     }
     if (out.mode_changed) {
         std::string gaps;

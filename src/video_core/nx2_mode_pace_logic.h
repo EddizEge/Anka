@@ -32,12 +32,16 @@ namespace VideoCommon::Nx2ModePace {
 //  - 60 -> 30 ("down") while from60_ms < K < self60_ms (from self60_ms on the game drops itself);
 //  - 30 -> 60 ("up") while K <= to60_ms, after up_dwell_s of it;
 //  - 20 -> 30 ("up20") while K <= to30_ms;
-//  - 30 -> 20 ("to20", experimental, off): two frames of to20_ms when the game keeps escaping to 60.
+//  - 30 -> 20 ("to20", experimental, off): two frames of to20_ms when the game keeps escaping
+//  to 60.
 // K = max(median work, median busy) over the last 16 frames without a stall: the work is the frame
 // period without Eden's pacing, the busy time the GPU pipeline's (at 30 the work misses the split's
 // back thread: ~12 ms of work against ~22 ms busy). A push ends when the game changes its mode, or
 // after its frames (then the next one of its kind waits a rest that doubles with each failure, and
-// after `tries` failures none until the game changes its mode by itself), or at a stall.
+// after `tries` failures none until the game changes its mode by itself), or at a stall (aborted:
+// a rest that doubles too, but no block: a load's stalls would otherwise block the push the stuck
+// 60 after it needs). An up20 push whose 30 the game leaves by itself within verify30_s failed as
+// well, and that change keeps its tries (else 20 -> 30 -> 20 goes round with nothing growing).
 
 enum class Push : u8 { None, Down, Up, Up20, To20 };
 enum class Result : u8 { None, Done, Done20, GaveUp, Aborted, Other };
@@ -81,12 +85,14 @@ struct Params {
     double self60_ms = 34.0;  ///< at 60, K at or above this: no push (the game drops itself)
     double down_dwell_s = 0.5;
     double to60_ms = 13.0;    ///< at 30, K at or below this: up
-    double up_dwell_s = 5.0;  ///< base; doubles when 60 does not last verify60_s
+    double up_dwell_s = 5.0;  ///< base; doubles (once a push) when 60 does not last verify60_s,
+                              ///< halves back every stable60_s without that
     double up_dwell_max_s = 60.0;
     double verify60_s = 10.0;
     double stable60_s = 60.0; ///< this long at 60: up_dwell_s back to its base
-    double to30_ms = 28.0;    ///< at 20, K at or below this: up20
+    double to30_ms = 25.0;    ///< at 20, K at or below this: up20 (O1: 30 kept at 20's 19.6-24.3)
     double up20_dwell_s = 2.0;
+    double verify30_s = 10.0;   ///< the game leaving 30 by itself this soon after up20: it failed
     double after_up20_s = 10.0; ///< no up push this long after up20 succeeded
     double hold_ms = 42.0;      ///< down (first stage) and up
     double hold_late_ms = 46.0; ///< down, second stage
@@ -125,13 +131,27 @@ struct Probe {
     double every_s{};
 };
 
+/// `text` without the spaces and tabs around it (a .bat's `set X=cycle:10 ` keeps the space).
+constexpr std::string_view Trim(std::string_view text) {
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    while (!text.empty() && space(text.front())) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && space(text.back())) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+/// The probe's interval counts from the end of the previous push (of any kind).
 inline std::optional<Probe> ParseProbe(std::string_view text) {
+    text = Trim(text);
     const std::size_t colon = text.find(':');
     if (colon == std::string_view::npos) {
         return std::nullopt;
     }
-    const std::string_view kind = text.substr(0, colon);
-    const std::string_view number = text.substr(colon + 1);
+    const std::string_view kind = Trim(text.substr(0, colon));
+    const std::string_view number = Trim(text.substr(colon + 1));
     Probe probe{};
     if (kind == "down") {
         probe.kind = Push::Down;
@@ -242,9 +262,13 @@ struct Output {
     bool by_probe{};
     Push ended{Push::None};
     Result result{Result::None};
-    u32 frames{};    ///< presents the ended push lasted
+    u32 frames{}; ///< presents the ended push lasted (both stages of a down push)
+    /// An up20 push that ended done, whose 30 the game left by itself within verify30_s: failed
+    /// after all (rest_s, tries, aborts and blocked are its).
+    Push unverified{Push::None};
     double rest_s{}; ///< at a failed end: the rest before the next push of its kind
-    u32 tries{};     ///< failures in a row of that kind
+    u32 tries{};     ///< failures in a row of that kind (not counting aborts)
+    u32 aborts{};    ///< aborted pushes in a row of that kind (a rest, no block)
     bool blocked{};  ///< no push of that kind until the game changes its mode by itself
     bool mode_changed{};
     u32 old_mode{};
@@ -292,11 +316,24 @@ public:
         up.Tick(dt);
         up20.Tick(dt);
         to20_rest = (std::max)(to20_rest - dt, 0.0);
+        if (up_dwell > params.up_dwell_s && clock - up_dwell_at >= params.stable60_s) {
+            // Not raised for a while (also at 30, where it waits): halve it back.
+            up_dwell = (std::max)(up_dwell / 2.0, params.up_dwell_s);
+            up_dwell_at = clock;
+        }
+        if (verify30 && since_up20 >= params.verify30_s) {
+            // The up20 push's 30 lasted: done after all.
+            verify30 = false;
+            up20.Reset();
+        }
 
         // 1. The game changed its mode.
         if (in.mode != mode) {
             out.change_k_ms = Cost(MinSamples);
             const Push by = push;
+            // The game leaves the 30 an up20 push took it to (the end below may start a trial).
+            const bool on_trial = mode == 2 && verify30 && since_up20 < params.verify30_s;
+            verify30 = false;
             if (push != Push::None) {
                 End(out, ResultOnMode(push, in.mode));
             }
@@ -306,12 +343,23 @@ public:
                 }
                 if (mode == 1 && in.mode == 2 && clock - up_done_at < params.verify60_s) {
                     // 60 did not last after an up push: wait longer before the next one.
-                    up_dwell = (std::min)(up_dwell * 2.0, params.up_dwell_max_s);
+                    RaiseUpDwell();
+                }
+                bool keep_up20 = false;
+                if (on_trial) {
+                    // 30 did not last after an up20 push: that push failed, and this change
+                    // leaves its tries alone.
+                    up20.Fail(params.up20_rest_s, params.up20_rest_max_s, params.up20_tries, false);
+                    out.unverified = Push::Up20;
+                    Report(out, up20);
+                    keep_up20 = true;
                 }
                 // Only the game's own change lifts the rests and blocks (not Eden's pushes).
                 down.Reset();
                 up.Reset();
-                up20.Reset();
+                if (!keep_up20) {
+                    up20.Reset();
+                }
             }
             out.mode_changed = true;
             out.old_mode = mode;
@@ -345,13 +393,11 @@ public:
             ++frames;
             switch (push) {
             case Push::Down:
-                if (frames >= params.down_frames) {
-                    if (stage == 0) {
-                        stage = 1;
-                        frames = 0;
-                    } else {
-                        End(out, Result::GaveUp);
-                    }
+                // frames counts both stages (the log's "after N presents").
+                if (frames >= params.down_frames * 2) {
+                    End(out, Result::GaveUp);
+                } else {
+                    stage = frames >= params.down_frames ? 1 : 0;
                 }
                 break;
             case Push::Up:
@@ -399,7 +445,7 @@ public:
                 }
                 if (cond_down >= params.down_dwell_s && cond_down > 0.0) {
                     if (clock - up_done_at < params.verify60_s) {
-                        up_dwell = (std::min)(up_dwell * 2.0, params.up_dwell_max_s);
+                        RaiseUpDwell();
                     }
                     Start(out, Push::Down, false);
                 }
@@ -477,16 +523,22 @@ public:
         const Backoff* b = Of(kind);
         return b ? b->fails : 0;
     }
+    u32 Aborts(Push kind) const {
+        const Backoff* b = Of(kind);
+        return b ? b->aborts : 0;
+    }
     bool Blocked(Push kind) const {
         const Backoff* b = Of(kind);
         return b && b->blocked;
     }
 
 private:
-    /// Failures in a row of a push kind: a rest of base * 2^(fails - 1) (at most max) after each,
-    /// none at all after `tries` until the game changes its mode by itself.
+    /// Failures in a row of a push kind: a rest of base * 2^(n - 1) (at most max) after the n-th
+    /// (aborts too), none at all after `tries` failures that were not aborts until the game
+    /// changes its mode by itself.
     struct Backoff {
         u32 fails{};
+        u32 aborts{};
         bool blocked{};
         double rest{};
 
@@ -496,9 +548,10 @@ private:
         bool Ready() const {
             return !blocked && rest == 0.0;
         }
-        void Fail(double base, double max, u32 tries) {
-            ++fails;
-            rest = (std::min)(base * std::ldexp(1.0, static_cast<int>((std::min)(fails, 30U)) - 1), max);
+        void Fail(double base, double max, u32 tries, bool aborted) {
+            ++(aborted ? aborts : fails);
+            const u32 n = (std::min)(fails + aborts, 30U);
+            rest = (std::min)(base * std::ldexp(1.0, static_cast<int>(n) - 1), max);
             blocked = fails >= tries;
         }
         void Reset() {
@@ -592,9 +645,10 @@ private:
         out.ended = push;
         out.result = result;
         out.frames = frames;
-        // A stall (Aborted) counts too: a loading screen with stalls would push again and again.
+        // A stall (Aborted) rests too: a loading screen with stalls would push again and again.
         const bool failed =
             result == Result::GaveUp || result == Result::Other || result == Result::Aborted;
+        const bool aborted = result == Result::Aborted;
         if (push == Push::To20) {
             to20_rest = params.to20_rest_s;
             out.rest_s = to20_rest;
@@ -603,32 +657,51 @@ private:
             if (failed) {
                 switch (push) {
                 case Push::Down:
-                    b->Fail(params.down_rest_s, params.down_rest_max_s, params.down_tries);
+                    b->Fail(params.down_rest_s, params.down_rest_max_s, params.down_tries, aborted);
                     break;
                 case Push::Up:
-                    b->Fail(params.up_rest_s, params.up_rest_max_s, params.up_tries);
+                    b->Fail(params.up_rest_s, params.up_rest_max_s, params.up_tries, aborted);
                     break;
                 default:
-                    b->Fail(params.up20_rest_s, params.up20_rest_max_s, params.up20_tries);
+                    b->Fail(params.up20_rest_s, params.up20_rest_max_s, params.up20_tries, aborted);
                     break;
                 }
-                out.rest_s = b->rest;
-                out.tries = b->fails;
-                out.blocked = b->blocked;
-            } else if (result == Result::Done || result == Result::Done20) {
+                Report(out, *b);
+            } else if (result == Result::Done20 || (result == Result::Done && push != Push::Up20)) {
+                // An up20 push's tries go once its 30 has lasted verify30_s (step 5).
                 b->Reset();
             }
         }
         if (push == Push::Up && result == Result::Done) {
             up_done_at = clock;
+            up_unverified = true;
         }
         if (push == Push::Up20 && result == Result::Done) {
             since_up20 = 0.0;
+            verify30 = !push_probe;
         }
         push = Push::None;
         hold = 0.0;
         frames = 0;
         stage = 0;
+        since_probe = 0.0;
+    }
+
+    static void Report(Output& out, const Backoff& b) {
+        out.rest_s = b.rest;
+        out.tries = b.fails;
+        out.aborts = b.aborts;
+        out.blocked = b.blocked;
+    }
+
+    /// Once an up push: doubles the dwell before the next one (at most up_dwell_max_s).
+    void RaiseUpDwell() {
+        if (!up_unverified) {
+            return;
+        }
+        up_unverified = false;
+        up_dwell = (std::min)(up_dwell * 2.0, params.up_dwell_max_s);
+        up_dwell_at = clock;
     }
 
     void Fill(Output& out) const {
@@ -651,7 +724,10 @@ private:
     double since_up20{1e9};
     double since_probe{};
     double up_done_at{-1e9};
+    bool up_unverified{}; ///< the last up push's 60 has not raised the dwell yet
     double up_dwell{};
+    double up_dwell_at{}; ///< clock of the last raise or halving
+    bool verify30{};      ///< the last up20 push's 30 is still on trial
     std::array<double, 4> escapes{-1.0, -1.0, -1.0, -1.0}; ///< clock of the game's own 30 -> 60
     std::size_t escape_next{};
 
