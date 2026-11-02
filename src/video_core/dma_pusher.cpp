@@ -194,10 +194,28 @@ bool DmaPusher::Step() {
                     // command list check below drain a second time, for this one entry.
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(address, bytes);
                 } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-                    // The caches behind IsMemoryDirty belong to the split's back thread.
-                    split.Defer([engine_state, memory = &memory_manager, address, bytes] {
-                        engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
-                    });
+                    // Not for a macro the front runs (a native Turing Maxwell3D with front
+                    // macros: CallMethod / CallMultiMethod below hand it FrontCallMethod):
+                    // Maxwell3D's current_dirty is read by ProcessMacro on the back only, which
+                    // never sees these words. EDEN_NX2_DIRTY_THUNK_SKIP=0 sends it all the same.
+                    static const bool skip_front_macros = [] {
+                        const char* value = std::getenv("EDEN_NX2_DIRTY_THUNK_SKIP");
+                        return value == nullptr || value[0] != '0';
+                    }();
+                    if (skip_front_macros && macro_payload && split.FrontMacros() &&
+                        static_cast<Engines::Maxwell3D*>(engine_state)
+                            ->GetNativeMacroEngine()
+                            .native_turing) {
+                        VideoCommon::Nx2Profile::Add(
+                            VideoCommon::Nx2Profile::Counter::MemoryDirtyThunksSkipped, 1);
+                    } else {
+                        VideoCommon::Nx2Profile::Add(
+                            VideoCommon::Nx2Profile::Counter::MemoryDirtyThunks, 1);
+                        // The caches behind IsMemoryDirty belong to the split's back thread.
+                        split.Defer([engine_state, memory = &memory_manager, address, bytes] {
+                            engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
+                        });
+                    }
                 } else {
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
                 }

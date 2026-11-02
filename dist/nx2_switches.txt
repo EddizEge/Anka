@@ -1,10 +1,16 @@
-# Switch NX2 - read at every start of Eglantine (GUI and CLI alike).
+# Switch NX2 - read at every start of the Eglantine GUI (eden.exe). The command line
+# version (eden-cli) does not read it: give it the variables in its environment.
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
 # Between files, %APPDATA%\eden\nx2_switches.txt (yours) wins over this one, so editing
 # this file is never needed: copy the lines you want into your own and restart.
 #
 # Restart the emulator after editing.
+#
+# A few switches are read before this file is loaded, so only the real environment (a
+# launcher .bat) sets them: EDEN_NX2_3D_METHODS, ALIAS_LAZY, PROFILE_TSC, RANGE_SKIP,
+# SAME_SKIP, SMALL_WRITE, SSBO_MEMO, SYNC_EXACT, SYNC_SKIP, TEX_TOUCH_SKIP, and the
+# pusher's EDEN_NX2_PB_CHECK and SEM_WATCH (all EDEN_NX2_...).
 
 # --- workarounds / behaviour ---
 #EDEN_NX2_BUFFER_DOWNLOADS=1
@@ -17,6 +23,18 @@
 #EDEN_NX2_INLINE_DEFER=0
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
+
+# --- GPU thread shortcuts (on by default; =0 as before) ---
+# =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,
+# FAST_PRIORITY_SCAN, DESC_XLAT.
+#EDEN_NX2_VERTEX_SKIP=0
+#EDEN_NX2_VERTEX_FAST=0
+#EDEN_NX2_SYNC_MEMO=0
+#EDEN_NX2_VERTEX_CLEAN=0
+#EDEN_NX2_LIGHT_SYNC_SKIP=0
+#EDEN_NX2_FAST_PRIORITY_SCAN=0
+#EDEN_NX2_DESC_XLAT=0
+#EDEN_NX2_DIRTY_THUNK_SKIP=0
 
 # --- limits / tuning ---
 #EDEN_NX2_VRAM_LIMIT_MIB=8192

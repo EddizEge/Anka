@@ -37,6 +37,9 @@ public:
         DEBUG_ASSERT(index <= current_limit);
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
+        // An entry within one 4 KiB page (always, at 32 bytes) is one translation and a copy,
+        // through this thread's remembered page pointers (MemoryManager::SmallReadPointer,
+        // EDEN_NX2_DESC_XLAT; =2 checks each against the page walk).
         gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];

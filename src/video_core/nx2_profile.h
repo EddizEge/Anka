@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <unordered_set>
 
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
@@ -77,11 +79,26 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "fence skipped", "method", "split drain", "split wait", "parameter flush", "light draw",
 };
 
-// Read once at startup: Enabled() runs several times per method write (no guard to check).
-inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+// EDEN_NX2_GPU_PROFILE (any value but 0) is read at the first call: after main loads
+// nx2_switches.txt into the environment (yuzu main.cpp; read at static initialization, the file
+// could not turn it on), and with no function-local static's thread-safe initialization check:
+// Enabled() runs several times per method write. Threads racing on the first call compute the
+// same value.
+inline std::atomic<s8> g_enabled{-1};
+
+YUZU_NO_INLINE inline bool ReadEnabled() {
+    const char* value = std::getenv("EDEN_NX2_GPU_PROFILE");
+    const bool on = value != nullptr && value[0] != '0';
+    g_enabled.store(on ? 1 : 0, std::memory_order_relaxed);
+    return on;
+}
 
 inline bool Enabled() {
-    return g_enabled;
+    const s8 value = g_enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        return ReadEnabled();
+    }
+    return value != 0;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones
@@ -290,6 +307,11 @@ enum class Counter : u32 {
     SyncMemoMissPartial,  ///< The slot held one overlapping or touching it, not covering it
     SyncMemoMissStamped,  ///< The slot covered it, but a 4 MiB region of it was stamped since
     SyncMemoMissUploaded, ///< Of the misses: the walk uploaded something
+    // DmaPusher (front): macro / compute parameter blocks continued in their own GP entry whose
+    // current_dirty went to the back as an IsMemoryDirty thunk, and those of a macro the front
+    // runs that skipped it (EDEN_NX2_DIRTY_THUNK_SKIP):
+    MemoryDirtyThunks,
+    MemoryDirtyThunksSkipped,
     Count,
 };
 
@@ -465,6 +487,9 @@ inline void Report(const char* thread_name = "GPU thread") {
     const auto rate = [&](size_t i) { return static_cast<double>(data.counters[i]) * 1e9 / window; };
     line += fmt::format(" | parameter blocks {:.0f} ({:.0f} on written pages, {:.0f} waited, {:.0f} flushed)",
                         rate(8), rate(9), rate(11), rate(10));
+    line += fmt::format(" | memory dirty thunks {:.0f} ({:.0f} skipped)",
+                        rate(static_cast<size_t>(Counter::MemoryDirtyThunks)),
+                        rate(static_cast<size_t>(Counter::MemoryDirtyThunksSkipped)));
     line += fmt::format(" | written command lists {:.0f} ({:.0f} waited, {:.0f} flushed)", rate(12),
                         rate(14), rate(13));
     line += fmt::format(" | indirect draws from GPU records {:.0f} ({:.0f} merged, {:.0f} barriers) | empty draws {:.0f}",

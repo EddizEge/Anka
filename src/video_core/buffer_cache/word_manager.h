@@ -37,8 +37,9 @@ enum class Type {
 };
 
 // EDEN_NX2_SYNC_SKIP (WordManager::SyncSkipMode) and EDEN_NX2_SYNC_EXACT (MayHaveCpuDirtyWords),
-// read once at startup like Nx2Profile::g_enabled: as function-local statics every query paid a
-// thread-safe initialization check (SyncSkipMode alone ~0.5% of the split back thread).
+// read once at startup (from the real environment only, as nx2_switches.txt is loaded later): as
+// function-local statics every query paid a thread-safe initialization check (SyncSkipMode alone
+// ~0.5% of the split back thread).
 inline const int g_nx2_sync_skip_mode = [] {
     const char* value = std::getenv("EDEN_NX2_SYNC_SKIP");
     return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));

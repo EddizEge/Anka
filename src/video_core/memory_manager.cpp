@@ -39,11 +39,22 @@ namespace {
 // the device mapping (DeviceMemoryManager::TranslationGeneration) changed: until then
 // GpuToCpuAddress and the device's GetPointer answer the same for that page, and every GPU page
 // (4 KiB or larger) maps a 4 KiB-aligned block to one host page, so the pointer is the same.
-// EDEN_NX2_DESC_XLAT=0 translates every read.
-const bool g_nx2_desc_xlat = [] {
-    const char* value = std::getenv("EDEN_NX2_DESC_XLAT");
-    return value == nullptr || value[0] != '0';
-}();
+// EDEN_NX2_DESC_XLAT=0 translates every read. =2 remembers them as by default and checks each
+// small ReadBlockUnsafe read against the page walk (ReadBlockImpl, what every read took before;
+// logs "EDEN_NX2_DESC_XLAT: small read ... differs from the page walk", first 16). Read at the
+// first use, as BufferCache's ReadNx2Mode: after main loads nx2_switches.txt, and without a
+// function-local static's initialization check on every read.
+std::atomic<s8> g_nx2_desc_xlat_mode{-1};
+
+int DescXlatMode() {
+    s8 value = g_nx2_desc_xlat_mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_DESC_XLAT");
+        value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
+        g_nx2_desc_xlat_mode.store(value, std::memory_order_relaxed);
+    }
+    return value;
+}
 
 // Small writes within one 4 KiB page (macros' constant buffer words: four per draw in title 1,
 // ~2% of the split back thread walking the page tables in WriteBlockImpl for each; inline records)
@@ -306,7 +317,7 @@ std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr addr, std::size_t s
 }
 
 const u8* MemoryManager::SmallReadPointer(GPUVAddr gpu_addr) const {
-    if (!g_nx2_desc_xlat || page_bits < cpu_page_bits) {
+    if (DescXlatMode() == 0 || page_bits < cpu_page_bits) {
         return GetPointer(gpu_addr);
     }
     SmallReadCache& cache = t_small_reads;
@@ -527,10 +538,37 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     if (size <= SmallPage && (gpu_src_addr & (SmallPage - 1)) + size <= SmallPage) {
         if (const u8* const pointer = SmallReadPointer(gpu_src_addr)) {
             std::memcpy(dest_buffer, pointer, size);
+            if (DescXlatMode() == 2) [[unlikely]] {
+                CheckSmallRead(gpu_src_addr, dest_buffer, size);
+            }
             return;
         }
     }
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
+}
+
+void MemoryManager::CheckSmallRead(GPUVAddr gpu_addr, const void* read, std::size_t size) const {
+    static std::atomic<u64> checks{};
+    static std::atomic<u32> reports{};
+    if (checks.fetch_add(1, std::memory_order_relaxed) == 0) {
+        LOG_INFO(HW_GPU, "EDEN_NX2_DESC_XLAT=2: checking small reads against the page walk");
+    }
+    std::array<u8, 0x1000> walked;
+    ReadBlockImpl(gpu_addr, walked.data(), size, VideoCommon::CacheType::None, true);
+    const u8* const fast = static_cast<const u8*>(read);
+    const u8* const at = std::mismatch(fast, fast + size, walked.data()).first;
+    if (at == fast + size) {
+        return;
+    }
+    // A guest write landing between the two reads shows here as well.
+    if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+        const std::size_t offset = static_cast<std::size_t>(at - fast);
+        LOG_ERROR(HW_GPU,
+                  "EDEN_NX2_DESC_XLAT: small read of {} bytes at {:#x} differs from the page walk "
+                  "from byte {} ({:#04x} vs {:#04x}; after {} checks)",
+                  size, gpu_addr, offset, fast[offset], walked[offset],
+                  checks.load(std::memory_order_relaxed));
+    }
 }
 
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {

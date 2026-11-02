@@ -28,7 +28,8 @@ struct VirtualSegment {
 using VirtualSegments = boost::container::small_vector<VirtualSegment, 8>;
 
 /// EDEN_NX2_SSBO_MEMO=0: storage buffer bindings and their virtual ranges are resolved again for
-/// every draw, as before. Read once, like g_nx2_sync_memo (both per-draw paths test it).
+/// every draw, as before. Read once at startup (per-draw paths test it; from the real environment
+/// only, as nx2_switches.txt is loaded later).
 inline const bool g_nx2_ssbo_memo = [] {
     const char* value = std::getenv("EDEN_NX2_SSBO_MEMO");
     return value == nullptr || value[0] != '0';
