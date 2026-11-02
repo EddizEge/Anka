@@ -194,10 +194,12 @@ bool DmaPusher::Step() {
                     // command list check below drain a second time, for this one entry.
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(address, bytes);
                 } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-                    // The caches behind IsMemoryDirty belong to the split's back thread.
-                    split.Defer([engine_state, memory = &memory_manager, address, bytes] {
-                        engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
-                    });
+                    // The caches behind IsMemoryDirty belong to the split's back thread. With
+                    // the back stages, A runs it parked (the engines there read current_dirty).
+                    split.DeferTo<VideoCommon::DeferTarget::Join>(
+                        [engine_state, memory = &memory_manager, address, bytes] {
+                            engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
+                        });
                 } else {
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
                 }
