@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -656,6 +657,7 @@ std::optional<Tegra::RenderTargetFormat> ScannedBlitFormat(const Texture::TICEnt
 
 struct UpscaleOptions {
     bool scan{true};
+    bool learn{true};
     std::optional<Nx2UpscalePick::Location> input_at;
     std::optional<Nx2UpscalePick::Location> output_at;
 };
@@ -665,6 +667,8 @@ const UpscaleOptions& GetUpscaleOptions() {
         UpscaleOptions o;
         const char* scan = std::getenv("EDEN_NX2_UPSCALE_SCAN");
         o.scan = scan == nullptr || scan[0] != '0';
+        const char* learn = std::getenv("EDEN_NX2_UPSCALE_LEARN");
+        o.learn = learn == nullptr || learn[0] != '0';
         o.input_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_IN"));
         o.output_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_OUT"));
         return o;
@@ -835,7 +839,10 @@ std::vector<u32> KeplerCompute::ReadNativeBank(u32 slot, u32 max_bytes) {
 // in constant bank 0 that words of the bound banks name; the input is blitted (bilinear) to each
 // output. The words found are kept per program and read again first. EDEN_NX2_UPSCALE_SCAN=0
 // leaves the outputs unwritten as before; EDEN_NX2_UPSCALE_IN / EDEN_NX2_UPSCALE_OUT=<bank>:<offset>
-// (hex, from EDEN_NX2_UPSCALE_DIAG) take only that word.
+// (hex, from EDEN_NX2_UPSCALE_DIAG) take only that word. Bank 0's size words are never taken as
+// handles, and the first full scan whose only input-sized image a bank 0 word names teaches that
+// word to the other programs (EDEN_NX2_UPSCALE_LEARN=0: not). Every 10 s with blits, one line of
+// how many each program made.
 bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     namespace Up = Nx2UpscalePick;
     const UpscaleOptions& options = GetUpscaleOptions();
@@ -849,11 +856,41 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
         u32 skipped{}; ///< dispatches since: once 3 failed, scanned again every 60th
         u32 warnings{};
         u32 blitted{};
+        u32 window_blits{}; ///< since the last summary
         bool warned{};
+        bool told_ambiguous{};
     };
     static std::unordered_map<u64, Memo> memos;
+    static std::optional<Up::Location> learned_input;
     const u64 program = regs.code_loc.Address();
     Memo& memo = memos[program];
+    // The 10 s summary (written at the first dispatch after it is due).
+    {
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point summary_since = Clock::now();
+        static u32 window_calls{};
+        ++window_calls;
+        if (const auto now = Clock::now(); now - summary_since >= std::chrono::seconds{10}) {
+            u32 blits = 0;
+            std::string programs;
+            for (auto& [address, m] : memos) {
+                if (m.window_blits != 0) {
+                    blits += m.window_blits;
+                    programs += fmt::format("{}{:#x} {}x{}: {}", programs.empty() ? "" : ", ",
+                                            address, m.sizes.in_w, m.sizes.in_h, m.window_blits);
+                    m.window_blits = 0;
+                }
+            }
+            if (blits != 0) {
+                LOG_INFO(HW_GPU,
+                         "Tensor upscale stand-in, last {:.0f} s: {} blits in {} dispatches ({})",
+                         std::chrono::duration<double>(now - summary_since).count(), blits,
+                         window_calls - 1, programs);
+            }
+            summary_since = now;
+            window_calls = 1;
+        }
+    }
     const auto bank0 = ReadNativeBank(0, 0x100);
     const auto sizes = Up::SizesFromBank0(bank0, launch_description.block_dim_x.Value(), qmd[12],
                                           qmd[13] & 0xffff);
@@ -904,8 +941,10 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
         });
     };
     const auto choose = [&] {
-        return Up::Choose(*sizes, candidates, UpscaleFormats, options.input_at, options.output_at);
+        return Up::Choose(*sizes, candidates, UpscaleFormats, options.input_at, options.output_at,
+                          options.learn && !options.input_at ? learned_input : std::nullopt);
     };
+    bool full_scan = false;
     Up::Pick chosen;
     if (memo.sizes == *sizes && !memo.words.empty()) {
         const u32 mask = launch_description.const_buffer_enable_mask.Value();
@@ -931,6 +970,7 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
             }
         }
         chosen = choose();
+        full_scan = true;
         memo.sizes = *sizes;
         memo.words.clear();
         if (chosen.input && chosen.output_count != 0 && !chosen.Ambiguous()) {
@@ -968,6 +1008,26 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     memo.failed = 0;
     memo.skipped = 0;
     const Up::Candidate& input = candidates[*chosen.input];
+    if (full_scan && options.learn && !options.input_at && !learned_input) {
+        if (const auto where = Up::Learnable(chosen, candidates)) {
+            learned_input = where;
+            LOG_INFO(HW_GPU,
+                     "Tensor upscale stand-in: input location learned: bank {} +{:#x} (program "
+                     "{:#x} {}x{})",
+                     where->first, where->second, program, sizes->in_w, sizes->in_h);
+        }
+    }
+    if (full_scan && chosen.input_matches > 1 && !memo.told_ambiguous) {
+        memo.told_ambiguous = true;
+        const bool learned = learned_input && options.learn && !options.input_at &&
+                             input.slot == learned_input->first &&
+                             input.offset == learned_input->second;
+        LOG_INFO(HW_GPU,
+                 "Tensor upscale stand-in: program {:#x} ({}x{}): {} input-sized images, took bank "
+                 "{} +{:#x} ({})",
+                 program, sizes->in_w, sizes->in_h, chosen.input_matches, input.slot, input.offset,
+                 learned ? "learned" : "by format");
+    }
     const auto format = ScannedBlitFormat(tics.at(input.index));
     const Fermi2D::Surface source = BlitSurface(tics.at(input.index), *format);
     bool done = false;
@@ -989,15 +1049,16 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
         done |= rasterizer->AccelerateSurfaceCopy(source, BlitSurface(tics.at(output.index), *format),
                                                   config);
     }
+    memo.window_blits += done ? 1 : 0;
     if (memo.blitted++ < 3) {
         const Up::Candidate& first = candidates[chosen.outputs[0]];
         LOG_INFO(HW_GPU,
                  "Tensor upscale stand-in (EDEN_NX2_UPSCALE_SCAN): program {:#x} {}x{} -> {}x{}, "
-                 "bilinear from bank {} +{:#x} ({:#x}, format {:#x}) to {} image(s), the first at "
-                 "bank {} +{:#x} ({:#x}): {}",
+                 "bilinear from bank {} +{:#x} ({:#x}, format {:#x}, tic {}) to {} image(s), the "
+                 "first at bank {} +{:#x} ({:#x}): {}",
                  program, sizes->in_w, sizes->in_h, sizes->out_w, sizes->out_h, input.slot,
-                 input.offset, input.address, input.format, chosen.output_count, first.slot,
-                 first.offset, first.address, done ? "blitted" : "not accelerated");
+                 input.offset, input.address, input.format, input.index, chosen.output_count,
+                 first.slot, first.offset, first.address, done ? "blitted" : "not accelerated");
     }
     return done;
 }

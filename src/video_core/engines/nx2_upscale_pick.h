@@ -43,6 +43,12 @@ inline std::optional<Sizes> SizesFromBank0(std::span<const u32> words, u32 block
     return sizes;
 }
 
+/// Bank 0's first 12 words are the work size and the sizes (SizesFromBank0), not handles: word 10,
+/// the output width minus one (0xb3f), read as a handle names texture 2879, one of the game's
+/// 1440x810 half-resolution buffers, which the 1440x810 step took as its input (white sky, grey
+/// ground).
+constexpr u32 Bank0HeaderBytes = 0x30;
+
 /// An image a word of a bound constant bank names (texture handle: pool index in bits 0-19).
 struct Candidate {
     u32 slot{};
@@ -63,6 +69,9 @@ struct Pick {
     /// more than outputs.size() means the banks name images beyond the program's own (a scene's
     /// constant buffer), and blitting to the first few could overwrite another pass's image.
     std::size_t output_total{};
+    /// Input-sized images of an input format at distinct addresses (more than one: the pick was
+    /// by format order or by the preferred location).
+    std::size_t input_matches{};
 
     bool Ambiguous() const {
         return output_total > outputs.size();
@@ -71,22 +80,41 @@ struct Pick {
 
 using Location = std::pair<u32, u32>; ///< constant bank, byte offset
 
-/// The input: the input-sized image whose format comes first in `preference`. The outputs: every
-/// output-sized image of the same format at its own address (the result and, if the program keeps
-/// one, its history: writing both is harmless when the program itself does not run); see
-/// Pick::Ambiguous for when there are too many of them.
+/// The input: the input-sized image whose format comes first in `preference`, or the one at
+/// `prefer_input` (the location other programs' only input was found at) when that word names
+/// one. The outputs: every output-sized image of the same format at its own address (the result
+/// and, if the program keeps one, its history: writing both is harmless when the program itself
+/// does not run); see Pick::Ambiguous for when there are too many of them. Bank 0's header words
+/// are skipped unless `input_at` / `output_at` pin a word.
 inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
                    std::span<const u32> preference, std::optional<Location> input_at = {},
-                   std::optional<Location> output_at = {}) {
+                   std::optional<Location> output_at = {},
+                   std::optional<Location> prefer_input = {}) {
     Pick pick;
     const auto at = [](const Candidate& c, const std::optional<Location>& where) {
         return !where || (c.slot == where->first && c.offset == where->second);
     };
+    const auto header = [](const Candidate& c, const std::optional<Location>& pinned) {
+        return !pinned && c.slot == 0 && c.offset < Bank0HeaderBytes;
+    };
+    const auto input_ok = [&](const Candidate& c) {
+        return c.usable && c.width == sizes.in_w && c.height == sizes.in_h && at(c, input_at) &&
+               !header(c, input_at) &&
+               std::find(preference.begin(), preference.end(), c.format) != preference.end();
+    };
     std::size_t best_rank = preference.size();
+    std::optional<std::size_t> preferred;
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const Candidate& c = candidates[i];
-        if (!c.usable || c.width != sizes.in_w || c.height != sizes.in_h || !at(c, input_at)) {
+        if (!input_ok(c)) {
             continue;
+        }
+        const bool seen = std::ranges::any_of(candidates.first(i), [&](const Candidate& d) {
+            return input_ok(d) && d.address == c.address;
+        });
+        pick.input_matches += seen ? 0 : 1;
+        if (prefer_input && !preferred && at(c, prefer_input)) {
+            preferred = i;
         }
         const auto rank = static_cast<std::size_t>(
             std::find(preference.begin(), preference.end(), c.format) - preference.begin());
@@ -95,6 +123,9 @@ inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
             best_rank = rank;
         }
     }
+    if (preferred) {
+        pick.input = preferred;
+    }
     if (!pick.input) {
         return pick;
     }
@@ -102,12 +133,14 @@ inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const Candidate& c = candidates[i];
         if (!c.usable || c.width != sizes.out_w || c.height != sizes.out_h ||
-            c.format != input.format || c.address == input.address || !at(c, output_at)) {
+            c.format != input.format || c.address == input.address || !at(c, output_at) ||
+            header(c, output_at)) {
             continue;
         }
         const bool seen = std::ranges::any_of(candidates.first(i), [&](const Candidate& d) {
             return d.usable && d.width == sizes.out_w && d.height == sizes.out_h &&
-                   d.format == input.format && d.address == c.address && at(d, output_at);
+                   d.format == input.format && d.address == c.address && at(d, output_at) &&
+                   !header(d, output_at);
         });
         if (seen) {
             continue;
@@ -118,6 +151,20 @@ inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
         }
     }
     return pick;
+}
+
+/// The input location a full scan may teach the other programs (EDEN_NX2_UPSCALE_LEARN): its
+/// only input-sized image, named by a word of bank 0 past the header, with an unambiguous output.
+/// Not from a scan of the remembered words alone: those hold just the word picked before.
+inline std::optional<Location> Learnable(const Pick& pick, std::span<const Candidate> candidates) {
+    if (!pick.input || pick.input_matches != 1 || pick.output_count == 0 || pick.Ambiguous()) {
+        return std::nullopt;
+    }
+    const Candidate& c = candidates[*pick.input];
+    if (c.slot != 0 || c.offset < Bank0HeaderBytes) {
+        return std::nullopt;
+    }
+    return Location{c.slot, c.offset};
 }
 
 /// "<bank>:<offset>" (offset in hex), e.g. "3:1a0".

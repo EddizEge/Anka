@@ -91,3 +91,107 @@ TEST_CASE("Nx2UpscalePick: bank:offset", "[video_core]") {
     REQUIRE(!ParseLocation("3:"));
     REQUIRE(!ParseLocation("3:1g"));
 }
+
+TEST_CASE("Nx2UpscalePick: bank 0's size words are not handles", "[video_core]") {
+    const Sizes sizes{1440, 810, 2880, 1620};
+    // Word 10 (+0x28) is 0xb3f, the output width minus one: as a handle, texture 2879, a
+    // 1440x810 buffer of the input's format, found before the real input at +0x60.
+    const std::array<Candidate, 4> candidates{{
+        {.slot = 0, .offset = 0x28, .index = 2879, .address = 0x1000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 0, .offset = 0x60, .index = 40, .address = 0x2000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 0, .offset = 0x38, .index = 41, .address = 0x3000, .width = 2880, .height = 1620,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 0, .offset = 0x2c, .index = 1619, .address = 0x4000, .width = 2880, .height = 1620,
+         .format = R11G11B10F, .usable = true},
+    }};
+    const Pick pick = Choose(sizes, candidates, PREFERENCE);
+    REQUIRE(pick.input == 1u);
+    REQUIRE(pick.input_matches == 1u);
+    REQUIRE(pick.output_count == 1u);
+    REQUIRE(pick.outputs[0] == 2u);
+    REQUIRE(pick.output_total == 1u);
+    REQUIRE(Learnable(pick, candidates) == Location{0, 0x60});
+    // A word pinned by EDEN_NX2_UPSCALE_IN / _OUT is taken even in the header.
+    const Pick pinned = Choose(sizes, candidates, PREFERENCE, Location{0, 0x28}, Location{0, 0x2c});
+    REQUIRE(pinned.input == 0u);
+    REQUIRE(pinned.output_count == 1u);
+    REQUIRE(pinned.outputs[0] == 3u);
+}
+
+TEST_CASE("Nx2UpscalePick: the preferred input location", "[video_core]") {
+    const Sizes sizes{1440, 810, 2880, 1620};
+    std::array<Candidate, 3> candidates{{
+        {.slot = 3, .offset = 0x10, .index = 1, .address = 0x1000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 0, .offset = 0x60, .index = 2, .address = 0x2000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 3, .offset = 0x20, .index = 3, .address = 0x3000, .width = 2880, .height = 1620,
+         .format = R11G11B10F, .usable = true},
+    }};
+    const Pick by_format = Choose(sizes, candidates, PREFERENCE);
+    REQUIRE(by_format.input == 0u);
+    REQUIRE(by_format.input_matches == 2u);
+    REQUIRE(!Learnable(by_format, candidates));
+    const Pick preferred =
+        Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60});
+    REQUIRE(preferred.input == 1u);
+    REQUIRE(preferred.input_matches == 2u);
+    REQUIRE(preferred.output_count == 1u);
+    // It overrides the format order too.
+    candidates[0].format = RGBA16F;
+    candidates[2].format = RGBA16F;
+    REQUIRE(Choose(sizes, candidates, PREFERENCE).input == 0u);
+    REQUIRE(Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60})
+                .input == 1u);
+    candidates[0].format = R11G11B10F;
+    candidates[2].format = R11G11B10F;
+    // A preferred word naming an image the blit can't use: the format order.
+    candidates[1].usable = false;
+    const Pick unusable =
+        Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60});
+    REQUIRE(unusable.input == 0u);
+    REQUIRE(unusable.input_matches == 1u);
+    // Only bank 0 teaches: the only input at bank 3 is not learned.
+    REQUIRE(unusable.output_count == 1u);
+    REQUIRE(!Learnable(unusable, candidates));
+    // Two words naming one image count once.
+    candidates[1] = {.slot = 0, .offset = 0x64, .index = 1, .address = 0x1000, .width = 1440,
+                     .height = 810, .format = R11G11B10F, .usable = true};
+    REQUIRE(Choose(sizes, candidates, PREFERENCE).input_matches == 1u);
+}
+
+TEST_CASE("Nx2UpscalePick: a pinned input wins over the preferred one", "[video_core]") {
+    // The caller passes no preference with EDEN_NX2_UPSCALE_IN; if both came, the pin decides.
+    const Sizes sizes{1440, 810, 2880, 1620};
+    const std::array<Candidate, 3> candidates{{
+        {.slot = 3, .offset = 0x10, .index = 1, .address = 0x1000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 0, .offset = 0x60, .index = 2, .address = 0x2000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 3, .offset = 0x20, .index = 3, .address = 0x3000, .width = 2880, .height = 1620,
+         .format = R11G11B10F, .usable = true},
+    }};
+    const Pick pick =
+        Choose(sizes, candidates, PREFERENCE, Location{3, 0x10}, std::nullopt, Location{0, 0x60});
+    REQUIRE(pick.input == 0u);
+    REQUIRE(pick.input_matches == 1u);
+}
+
+TEST_CASE("Nx2UpscalePick: nothing learned from the remembered words alone", "[video_core]") {
+    // A full scan found two inputs and took bank 3 +0x10 by format; the next dispatch reads only
+    // the remembered words (that one and the output): one input, but not one to teach (bank 3).
+    // The caller teaches from full scans only, so the location learned is a full scan's.
+    const Sizes sizes{1440, 810, 2880, 1620};
+    const std::array<Candidate, 2> remembered{{
+        {.slot = 3, .offset = 0x10, .index = 1, .address = 0x1000, .width = 1440, .height = 810,
+         .format = R11G11B10F, .usable = true},
+        {.slot = 3, .offset = 0x20, .index = 3, .address = 0x3000, .width = 2880, .height = 1620,
+         .format = R11G11B10F, .usable = true},
+    }};
+    const Pick pick = Choose(sizes, remembered, PREFERENCE);
+    REQUIRE(pick.input == 0u);
+    REQUIRE(pick.input_matches == 1u);
+    REQUIRE(!Learnable(pick, remembered));
+}
