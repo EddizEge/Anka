@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -27,16 +28,20 @@ namespace VideoCommon::Nx2Stages {
 namespace {
 
 // Set by InstallProxy before A starts, reset by UninstallProxy once the stages stopped: the
-// stages read them as they run records.
+// stages read them as they run records. g_published is Proxy() (acquire, any thread).
 std::unique_ptr<Nx2StageProxy> g_proxy;
+std::atomic<Nx2StageProxy*> g_published{};
 VideoCore::RasterizerInterface* g_real{};
 Core::System* g_system{};
 bool g_check{};
+/// InstallProxy / UninstallProxy against BindNewChannel / BindNewAddressSpace (guest threads, K7).
+std::mutex g_install_mutex;
 
-/// Most bytes of an inline write, and ranges of an invalidation, one record carries (a ring 2
-/// record never wraps; larger ones go as several).
-constexpr size_t MaxInlineBytes = 64 * 1024;
+/// Most words of an inline write's data in a record (its thunk and three words besides; K9).
+constexpr size_t MaxInlineWords = MaxBodyWords - 4;
+/// Most ranges of an invalidation in one record (larger ones go as several).
 constexpr size_t MaxRanges = 4096;
+static_assert(1 + MaxRanges * 2 <= MaxBodyWords);
 
 /// BC's side of a record: the real rasterizer (checked to run on B under STAGE_CHECK).
 VideoCore::RasterizerInterface& OnBc(const char* where) {
@@ -78,6 +83,19 @@ constexpr u64 EventWord(Event event, bool is_indexed, u32 count) {
     return static_cast<u64>(event) | (is_indexed ? u64{1} << 8 : 0) | (u64{count} << 32);
 }
 
+void RunEvent(VideoCore::RasterizerInterface& real, Event event, bool is_indexed, u32 count) {
+    switch (event) {
+    case Event::Draw:
+        return real.Draw(is_indexed, count);
+    case Event::DrawIndirect:
+        return real.DrawIndirect();
+    case Event::DrawTexture:
+        return real.DrawTexture();
+    case Event::Clear:
+        return real.Clear(count);
+    }
+}
+
 void EventThunk(const u64* payload, u32 words) {
     auto& real = OnBc("Nx2StageProxy draw");
     if (words > 2) {
@@ -90,22 +108,8 @@ void EventThunk(const u64* payload, u32 words) {
         }
     }
     const u64 word = payload[0];
-    const u32 count = static_cast<u32>(word >> 32);
-    switch (static_cast<Event>(word & 0xff)) {
-    case Event::Draw:
-        real.Draw(((word >> 8) & 1) != 0, count);
-        return;
-    case Event::DrawIndirect:
-        real.DrawIndirect();
-        return;
-    case Event::DrawTexture:
-        real.DrawTexture();
-        return;
-    case Event::Clear:
-        real.Clear(count);
-        return;
-    }
-    UNREACHABLE();
+    RunEvent(real, static_cast<Event>(word & 0xff), ((word >> 8) & 1) != 0,
+             static_cast<u32>(word >> 32));
 }
 
 /// A: a draw-like record with the side state of the bound channel's Maxwell3D that changed since
@@ -115,6 +119,20 @@ void PostEvent(Event event, bool is_indexed, u32 count) {
     Nx2Profile::Scope scope{Nx2Profile::Zone::PacketBuild};
     auto& primary = g_system->GPU().Maxwell3D();
     const u32 side_words = SideStateWords(primary);
+    if (1 + 2 + side_words > MaxBodyWords) [[unlikely]] {
+        // Too long for a record (K9): applied to the replica and drawn with the stages parked.
+        std::vector<u64> side(side_words);
+        WriteSideState(primary, side.data());
+        JoinFromA(JoinReason::Other, [&] {
+            if (auto* const replica = ReplicaOf(primary, Stage::B)) {
+                ApplySideState(*replica, side.data(), side_words);
+            } else {
+                ReportUnstaged("drew without a replica for B", -1);
+            }
+            RunEvent(*g_real, event, is_indexed, count);
+        });
+        return;
+    }
     u64* const payload = Reserve(Ring::ToB, &EventThunk, 2 + side_words);
     payload[0] = EventWord(event, is_indexed, count);
     payload[1] = reinterpret_cast<u64>(&primary);
@@ -521,15 +539,13 @@ void Nx2StageProxy::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
     if (!Forwarding()) {
         return real.AccelerateInlineToMemory(address, copy_size, memory);
     }
-    // The bytes go with the record; a large write as several of the same writes in a row.
-    if (copy_size != memory.size() || copy_size <= MaxInlineBytes) {
-        PostInline(address, copy_size, memory);
+    // The bytes go with the record; more than a record holds runs parked (K9).
+    if ((memory.size() + sizeof(u64) - 1) / sizeof(u64) > MaxInlineWords) [[unlikely]] {
+        JoinFromA(JoinReason::Upload,
+                  [&] { real.AccelerateInlineToMemory(address, copy_size, memory); });
         return;
     }
-    for (size_t offset = 0; offset < copy_size; offset += MaxInlineBytes) {
-        const size_t count = (std::min)(copy_size - offset, MaxInlineBytes);
-        PostInline(address + offset, count, memory.subspan(offset, count));
-    }
+    PostInline(address, copy_size, memory);
 }
 
 void Nx2StageProxy::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
@@ -572,7 +588,8 @@ bool Nx2StageProxy::HasDrawTransformFeedback() {
 }
 
 void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {
-    // =3 (pass-through): BC runs ring 1 as the unstaged back does, on the primaries.
+    // =3 (pass-through): BC runs ring 1 as the unstaged back does, on the primaries (K1; Start
+    // does not call it there either).
     if (Get().mode == 3) {
         return;
     }
@@ -580,15 +597,18 @@ void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {
         LOG_ERROR(HW_GPU, "Back stages: the proxy was installed already");
         UninstallProxy(system);
     }
+    std::scoped_lock lock{g_install_mutex};
     g_proxy = std::make_unique<Nx2StageProxy>(real);
     g_real = &real;
     g_system = &system;
     g_check = Get().check;
+    g_published.store(g_proxy.get(), std::memory_order_release);
     auto* const scheduler = Tegra::Control::Scheduler::Current();
     if (scheduler == nullptr) {
         return;
     }
-    // A channel initialized later (or now, on a guest thread) is staged in its first bind's join.
+    // A channel the guest initializes from here on is bound to the proxy (BindNewChannel) and
+    // staged in its first bind's join.
     for (const auto& channel : scheduler->Channels()) {
         if (channel->initialized) {
             StageChannel(*channel, *g_proxy, real);
@@ -600,6 +620,7 @@ void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {
 }
 
 void UninstallProxy(Core::System& system) {
+    std::scoped_lock lock{g_install_mutex};
     if (!g_proxy) {
         return;
     }
@@ -610,6 +631,7 @@ void UninstallProxy(Core::System& system) {
             }
         }
     }
+    g_published.store(nullptr, std::memory_order_release);
     g_proxy.reset();
     g_real = nullptr;
     g_system = nullptr;
@@ -617,7 +639,23 @@ void UninstallProxy(Core::System& system) {
 }
 
 Nx2StageProxy* Proxy() {
-    return g_proxy.get();
+    return g_published.load(std::memory_order_acquire);
+}
+
+void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::RasterizerInterface& real) {
+    std::scoped_lock lock{g_install_mutex};
+    if (!g_proxy) {
+        channel.BindRasterizer(&real);
+        return;
+    }
+    channel.payload->dma_pusher.BindRasterizer(&real);
+    SetEngineRasterizer(channel, g_proxy.get());
+}
+
+void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
+                         VideoCore::RasterizerInterface& real) {
+    std::scoped_lock lock{g_install_mutex};
+    memory_manager.BindRasterizer(g_proxy ? g_proxy.get() : &real);
 }
 
 void StageBoundChannel(Tegra::Control::ChannelState& channel) {
@@ -627,20 +665,12 @@ void StageBoundChannel(Tegra::Control::ChannelState& channel) {
     if (!ChannelStaged(channel)) {
         StageChannel(channel, *g_proxy, *g_real);
     } else {
+        // An address space the channel was given since (BindNewAddressSpace binds new ones).
         SetEngineRasterizer(channel, g_proxy.get());
     }
     if (g_check) {
         CheckStaged(channel);
     }
-}
-
-void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::RasterizerInterface& real) {
-    channel.BindRasterizer(&real);
-}
-
-void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
-                         VideoCore::RasterizerInterface& real) {
-    memory_manager.BindRasterizer(&real);
 }
 
 } // namespace VideoCommon::Nx2Stages

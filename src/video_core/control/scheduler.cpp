@@ -83,8 +83,8 @@ void Scheduler::BindChannelStaged(GPU& gpu, s32 bind_id) {
 }
 
 void Scheduler::BindChannel(GPU& gpu, s32 bind_id) {
-    if (VideoCommon::Nx2Stages::Active() && VideoCommon::Nx2Stages::Proxy() != nullptr)
-        [[unlikely]] {
+    // Back stages at =1 and =2 only: with the stages off or at =3 there is no proxy (K1).
+    if (VideoCommon::Nx2Stages::Proxy() != nullptr) [[unlikely]] {
         BindChannelStaged(gpu, bind_id);
         return;
     }
