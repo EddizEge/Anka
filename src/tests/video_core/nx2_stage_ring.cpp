@@ -812,6 +812,145 @@ TEST_CASE("Nx2StagePipeline: C's boundary work runs when asked while C waits", "
 }
 
 namespace {
+// The wakes C's waits rely on (T9b review sinama-2): an ask or a park C must not sleep through.
+std::atomic<bool> g_c_ran{};
+void RunOnC(const u64*, u32) {
+    g_c_ran = true;
+}
+void SendRunToC(const u64*, u32) {
+    PostCallC(*g_pipe, &RunOnC, 0);
+    g_pipe->PublishC();
+}
+/// Waits (yielding: a sleep is a scheduler tick on Windows) until `done` or `seconds` passed.
+template <typename Done>
+bool WaitFor(Done&& done, u32 seconds) {
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{seconds};
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= give_up) {
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+std::atomic<bool> g_b_second_record{};
+/// On C (its own boundary work, asked inside the record): ParkB once B is inside its next
+/// record, which sends nothing; C then sleeps in its ParkB wait for records.
+void ParkWhileBInSecond() {
+    while (!g_b_second_record.load()) {
+        std::this_thread::yield();
+    }
+    g_pipe->ParkB([] {
+        ++g_park_ops;
+        Order('c');
+    });
+}
+void AskBoundaryOnC(const u64*, u32) {
+    g_pipe->RequestBoundaryWork();
+}
+void SendBoundaryAskToC(const u64*, u32) {
+    PostCallC(*g_pipe, &AskBoundaryOnC, 0);
+    g_pipe->PublishC();
+}
+/// On B: long, nothing for C, no delta: B parks after it with nothing to publish.
+void SleepOnB(const u64*, u32) {
+    g_b_second_record = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+}
+
+std::atomic<u32> g_boundary_asks_inside{};
+void AskAgainInside() {
+    ++g_boundary_runs;
+    if (g_boundary_asks_inside.load() != 0) {
+        --g_boundary_asks_inside;
+        // Asked while it runs (StageTickWork's tick from inside): it runs again after.
+        g_pipe->RequestBoundaryWork();
+    }
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: boundary work asked around C's wait wakes it (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"boundary work around C's wait"};
+    std::mt19937 random{8086};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_boundary_runs = 0;
+        handler.on_boundary = [] { ++g_boundary_runs; };
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        for (u32 round = 0; round < 1000; ++round) {
+            g_c_ran = false;
+            PostCallB(pipe, &SendRunToC, 0);
+            pipe.PublishB();
+            // C ran its last record and heads for its wait: ask in its spin, before it reads the
+            // wake word or after.
+            REQUIRE(WaitFor([] { return g_c_ran.load(); }, 5));
+            Spin(random() % 16384);
+            pipe.RequestBoundaryWork();
+            REQUIRE(WaitFor([round] { return g_boundary_runs.load() == round + 1; }, 5));
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_boundary_runs == 1000);
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: B parking with nothing to publish wakes C in ParkB (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"park wakes C"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (u32 round = 0; round < 20; ++round) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            handler.on_boundary = &ParkWhileBInSecond;
+            g_b_second_record = false;
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            PostCallB(pipe, &SendBoundaryAskToC, 0);
+            PostCallB(pipe, &SleepOnB, 0);
+            pipe.PublishB();
+            REQUIRE(WaitFor([] { return g_park_ops.load() == 1; }, 10));
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(handler.parks == 1);
+            REQUIRE(g_order == std::vector<char>({'c'}));
+        }
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: boundary work asked while it runs runs again after (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"boundary work asked inside"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_boundary_runs = 0;
+        handler.on_boundary = &AskAgainInside;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        for (u32 round = 0; round < 50; ++round) {
+            g_boundary_asks_inside = 1;
+            pipe.RequestBoundaryWork();
+            const bool twice =
+                WaitFor([round] { return g_boundary_runs.load() == 2 * round + 2; }, 2);
+            Expect(twice, "an ask made inside the boundary work runs it again",
+                   g_boundary_runs.load(), 2 * round + 2);
+            if (!twice) {
+                break;
+            }
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+    }
+}
+
+namespace {
 std::atomic<bool> g_hold_entered{};
 std::atomic<bool> g_hold_release{};
 void HoldOnB(const u64*, u32) {
