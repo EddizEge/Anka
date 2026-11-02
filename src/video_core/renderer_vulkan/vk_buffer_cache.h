@@ -445,7 +445,10 @@ private:
     [[nodiscard]] RecordList* TakeRecords();
 
     /// Cut c, B inside a packet: runs `op` through the record owner hook (counted by `why`).
-    void JoinRecordOwner(StageJoin why, VideoCommon::Nx2Stages::FunctionRef op);
+    /// `send_records`: the hook replays B's list so far first; false keeps it in the packet
+    /// (DrawToC::records) for an `op` that records nothing the list depends on.
+    void JoinRecordOwner(StageJoin why, VideoCommon::Nx2Stages::FunctionRef op,
+                         bool send_records = true);
 
     /// Wait for a tick or a stamp while staged.
     void WaitStaged(u64 tick);

@@ -866,8 +866,13 @@ u64 BufferCacheRuntime::BeginRecords() {
 
 RecordList* BufferCacheRuntime::EndRecords() {
     if (!pending_owner_drops.empty()) [[unlikely]] {
-        // JoinRecordOwner retires them
-        JoinRecordOwner(StageJoin::MultiRange, [] {});
+        // JoinRecordOwner retires them. The packet's list stays in it (R2 review birakma-1):
+        // replayed here, its geometry binds would go before a submit the retirement or C's
+        // FlushWork may make ahead of the draw, which would then run with nothing bound. The
+        // retirement records nothing and frees no entry the list uses: a packet deletes buffers
+        // before it binds (UpdateGraphicsBuffers), and a multi-range binding's own join retired
+        // what was pending before it.
+        JoinRecordOwner(StageJoin::MultiRange, [] {}, false);
     }
     RecordList* const list = TakeRecords();
     target.list = nullptr;
@@ -887,10 +892,10 @@ RecordList* BufferCacheRuntime::TakeRecords() {
     return list;
 }
 
-void BufferCacheRuntime::JoinRecordOwner(StageJoin why,
-                                         VideoCommon::Nx2Stages::FunctionRef op) {
+void BufferCacheRuntime::JoinRecordOwner(StageJoin why, VideoCommon::Nx2Stages::FunctionRef op,
+                                         bool send_records) {
     ++stage_joins[static_cast<size_t>(why)];
-    RecordList* const sent = TakeRecords();
+    RecordList* const sent = send_records ? TakeRecords() : nullptr;
     target.list = nullptr;
     // Every join retires the multi-range owners the packet deleted so far, first.
     const auto run = [this, op] {
