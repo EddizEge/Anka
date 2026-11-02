@@ -1118,6 +1118,9 @@ private:
         if (!m_once_events.empty()) {
             SignalOnceEvents();
         }
+        if (NotifyOpenMode() == 2 && m_presents == 1) {
+            NotifyOpen("at the first present");
+        }
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -2141,6 +2144,45 @@ private:
         m_display_notification = w[4];
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
+        if (NotifyOpenMode() == 1) {
+            NotifyOpen("after 101");
+        }
+    }
+
+    // EDEN_NX2_VI2_NOTIFY_OPEN (off by default): set the display's notification (101's index, 1
+    // in Bananza) once, as a display that has news would: =1 right after 101, =2 at the first
+    // present. Only 102 and 202 set notifications otherwise; the SDK may read this one as its
+    // display going away (a teardown, a black screen).
+    static int NotifyOpenMode() {
+        static const int mode = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_NOTIFY_OPEN");
+            if (text == nullptr || text[0] == '\0' || std::string_view{text} == "0") {
+                return 0;
+            }
+            if (std::string_view{text} != "1" && std::string_view{text} != "2") {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_NOTIFY_OPEN=\"{}\": not 1 (after 101) or 2 (at the "
+                                     "first present): off",
+                            text);
+                return 0;
+            }
+            LOG_INFO(Service, "nx2:vi2 notify open (EDEN_NX2_VI2_NOTIFY_OPEN={}): the display's "
+                              "notification is set once, {}",
+                     text, text[0] == '1' ? "right after 101" : "at the first present");
+            return text[0] - '0';
+        }();
+        return mode;
+    }
+
+    bool m_notified_open{};
+
+    void NotifyOpen(std::string_view when) {
+        if (m_notified_open) {
+            return;
+        }
+        m_notified_open = true;
+        LOG_INFO(Service, "nx2:vi2 notify open: display notification {} set {} (EDEN_NX2_VI2_NOTIFY_OPEN)",
+                 m_display_notification, when);
+        Notify(m_display_notification, "EDEN_NX2_VI2_NOTIFY_OPEN");
     }
 
     // 102(u64 display): the display retired, wake whoever waits for that notification.
