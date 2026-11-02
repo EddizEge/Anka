@@ -276,34 +276,13 @@ private:
     }
 
     /// What C records for a packet (StageDrawParams::command).
-    enum class StageCommand : u8 {
-        None,          ///< Only B's records (a draw cut short: RESETFIX, no pipeline)
-        Direct,        ///< vkCmdDraw / vkCmdDrawIndexed
-        Indirect,      ///< vkCmdDraw(Indexed)Indirect
-        IndirectCount, ///< vkCmdDraw(Indexed)IndirectCount
-        ByteCount,     ///< vkCmdDrawIndirectByteCountEXT
-    };
-    /// The packet's draw words (DrawToC's tail part 4): what Draw / DrawIndirect's draw_func
-    /// read, taken by B from its replica and its buffer cache.
-    struct StageDrawParams {
-        RasterizerVulkan* rasterizer;
-        u64 indirect_buffer; ///< VkBuffer (kept by B's runtime until C is done: BuryBuffer)
-        u64 indirect_offset;
-        u64 count_buffer;
-        u64 count_offset;
-        u32 base_instance;
-        u32 num_instances;
-        u32 base_vertex;
-        u32 num_vertices;
-        u32 first_index;
-        u32 max_draw_counts;
-        u32 stride;
-        StageCommand command;
-        bool is_indexed; ///< The command's (quads draw indexed)
-        u8 topology;     ///< Maxwell's, for C's replica (UpdateDynamicStates)
-        u8 reserved;
-    };
-    static_assert(sizeof(StageDrawParams) % sizeof(u64) == 0);
+    using StageCommand = VideoCommon::Nx2Stages::DrawCommand;
+    /// The packet's draw words (DrawToC's tail part 4, packed: Nx2Stages::PackDrawArgs): what
+    /// Draw / DrawIndirect's draw_func read, taken by B from its replica and its buffer cache.
+    using StageDrawParams = VideoCommon::Nx2Stages::DrawArgs;
+    /// The rasterizer C runs draw packets for (StageDrawThunk): set by BeginStagesHook, the
+    /// stages' one record side (SetStageHooks).
+    static inline RasterizerVulkan* stage_rasterizer{};
 
     /// B's replica of the bound channel's Maxwell3D (Role::Memory; maxwell3d is C's).
     [[nodiscard]] Tegra::Engines::Maxwell3D& EngineB();

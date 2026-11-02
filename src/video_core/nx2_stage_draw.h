@@ -34,11 +34,10 @@ enum class DrawKind : u8 {
 };
 
 /// B's light decision, for C to check (a: command state, b: textures) and repair. T7's to fill.
+/// What C does not read stays out of the packet (k2hiz: the record count at the anchor, the
+/// reasons and light.armed were written for every draw and never read).
 struct LightFromB {
-    u64 anchor_records; ///< B's record list count at the anchor draw
-    u64 epoch;          ///< B's copy of the light epoch at the decision (S12)
-    u32 reasons;        ///< Why not light (Counter::LightNotArmed... order), 0 when light
-    bool armed;         ///< light.armed as B left it
+    u64 epoch; ///< B's copy of the light epoch at the decision (S12; =2's race filter)
 };
 
 /// One changed vertex / index / transform feedback slot (the geometry mirror, §3.6/6).
@@ -67,28 +66,140 @@ struct DrawToC {
     Vulkan::RecordList* records; ///< B's Vulkan commands for it, replayed by C first (T3); may
                                  ///< be null (nothing recorded)
     LightFromB light;
-    u32 instance_count;
+    u32 vertex_live;   ///< The vertex streams B's buffer cache has enabled after the packet
+                       ///< (EnabledVertexBuffersMask): the geometry mirror's live streams (T7)
+    u16 handles;       ///< u32 texture / sampler pool indices (tail part 2)
+    u8 geometry_slots; ///< GeometrySlot (tail part 3): at most 32 streams, the index and 4 TFB
+    u8 draw_words;     ///< u64 draw parameter words (tail part 4: PackDrawArgs)
+    std::array<u8, DrawStages> buffer_entries; ///< Per graphics stage, B's descriptor entries
     DrawKind kind;
     bool is_indexed;
-    bool indirect;
-    bool any_upload; ///< B uploaded buffers for it (its PostCopyBarrier is in `records`)
-    std::array<u8, DrawStages> buffer_entries; ///< Per graphics stage, B's descriptor entries
     u8 reserved;
-    u16 handles;        ///< u32 texture / sampler pool indices (tail part 2)
-    u16 geometry_slots; ///< GeometrySlot (tail part 3)
-    u16 draw_words;     ///< u64 draw parameter words (tail part 4)
-    u32 vertex_live;    ///< The vertex streams B's buffer cache has enabled after the packet
-                        ///< (EnabledVertexBuffersMask): the geometry mirror's live streams (T7)
 };
 static_assert(std::is_trivially_copyable_v<DrawToC>);
 static_assert(std::is_trivially_copyable_v<GeometrySlot>);
 static_assert(sizeof(DrawToC) % sizeof(u64) == 0 && alignof(DrawToC) <= alignof(u64));
-static_assert(sizeof(DrawToC) == 72, "vertex_live takes the head's tail padding");
+static_assert(sizeof(DrawToC) == 48, "six words: what C reads");
 static_assert(sizeof(GeometrySlot) % sizeof(u64) == 0 && alignof(GeometrySlot) <= alignof(u64));
 
 /// u64 words of the head and of one GeometrySlot.
 inline constexpr u32 DrawHeadWords = static_cast<u32>(sizeof(DrawToC) / sizeof(u64));
 inline constexpr u32 GeometrySlotWords = static_cast<u32>(sizeof(GeometrySlot) / sizeof(u64));
+
+/// The draw command of a packet (the Vulkan rasterizer's StageCommand).
+enum class DrawCommand : u8 {
+    None,          ///< Only B's records (a draw cut short: RESETFIX, no pipeline)
+    Direct,        ///< vkCmdDraw / vkCmdDrawIndexed
+    Indirect,      ///< vkCmdDraw(Indexed)Indirect
+    IndirectCount, ///< vkCmdDraw(Indexed)IndirectCount
+    ByteCount,     ///< vkCmdDrawIndirectByteCountEXT
+};
+
+/// What Draw / DrawIndirect's draw_func read, taken by B from its replica and its buffer cache
+/// (the Vulkan rasterizer's StageDrawParams). In the packet packed by its command (PackDrawArgs).
+struct DrawArgs {
+    u64 indirect_buffer; ///< VkBuffer (kept by B's runtime until C is done: BuryBuffer)
+    u64 indirect_offset;
+    u64 count_buffer;
+    u64 count_offset;
+    u32 base_instance;
+    u32 num_instances;
+    u32 base_vertex;
+    u32 num_vertices;
+    u32 first_index;
+    u32 max_draw_counts;
+    u32 stride;
+    DrawCommand command;
+    bool is_indexed; ///< The command's (quads draw indexed)
+    u8 topology;     ///< Maxwell's, for C's replica (UpdateDynamicStates)
+    u8 reserved;
+};
+static_assert(std::is_trivially_copyable_v<DrawArgs>);
+
+/// Most words PackDrawArgs writes (an indirect count draw).
+inline constexpr u32 MaxDrawArgWords = 6;
+
+/// The words of `args` a draw of its command reads, to `out` (MaxDrawArgWords room); returns how
+/// many. Word 0: command, is_indexed and topology in bits 0-23, then per command
+///   Direct:        word 0 bits 32-63 first_index; base_instance, num_instances; base_vertex,
+///                  num_vertices (three words; 72 bytes unpacked, k2hiz)
+///   Indirect, ByteCount: word 0 bits 32-63 stride; indirect_buffer; indirect_offset;
+///                  max_draw_counts (four words)
+///   IndirectCount: those, then count_buffer, count_offset (six words)
+///   None:          word 0 alone
+[[nodiscard]] inline u32 PackDrawArgs(const DrawArgs& args, u64* out) noexcept {
+    const u64 flags = u64{static_cast<u8>(args.command)} | (u64{args.is_indexed ? 1u : 0u} << 8) |
+                      (u64{args.topology} << 16);
+    switch (args.command) {
+    case DrawCommand::Direct:
+        out[0] = flags | (u64{args.first_index} << 32);
+        out[1] = u64{args.base_instance} | (u64{args.num_instances} << 32);
+        out[2] = u64{args.base_vertex} | (u64{args.num_vertices} << 32);
+        return 3;
+    case DrawCommand::Indirect:
+    case DrawCommand::ByteCount:
+    case DrawCommand::IndirectCount:
+        out[0] = flags | (u64{args.stride} << 32);
+        out[1] = args.indirect_buffer;
+        out[2] = args.indirect_offset;
+        out[3] = args.max_draw_counts;
+        if (args.command != DrawCommand::IndirectCount) {
+            return 4;
+        }
+        out[4] = args.count_buffer;
+        out[5] = args.count_offset;
+        return 6;
+    case DrawCommand::None:
+        break;
+    }
+    out[0] = flags;
+    return 1;
+}
+
+/// The arguments PackDrawArgs packed (the fields its command does not read zero). A word count
+/// that is not its command's: the process stops (the reader's own check).
+[[nodiscard]] inline DrawArgs UnpackDrawArgs(std::span<const u64> words) noexcept {
+    if (words.empty()) [[unlikely]] {
+        std::abort();
+    }
+    DrawArgs args{};
+    const u64 w0 = words[0];
+    args.command = static_cast<DrawCommand>(w0 & 0xff);
+    args.is_indexed = ((w0 >> 8) & 1) != 0;
+    args.topology = static_cast<u8>(w0 >> 16);
+    const auto need = [&](size_t count) {
+        if (words.size() != count) [[unlikely]] {
+            std::abort();
+        }
+    };
+    switch (args.command) {
+    case DrawCommand::Direct:
+        need(3);
+        args.first_index = static_cast<u32>(w0 >> 32);
+        args.base_instance = static_cast<u32>(words[1]);
+        args.num_instances = static_cast<u32>(words[1] >> 32);
+        args.base_vertex = static_cast<u32>(words[2]);
+        args.num_vertices = static_cast<u32>(words[2] >> 32);
+        return args;
+    case DrawCommand::Indirect:
+    case DrawCommand::ByteCount:
+    case DrawCommand::IndirectCount:
+        need(args.command == DrawCommand::IndirectCount ? 6 : 4);
+        args.stride = static_cast<u32>(w0 >> 32);
+        args.indirect_buffer = words[1];
+        args.indirect_offset = words[2];
+        args.max_draw_counts = static_cast<u32>(words[3]);
+        if (args.command == DrawCommand::IndirectCount) {
+            args.count_buffer = words[4];
+            args.count_offset = words[5];
+        }
+        return args;
+    case DrawCommand::None:
+        need(1);
+        return args;
+    }
+    std::abort();
+}
 
 /// B: builds one draw's ring 3 payload in B's memory while B holds its cache locks; the payload
 /// goes to ring 3 once they are let go (K3):
@@ -103,8 +214,9 @@ inline constexpr u32 GeometrySlotWords = static_cast<u32>(sizeof(GeometrySlot) /
 ///      texture / sampler pool indices in ConfigureImpl's config_stage order. Per stage, per
 ///      texture buffer, image buffer, texture and image element its TIC index; a texture's TSC
 ///      index right after its TIC index
-///   3. geometry_slots GeometrySlot (the geometry mirror, T7)
-///   4. draw_words u64, the draw parameters (layout T7)
+///   3. geometry_slots GeometrySlot (the geometry mirror, T7): added one by one, or the packet's
+///      own (SetGeometry: B's runtime's PacketGeometry, copied to the ring by WriteTo alone)
+///   4. draw_words u64, the draw parameters (PackDrawArgs)
 /// Reused draw after draw (Begin): it allocates only to grow.
 class StageDrawWriter {
 public:
@@ -113,7 +225,8 @@ public:
         head = {};
         ClearSetup();
         geometry.clear();
-        draw.clear();
+        geometry_view = {};
+        draw_count = 0;
     }
 
     /// Empties the parts a pipeline setup writes (descriptor entries, handles), so a setup that
@@ -156,8 +269,18 @@ public:
         geometry.push_back(slot);
     }
 
+    /// The geometry part as `slots` (instead of AddGeometry): read by WriteTo, so valid until
+    /// then (B's runtime keeps PacketGeometry until its next BeginRecords).
+    void SetGeometry(std::span<const GeometrySlot> slots) noexcept {
+        geometry_view = slots;
+    }
+
     void AddDrawWords(const u64* data, u32 count) {
-        draw.insert(draw.end(), data, data + count);
+        if (draw_count + count > draw.size()) [[unlikely]] {
+            std::abort();
+        }
+        std::memcpy(draw.data() + draw_count, data, size_t{count} * sizeof(u64));
+        draw_count += count;
     }
 
     [[nodiscard]] u32 EntryCount() const noexcept {
@@ -171,21 +294,21 @@ public:
     [[nodiscard]] u32 Words() const noexcept {
         return DrawHeadWords + static_cast<u32>(entries.size()) +
                static_cast<u32>((handles.size() + 1) / 2) +
-               static_cast<u32>(geometry.size()) * GeometrySlotWords +
-               static_cast<u32>(draw.size());
+               static_cast<u32>(GeometrySlots().size()) * GeometrySlotWords + draw_count;
     }
 
     /// Writes the payload (Words() words) to `out`, the head with the tail's counts.
     void WriteTo(u64* out) const {
-        if (handles.size() > 0xffff || geometry.size() > 0xffff || draw.size() > 0xffff)
-            [[unlikely]] {
+        const std::span<const GeometrySlot> slots = GeometrySlots();
+        if (handles.size() > 0xffff || slots.size() > 0xff ||
+            (!geometry.empty() && !geometry_view.empty())) [[unlikely]] {
             std::abort();
         }
         DrawToC written = head;
         written.buffer_entries = stage_entries;
         written.handles = static_cast<u16>(handles.size());
-        written.geometry_slots = static_cast<u16>(geometry.size());
-        written.draw_words = static_cast<u16>(draw.size());
+        written.geometry_slots = static_cast<u8>(slots.size());
+        written.draw_words = static_cast<u8>(draw_count);
         std::memcpy(out, &written, sizeof(written));
         out += DrawHeadWords;
         if (!entries.empty()) {
@@ -198,23 +321,29 @@ public:
             std::memcpy(out, handles.data(), handles.size() * sizeof(u32));
             out += handle_words;
         }
-        if (!geometry.empty()) {
-            std::memcpy(out, geometry.data(), geometry.size() * sizeof(GeometrySlot));
-            out += geometry.size() * GeometrySlotWords;
+        if (!slots.empty()) {
+            std::memcpy(out, slots.data(), slots.size() * sizeof(GeometrySlot));
+            out += slots.size() * GeometrySlotWords;
         }
-        if (!draw.empty()) {
-            std::memcpy(out, draw.data(), draw.size() * sizeof(u64));
+        if (draw_count != 0) {
+            std::memcpy(out, draw.data(), size_t{draw_count} * sizeof(u64));
         }
     }
 
 private:
+    [[nodiscard]] std::span<const GeometrySlot> GeometrySlots() const noexcept {
+        return geometry_view.empty() ? std::span<const GeometrySlot>{geometry} : geometry_view;
+    }
+
     DrawToC head{};
     std::array<u8, DrawStages> stage_entries{};
     u32 next_stage{};
     std::vector<u64> entries;
     std::vector<u32> handles;
     std::vector<GeometrySlot> geometry;
-    std::vector<u64> draw;
+    std::span<const GeometrySlot> geometry_view;
+    std::array<u64, 16> draw{};
+    u32 draw_count{};
 };
 
 /// C: a draw's payload as StageDrawWriter wrote it (the ring 3 record's thunk gets the payload

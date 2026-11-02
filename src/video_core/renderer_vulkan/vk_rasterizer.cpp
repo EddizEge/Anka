@@ -4001,6 +4001,7 @@ void RasterizerVulkan::ForceGeometryForJoin() {
 void RasterizerVulkan::BeginStagesHook(void* context) {
     // Start, before B and C start (every stage drained).
     auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    stage_rasterizer = rasterizer;
     std::scoped_lock lock{rasterizer->buffer_cache.mutex};
     rasterizer->buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, rasterizer);
     rasterizer->buffer_cache_runtime.BeginStages();
@@ -4561,7 +4562,6 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     namespace Stages = VideoCommon::Nx2Stages;
     using LightChange = Tegra::Engines::Maxwell3D::LightChange;
     Tegra::Engines::Maxwell3D& mb = EngineB();
-    params.rasterizer = this;
     params.topology = static_cast<u8>(mb.draw_manager.draw_state.topology);
     bool invalidated;
     {
@@ -4630,27 +4630,20 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
     };
     Stages::StageDrawWriter& out = stage_writer;
-    const auto finish_head = [&](u64 seq, RecordList* records, LightLevel level) {
+    const auto finish_head = [&](u64 seq, RecordList* records) {
         Profile::FineScope scope{Profile::Zone::PacketBuild};
         Stages::DrawToC& head = out.Head();
         head.seq = seq;
         head.records = records;
-        head.instance_count = instance_count;
-        head.indirect = indirect;
-        head.light = {
-            .anchor_records = 0,
-            .epoch = anchor.epoch,
-            .reasons = 0,
-            .armed = level == LightLevel::Full,
-        };
+        head.light = {.epoch = anchor.epoch};
         // The geometry mirror: the packet's binds and the streams B keeps live (C binds them
-        // again where its command buffer lost them, BindGeometryC).
-        for (const Stages::GeometrySlot& slot : buffer_cache_runtime.PacketGeometry()) {
-            out.AddGeometry(slot);
-        }
+        // again where its command buffer lost them, BindGeometryC). The runtime's own slots,
+        // valid until its next BeginRecords: SendStageDraw copies them to ring 3.
+        out.SetGeometry(buffer_cache_runtime.PacketGeometry());
         head.vertex_live = buffer_cache.EnabledVertexBuffersMask();
-        out.AddDrawWords(reinterpret_cast<const u64*>(&params),
-                         static_cast<u32>(sizeof(params) / sizeof(u64)));
+        // Packed by command (a direct draw's 72 bytes in 24).
+        std::array<u64, Stages::MaxDrawArgWords> packed;
+        out.AddDrawWords(packed.data(), Stages::PackDrawArgs(params, packed.data()));
     };
 
     // The light decision: TryLightDraw's checks on what B sees.
@@ -4752,7 +4745,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             records = buffer_cache_runtime.EndRecords();
         }
         if (light_ok) {
-            finish_head(seq, records, last.level);
+            finish_head(seq, records);
             {
                 Profile::FineScope presets_scope{Profile::Zone::StagePresets};
                 NotePoolsB(mb, seq);
@@ -4891,7 +4884,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         follows = LightDrawEnabled() && StageLightEnabled() ? FollowableB(*pipeline, mb, shape_ok)
                                                             : LightLevel::None;
     }
-    finish_head(seq, records, follows);
+    finish_head(seq, records);
     {
         Profile::FineScope presets_scope{Profile::Zone::StagePresets};
         NotePoolsB(mb, seq);
@@ -5325,13 +5318,8 @@ static_assert(
 
 void RasterizerVulkan::StageDrawThunk(const u64* payload, u32 words) {
     const StageDrawReader in{payload, words};
-    StageDrawParams params;
-    const std::span<const u64> draw_words = in.DrawWords();
-    if (draw_words.size() * sizeof(u64) != sizeof(params)) [[unlikely]] {
-        std::abort();
-    }
-    std::memcpy(&params, draw_words.data(), sizeof(params));
-    params.rasterizer->PrepareDrawC(in, params);
+    const StageDrawParams params = VideoCommon::Nx2Stages::UnpackDrawArgs(in.DrawWords());
+    stage_rasterizer->PrepareDrawC(in, params);
 }
 
 void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawParams& params) {
