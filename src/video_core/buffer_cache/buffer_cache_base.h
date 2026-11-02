@@ -32,6 +32,7 @@
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/nx2_draw_memo.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
@@ -70,6 +71,13 @@ inline bool Nx2VertexSkip() {
 inline bool Nx2SyncMemo() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SYNC_MEMO") != 0;
+}
+/// EDEN_NX2_SYNC_SETS (with EDEN_NX2_SYNC_MEMO): ranges are remembered as the 4 KiB pages they
+/// left clean, four to a set (SyncMemoSets). =0 the direct-mapped byte ranges as before; =2 still
+/// walks a remembered range and reports any upload found there (as EDEN_NX2_SYNC_SKIP=2).
+inline int Nx2SyncSets() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SYNC_SETS");
 }
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
@@ -749,6 +757,8 @@ private:
     };
     static constexpr size_t SYNC_MEMO_SIZE = 2048;
     std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
+    /// EDEN_NX2_SYNC_SETS: the same, in pages and sets (Nx2SyncSets).
+    SyncMemoSets sync_sets;
 
     /// EDEN_NX2_SSBO_MEMO (BindGraphicsStorageBuffer): bindings StorageBufferBindingAt resolved,
     /// keyed by the two constant buffer words it read (address, then the size when packed), the

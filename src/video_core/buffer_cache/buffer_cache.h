@@ -2311,6 +2311,10 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
         bool memo_missed = false; // Counted only while profiling (EDEN_NX2_GPU_PROFILE)
+        // EDEN_NX2_SYNC_SETS: the range's pages, looked up in sync_sets instead of sync_memo.
+        SyncMemoSets::Set* memo_set = nullptr;
+        u32 first_page{};
+        u32 end_page{};
         if (Nx2SyncMemo() && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
@@ -2318,29 +2322,56 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 LOG_INFO(HW_GPU, "Buffer sync memo: {} of {} synchronizations skipped", skipped,
                          syncs);
             }
-            memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
-                              (SYNC_MEMO_SIZE - 1)];
-            // Only the range's own regions: one stamped elsewhere in a joined memo is no change
-            // here.
-            if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
-                memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
-                ++skipped;
-                Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
-                if (g_nx2_sync_skip_mode != 2) {
-                    return true;
+            const int sets_mode = Nx2SyncSets();
+            if (sets_mode != 0 && SyncMemoSets::Pages(device_addr, size, first_page, end_page)) {
+                memo_set = &sync_sets.SetOf(device_addr);
+                const auto query_holds = [&](u64 epoch) {
+                    return memory_tracker.UnsetSince(device_addr, size, epoch);
+                };
+                if (SyncMemoSets::Find(*memo_set, first_page, end_page, query_holds) != nullptr) {
+                    ++skipped;
+                    Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
+                    if (g_nx2_sync_skip_mode != 2 && sets_mode != 2) {
+                        return true;
+                    }
+                    memo_hit = true;
+                } else if (Nx2Profile::Enabled()) {
+                    memo_missed = true;
+                    static constexpr std::array kinds{
+                        Nx2Profile::Counter::SyncMemoMissEmpty,
+                        Nx2Profile::Counter::SyncMemoMissStamped,
+                        Nx2Profile::Counter::SyncMemoMissPartial,
+                        Nx2Profile::Counter::SyncMemoMissOther,
+                    };
+                    Nx2Profile::Add(kinds[SyncMemoSets::MissKind(*memo_set, first_page, end_page)],
+                                    1);
                 }
-                memo_hit = true;
-            } else if (Nx2Profile::Enabled()) {
-                // Why: no range yet, another range in the slot (a collision), one overlapping or
-                // touching this (not covering it), or this range's regions stamped since.
-                memo_missed = true;
-                Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
-                                : memo->begin <= device_addr && range_end <= memo->end
-                                    ? Nx2Profile::Counter::SyncMemoMissStamped
-                                : memo->begin <= range_end && device_addr <= memo->end
-                                    ? Nx2Profile::Counter::SyncMemoMissPartial
-                                    : Nx2Profile::Counter::SyncMemoMissOther,
-                                1);
+            } else if (sets_mode == 0) {
+                memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
+                                  (SYNC_MEMO_SIZE - 1)];
+                // Only the range's own regions: one stamped elsewhere in a joined memo is no
+                // change here.
+                if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
+                    memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
+                    ++skipped;
+                    Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
+                    if (g_nx2_sync_skip_mode != 2) {
+                        return true;
+                    }
+                    memo_hit = true;
+                } else if (Nx2Profile::Enabled()) {
+                    // Why: no range yet, another range in the slot (a collision), one
+                    // overlapping or touching this (not covering it), or this range's regions
+                    // stamped since.
+                    memo_missed = true;
+                    Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
+                                    : memo->begin <= device_addr && range_end <= memo->end
+                                        ? Nx2Profile::Counter::SyncMemoMissStamped
+                                    : memo->begin <= range_end && device_addr <= memo->end
+                                        ? Nx2Profile::Counter::SyncMemoMissPartial
+                                        : Nx2Profile::Counter::SyncMemoMissOther,
+                                    1);
+                }
             }
         }
         upload_copies.clear();
@@ -2366,6 +2397,14 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             });
             add_upload(upload_start, device_addr_out + range_size);
         });
+        if (memo_set != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
+            // ForEachUploadRange cleared the CPU and untracked bits of every page the range
+            // touches (whole-page masks) and nothing could set one since.
+            SyncMemoSets::Store(*memo_set, first_page, end_page, sync_epoch,
+                                [&](u64 begin, u64 bytes, u64 epoch) {
+                                    return memory_tracker.UnsetSince(begin, bytes, epoch);
+                                });
+        }
         if (memo != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
             // ForEachUploadRange cleared the CPU and untracked bits of every page in the range and
             // nothing could set one since. A remembered range that overlaps or touches it and
