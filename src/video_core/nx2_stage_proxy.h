@@ -16,17 +16,18 @@ namespace VideoCommon::Nx2Stages {
 /// (Forwarding()) a member either goes to BC as a record (Post: the arguments copied, spans' bytes
 /// with them, std::function moved to the heap as DeferFunction does) or runs on A with the stages
 /// parked (JoinFromA); from any other thread it calls the real rasterizer. K1 classes:
-/// - Draw, DrawIndirect, DrawTexture: a draw record, the side state that changed before it
-///   (WriteSideState, nx2_stage_api.h); BC applies it, then draws.
+/// - Draw, DrawIndirect, DrawTexture, Clear: a draw record, the side state of the bound
+///   channel's Maxwell3D that changed before it (WriteSideState, nx2_stage_api.h); BC applies it
+///   to its replica, then draws.
 /// - Join: the members returning a value (MustFlushRegion, HoldsGpuWrittenData, GetFlushArea,
-///   PendingSemaphoreRelease, TryCacheInvalidation, OnCPUWrite, AccelerateSurfaceCopy, ...);
-///   FlushRegion, FlushAll, FlushAndInvalidateRegion (S7); AccelerateConditionalRendering (S1);
-///   InitializeChannel, BindChannel, ReleaseChannel.
+///   PendingSemaphoreRelease, TryCacheInvalidation, OnCPUWrite, AccelerateSurfaceCopy,
+///   WorkEpoch, BoundGeometryBuffer); FlushRegion, FlushAll, FlushAndInvalidateRegion (S7);
+///   AccelerateConditionalRendering (S1); InitializeChannel, BindChannel, ReleaseChannel.
 /// - The real one directly: HasDrawTransformFeedback (a device constant), LoadDiskResources.
-///   AccessAccelerateDMA and InvalidateRegion from A outside a join are reported (STAGE_CHECK,
-///   S7): MaxwellDMA's executable methods run in a ring level join.
-/// - Every other member: Post.
-/// Skeleton (T0): every member calls the real rasterizer.
+/// - Only expected in a join (ring level for the engines but Maxwell3D), reported from A outside
+///   one (STAGE_CHECK, S7): AccessAccelerateDMA (then the real one), InvalidateRegion and
+///   DispatchCompute (then a join).
+/// - Every other member: Post (AccelerateInlineToMemory and InnerInvalidation with their data).
 class Nx2StageProxy final : public VideoCore::RasterizerInterface {
 public:
     explicit Nx2StageProxy(VideoCore::RasterizerInterface& real_);
@@ -98,14 +99,20 @@ private:
     VideoCore::RasterizerInterface& real;
 };
 
-/// Start (nothing runs behind the front): makes the proxy for `real` and stages every channel the
-/// GPU has, not only the bound one (StageChannel; S3). T5 enumerates them (Control::Scheduler's
-/// channels).
+/// Start (nothing runs behind the front): makes the proxy for `real` and stages every initialized
+/// channel the GPU has, not only the bound one (StageChannel; S3), from Control::Scheduler's
+/// channels. Not at =3: BC runs ring 1 on the primaries there.
 void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real);
 /// Stop (the stages stopped): unstages every channel, frees the proxy.
 void UninstallProxy(Core::System& system);
 /// The proxy while installed, else null: a channel bound first after Start is staged in its
 /// BindChannel join (S3).
 Nx2StageProxy* Proxy();
+
+/// A, in the join of a channel's first bind in a split session or of a channel change
+/// (Control::Scheduler, S3): stages the channel if it is not; if it is, points its engines and
+/// memory manager at the proxy again (an address space bound since, or InitChannel binding the
+/// real rasterizer after InstallProxy staged the channel). Nothing without the proxy.
+void StageBoundChannel(Tegra::Control::ChannelState& channel);
 
 } // namespace VideoCommon::Nx2Stages
