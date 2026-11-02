@@ -4606,6 +4606,24 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
                                        std::span<const u8> memory) {
     // AccelerateInlineToMemory's halves: guest memory, the buffer cache and the shaders here,
     // the query and texture invalidations C's (in ring 3's order, before anything after).
+    {
+        // eszaman-4: C reads the texture header and sampler pools from guest memory for draws B
+        // sent before this write. One into them is made in a join: C parked having run those,
+        // the old body here, its invalidations in order. (Images C uploads from guest memory
+        // would need a summary of their pages from C: not here yet.)
+        const auto& regs = EngineB().regs;
+        const auto pool_written = [&](GPUVAddr pool, u32 limit) {
+            const GPUVAddr end = pool + (u64{limit} + 1) * 32;
+            return pool != 0 && address < end && pool < address + copy_size;
+        };
+        if (pool_written(regs.tex_header.Address(), regs.tex_header.limit) ||
+            pool_written(regs.tex_sampler.Address(),
+                         (std::max)(regs.tex_sampler.limit, regs.tex_header.limit))) {
+            FlushStageCWork();
+            JoinB([&] { AccelerateInlineToMemory(address, copy_size, memory); });
+            return;
+        }
+    }
     NoteLightWork();
     const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (!cpu_addr) [[unlikely]] {
