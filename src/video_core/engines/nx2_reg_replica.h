@@ -7,6 +7,7 @@
 #include <bitset>
 
 #include "common/common_types.h"
+#include "video_core/nx2_stage_ring.h"
 
 namespace Tegra::Engines {
 class Maxwell3D;
@@ -18,6 +19,7 @@ namespace VideoCommon::Nx2RegReplica {
 
 /// Maxwell3D::Regs::NUM_REGS (asserted where both are visible, T2).
 inline constexpr u32 NumRegs = 0xE00;
+static_assert(NumRegs <= Nx2Stages::MaxDeltaWords, "a flush of the capture fits one record (K9)");
 /// Maxwell3D::DirtyState::Flags and ::Tables.
 using DirtyFlags = std::bitset<256>;
 using DirtyTables = std::array<std::array<u8, NumRegs>, 2>;
@@ -44,16 +46,24 @@ constexpr u32 DeltaValue(u64 word) {
 
 /// A's register capture: the Maxwell3D writes since the last record A sent, one word per register
 /// (its last value, Dirty and Changed ORed over its writes), in the order of their first writes.
-/// Maxwell3D's stage_capture points at it while staged (Nx2Stages::Capture, nx2_stage_api.h).
+/// Maxwell3D's stage_capture points at it while staged (Nx2Stages::Capture, nx2_stage_api.h);
+/// Maxwell3D's hooks test stage_capture, not Nx2Stages::Active() (K1: =3 stages no channel).
 class RegCapture {
 public:
     /// ProcessDirtyRegisters' write, made after its DrawDeferred (S18). Writes
-    /// ProcessDirtyRegisters does not make (const_buffer.offset +=, shadow_scratch, ...) are noted
-    /// with dirty false.
+    /// ProcessDirtyRegisters does not make (shadow_scratch, ...) are noted with dirty false; not
+    /// const_buffer.offset's advance by cb data: StageCbWrite makes it on the replica (K6).
     /// The constant buffer data registers (const_buffer.buffer[0..15]) are left out but at =2
-    /// (S5/4: no stage reads them). A write to another engine than Source() first sends
-    /// Nx2Stages::PostTarget(Ring::ToB, &engine): what is pending goes there, for the old one.
+    /// (S5/4: no stage reads them). A write to another engine than Source() first
+    /// SelectTarget(engine).
+    /// Inside a join (Nx2Stages::InJoin()) it only collects, no record can go (K4): a write to
+    /// another engine there is an error (no Maxwell3D method runs in a join but
+    /// ProcessQueryCondition's, which writes execute_on alone).
     void Note(Tegra::Engines::Maxwell3D& engine, u32 method, u32 value, bool dirty, bool changed) {}
+    /// The engine A's next writes and records are for: when another than Source(), sends
+    /// Nx2Stages::PostTarget(Ring::ToB, &engine) (what is pending goes there, for the old one) and
+    /// makes it Source(). Note calls it, and Nx2Stages::PostCbData (K6).
+    void SelectTarget(Tegra::Engines::Maxwell3D& engine) {}
 
     /// Delta words pending (each record from A takes them, Nx2Stages::Reserve).
     [[nodiscard]] u32 PendingWords() const {

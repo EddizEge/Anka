@@ -243,7 +243,9 @@ void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words)
     EndRecord(ring);
 }
 
-void PostCbData(Ring ring, GPUVAddr address, const u32* data, u32 count) {
+void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address, const u32* data,
+                u32 count) {
+    Capture().SelectTarget(primary);
     if (ring == Ring::ToB) {
         g_pipeline.PostCbData(address, data, count);
         return;
