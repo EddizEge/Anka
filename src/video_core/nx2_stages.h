@@ -153,7 +153,10 @@ void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// stream), until their op ran. So the queries and semaphore releases B sent C before a mark are
 /// in C's query cache when the front's Drain ends, written or pending there: the puller's
 /// PendingSemaphoreRelease after its Drain sees them (a DMA read waits for the releases before
-/// it, PLAN §7/19). No stage holds a release of work before a mark outside the query cache.
+/// it, PLAN §7/19). No stage holds a release of work before a mark outside the query cache. A
+/// release behind a fence (IsAFence) B runs in a join instead (T7d: the fence manager takes the
+/// buffer cache mutex, never in a record of C's): in the query cache's pending releases once B
+/// passed it, before the mark, after what B sent C before it (the join's).
 void PostMark(Ring ring, u64 ring1_position);
 
 /// Why A joins (counted: Counter::JoinsAEngine + reason).
