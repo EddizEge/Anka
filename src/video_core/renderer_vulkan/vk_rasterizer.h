@@ -18,6 +18,9 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_gpu_pages.h"
+#include "video_core/nx2_stage_draw.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -113,8 +116,16 @@ public:
     bool HoldsGpuWrittenData(DAddr addr, u64 size) override;
     void NoteEngineWork() override {
         NoteLightWork();
+        if (split_draws) [[unlikely]] {
+            NoteStagesStopped();
+        }
     }
     [[nodiscard]] u64 WorkEpoch() const noexcept override {
+        if (split_draws && VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B))
+            [[unlikely]] {
+            // Cut c: B's copy (S12), what B's own events moved, in B's order.
+            return light_epoch_b.load(std::memory_order_seq_cst);
+        }
         return light_epoch.load(std::memory_order_seq_cst);
     }
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
@@ -230,7 +241,128 @@ private:
     /// Work outside draws that may change what the next draw would bind (any thread).
     void NoteLightWork() noexcept {
         light_epoch.fetch_add(1, std::memory_order_seq_cst);
+        if (split_draws && !VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::C))
+            [[unlikely]] {
+            // S12: every event C will run that notes work passes B first and moves B's copy
+            // there; C's own notes (its half of the same event) move only the shared one.
+            light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
+        }
     }
+
+    // Back stages, cut c (Kesim-2, EDEN_NX2_BACK_STAGES with 'c'; PLAN.md §4.3 T7). On B the
+    // draws and the two-part events split themselves: B does the memory half (FlushCaching, the
+    // buffer cache, the pipeline lookup, the light decision; its Vulkan commands into a record
+    // list) and sends C the rest in ring 3, C (the only stage that records) replays B's list and
+    // does the texture half, the recording and the draw. Everywhere else (C, A in a join, other
+    // threads, B in a join of its own) the old bodies run; PrepareDraw and TryLightDraw are
+    // unchanged and unused on B.
+    using StageDrawReader = VideoCommon::Nx2Stages::StageDrawReader;
+
+    [[nodiscard]] bool SplitOnB() const noexcept {
+        return split_draws && VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B) &&
+               !b_in_join;
+    }
+
+    /// What C records for a packet (StageDrawParams::command).
+    enum class StageCommand : u8 {
+        None,          ///< Only B's records (a draw cut short: RESETFIX, no pipeline)
+        Direct,        ///< vkCmdDraw / vkCmdDrawIndexed
+        Indirect,      ///< vkCmdDraw(Indexed)Indirect
+        IndirectCount, ///< vkCmdDraw(Indexed)IndirectCount
+        ByteCount,     ///< vkCmdDrawIndirectByteCountEXT
+    };
+    /// The packet's draw words (DrawToC's tail part 4): what Draw / DrawIndirect's draw_func
+    /// read, taken by B from its replica and its buffer cache.
+    struct StageDrawParams {
+        RasterizerVulkan* rasterizer;
+        u64 indirect_buffer; ///< VkBuffer (kept by B's runtime until C is done: BuryBuffer)
+        u64 indirect_offset;
+        u64 count_buffer;
+        u64 count_offset;
+        u32 base_instance;
+        u32 num_instances;
+        u32 base_vertex;
+        u32 num_vertices;
+        u32 first_index;
+        u32 max_draw_counts;
+        u32 stride;
+        StageCommand command;
+        bool is_indexed; ///< The command's (quads draw indexed)
+        u8 topology;     ///< Maxwell's, for C's replica (UpdateDynamicStates)
+        u8 reserved;
+    };
+    static_assert(sizeof(StageDrawParams) % sizeof(u64) == 0);
+
+    /// B's replica of the bound channel's Maxwell3D (Role::Memory; maxwell3d is C's).
+    [[nodiscard]] Tegra::Engines::Maxwell3D& EngineB();
+    /// B: Draw / DrawIndirect.
+    void DrawB(bool is_indexed, u32 instance_count);
+    void DrawIndirectB();
+    /// B: PrepareDraw's memory half and the light decision; sends the packet. `params` holds the
+    /// direct draw's parameters (the indirect ones are taken after the setup).
+    void PrepareDrawB(bool is_indexed, bool indirect, bool shape_ok, u32 instance_count,
+                      StageDrawParams& params);
+    /// B: what may follow a draw it set up in full, by what B sees (C adds its own: render
+    /// targets and views to repeat).
+    [[nodiscard]] LightLevel FollowableB(const GraphicsPipeline& pipeline,
+                                         const Tegra::Engines::Maxwell3D& mb, bool shape_ok) const;
+    /// B: LightUniformOk without C's part (images written: C checks the write hits).
+    [[nodiscard]] bool LightUniformOkB(GraphicsPipeline& pipeline, Tegra::Engines::Maxwell3D& mb,
+                                       bool invalidated, bool& rebind_storage);
+    /// B, RESETFIX (Donkey Kong Bananza's terrain reset program, PrepareDraw): whether this draw
+    /// runs that program (its answers kept in B's statics); StageResetStores then makes its
+    /// stores, the list flushed first in a join (no lock held), the writes in a packet of their
+    /// own, and the draw is cut short.
+    [[nodiscard]] bool StageResetProgram(Tegra::Engines::Maxwell3D& mb, bool is_indexed);
+    void StageResetStores(Tegra::Engines::Maxwell3D& mb);
+    /// B, inside a packet with the buffer cache locked: AccelerateInlineRuns' memory half.
+    void InlineRunsB(std::span<const std::pair<GPUVAddr, u32>> runs, std::span<const u8> data);
+    void InlineToMemoryB(GPUVAddr address, size_t copy_size, std::span<const u8> memory);
+    void InnerInvalidationB(std::span<const std::pair<DAddr, std::size_t>> sequences);
+    [[nodiscard]] bool HoldsGpuWrittenDataB(DAddr begin, size_t span);
+    void ClearB(u32 layer_count);
+    void DrawTextureB();
+    void WaitForIdleB();
+    void TickFrameB();
+    /// B: a join of its own: C parked, the old bodies run here (b_in_join).
+    template <typename Func>
+    void JoinB(Func&& func);
+    /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
+    /// of their own (sent when not empty) unless one is open.
+    template <typename Func>
+    void StageBufferWork(Func&& work);
+    /// B: the runtime staged (BufferCacheRuntime::BeginStages) and bound to JoinFromB, at B's
+    /// first use with the stages on; NoteEngineWork ends it once they stopped.
+    void EnsureSplitStaged();
+    void NoteStagesStopped();
+    static void StageRecordOwnerHook(void* context, RecordList* records,
+                                     VideoCommon::Nx2Stages::FunctionRef op);
+    /// B, no cache lock held: C's half of B's invalidations so far (texture WriteMemory, query
+    /// InvalidateRegion), then a packet's records, to ring 3.
+    void FlushStageCWork();
+    void SendStageRecords(u64 seq, RecordList* records);
+    /// B, no cache lock held: the draw packet in stage_writer.
+    void SendStageDraw();
+
+    /// C: ring 3's records.
+    static void StageDrawThunk(const u64* payload, u32 words);
+    static void StageInvalidateThunk(const u64* payload, u32 words);
+    void PrepareDrawC(const StageDrawReader& in, const StageDrawParams& params);
+    void RunStageRecords(RecordList* records, u64 seq);
+    void RunStageInvalidations(const u64* ranges, u32 count);
+    void RecordStageDraw(const StageDrawParams& params);
+    void ClearRecord(u32 layer_count);
+    void WaitForIdleRecord();
+    void TickFrameC();
+    /// C: a packet's seq recorded; the anchor's held back while a light draw may repair with
+    /// its descriptor entries (their uniform data in B's staging pool).
+    void NoteStageSeq(u64 seq);
+    void ReleaseAnchorC();
+    /// C: the anchor's packet as a light draw's repair reads it.
+    void SaveAnchorC(const StageDrawReader& in, std::span<const u32> handles);
+    /// EDEN_NX2_BACK_STAGES=2: the split setup against the old one (Configure, B parked).
+    void CheckSplitSetup(GraphicsPipeline& pipeline, std::span<const u32> handles, bool is_indexed,
+                         bool light);
 
     void FlushWork();
 
@@ -322,6 +454,46 @@ private:
         std::vector<u32> values; ///< The pipeline's descriptor word values it left
     };
     LightVerify light_verify;
+
+    // Back stages, cut c (T7).
+    bool split_draws{}; ///< Set once (constructor): EDEN_NX2_BACK_STAGES with cut c
+    bool b_in_join{};   ///< B runs a join of its own (JoinB, the record owner hook)
+    /// B's copy of light_epoch (S12): moved by B's events and other threads' notes, not by C's.
+    std::atomic<u64> light_epoch_b{};
+    /// B's light anchor: LightAnchor's fields B sees.
+    struct LightAnchorB {
+        Tegra::Engines::Maxwell3D* maxwell3d{};
+        Tegra::MemoryManager* gpu_memory{};
+        GraphicsPipeline* pipeline{};
+        u64 epoch{};
+        u64 cached_writes{};
+        u64 same_writes{};
+        u64 cb_writes{};
+        u64 shader_hits{};
+        Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology topology{};
+        Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format{};
+        bool is_indexed{};
+        bool indirect{};
+        LightLevel level{};
+    };
+    LightAnchorB light_anchor_b;
+    /// C's light anchor: what C checks a light packet against and repairs it with.
+    struct LightAnchorC {
+        GraphicsPipeline* pipeline{};
+        u64 record_count{}; ///< Scheduler::RecordCount once the anchor was recorded
+        u64 image_hits{};   ///< texture_cache.WriteHits() then
+        u64 hold_seq{};     ///< The anchor's seq, not noted while held (0: none)
+        u64 last_seq{};     ///< The last packet seq C saw
+        bool followable{};  ///< No render target or view to repeat (LightFollowable's C part)
+        std::vector<u64> payload; ///< Its packet: head, descriptor entries, handles
+    };
+    LightAnchorC light_anchor_c;
+    VideoCommon::Nx2Stages::StageDrawWriter stage_writer; ///< B
+    /// B: C's half of B's invalidations not sent yet, two words each: the device address, the
+    /// size with what in the top bits (vk_rasterizer.cpp: StageRangeTexture, StageRangeQuery).
+    std::vector<u64> stage_c_ranges;
+    /// The pages C may hold GPU-written data on (T8's summary; skeleton: every page).
+    VideoCommon::Nx2Stages::Nx2GpuPages stage_gpu_pages;
 };
 
 } // namespace Vulkan
