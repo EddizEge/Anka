@@ -297,7 +297,12 @@ void Nx2StageProxy::SignalSyncPoint(u32 value) {
     if (!Forwarding()) {
         return real.SignalSyncPoint(value);
     }
-    Post(Ring::ToB, [value] { OnBc("Nx2StageProxy::SignalSyncPoint").SignalSyncPoint(value); });
+    // Cut c (R2 F4): a join from B, C parked. The guest's syncpoint runs what was registered on
+    // it, GPU::RequestComposite's Composite (TickFrame) among them: on B, the record owner then,
+    // never on B outside a join. K1 (BC): at once, as before.
+    Post(Ring::ToB, [value] {
+        JoinFromB([value] { OnBc("Nx2StageProxy::SignalSyncPoint").SignalSyncPoint(value); });
+    });
 }
 
 void Nx2StageProxy::SignalReference() {

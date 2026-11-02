@@ -154,10 +154,19 @@ struct GpuHandler {
     void Parked() {
         Nx2Profile::Add(Counter::Parks, 1);
     }
+    void Hazard(u8 stage, StageHazard what, u64 a, u64 b);
+    /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
+    void BoundaryWork() {
+        g_system->GPU().TickWork();
+    }
 };
 
 GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
+
+/// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
+/// and run the GPU's sync requests (StageTickWork).
+thread_local bool t_park_op{};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
 /// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
@@ -228,6 +237,22 @@ void CheckRecord(u32 payload_words) {
         ASSERT_MSG(!InJoin(), "GPU stages: a record from A inside a join");
         ASSERT_MSG(1 + payload_words <= MaxBodyWords, "GPU stages: a record of {} words",
                    1 + payload_words);
+    }
+}
+
+void GpuHandler::Hazard(u8 stage, StageHazard what, u64 a, u64 b) {
+    // A broken K3 rule (never in a correct run): counted, the first ones logged with their stack.
+    Nx2Profile::Add(Counter::StageViolations, 1);
+    const char* const text = what == StageHazard::ParkInRecord
+                                 ? "ParkB inside a record at =1 (C cannot run on to where B parks)"
+                                 : "a join from B acked short of its target";
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) < 8) {
+        LOG_CRITICAL(HW_GPU, "GPU stages: {} on {} ({:#x}, {:#x})", text,
+                     Nx2Profile::stage_report_names[stage], a, b);
+    }
+    if (g_check) {
+        ReportStack("stage hazard", text);
     }
 }
 
@@ -380,9 +405,30 @@ void JoinFromB(FunctionRef op) {
 }
 
 void JoinFromBLocked(FunctionRef op) {
-    // The interface first (T9a): until its body (no ring 3 record, no ParkB served while B holds
-    // the mutex) it joins as JoinFromB does, as the record owner hook did before.
-    JoinFromB(op);
+    if (!Active() || !OnStage(Stage::B) || !g_pipeline.Options().cut_c ||
+        g_owner.load(std::memory_order_relaxed) == StageIdB) {
+        op();
+        return;
+    }
+    Nx2Profile::Add(Counter::JoinsB, 1);
+    const auto start =
+        g_check ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    g_pipeline.JoinFromBLocked([&] {
+        if (g_check) {
+            // B holds the buffer cache mutex while it waits: C reaching the join's target must
+            // not take it (K3 (a)); a long wait is the sign it does.
+            const auto waited = std::chrono::steady_clock::now() - start;
+            if (waited > std::chrono::milliseconds{50}) {
+                LOG_WARNING(HW_GPU,
+                            "GPU stages: a locked join from B waited {} ms for C to park "
+                            "(K3 deadlock suspect: C taking the buffer cache mutex)",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
+            }
+        }
+        g_owner.store(StageIdB, std::memory_order_release);
+        op();
+        g_owner.store(g_default_owner, std::memory_order_release);
+    });
 }
 
 void ParkB(FunctionRef op) {
@@ -390,11 +436,36 @@ void ParkB(FunctionRef op) {
         op();
         return;
     }
-    g_pipeline.ParkB(op);
+    g_pipeline.ParkB([&] {
+        const bool was_park_op = t_park_op;
+        t_park_op = true;
+        op();
+        t_park_op = was_park_op;
+    });
 }
 
-bool StageTickWork([[maybe_unused]] FunctionRef run) {
-    // The interface first (T9a): until its body the caller runs the requests where it stands.
+bool StageTickWork(FunctionRef run) {
+    if (!Active() || !g_pipeline.Options().cut_c) {
+        return false;
+    }
+    if (OnStage(Stage::C)) {
+        if (t_park_op) {
+            // B parked already: the requests run here.
+            return false;
+        }
+        if (g_pipeline.CInRecord()) {
+            // At the record boundary after this one (the boundary work calls TickWork again).
+            g_pipeline.RequestBoundaryWork();
+            return true;
+        }
+        ParkB(run);
+        return true;
+    }
+    if (OnStage(Stage::B) || Forwarding()) {
+        g_pipeline.RequestBoundaryWork();
+        return true;
+    }
+    // A inside its join (B and C parked), a thread that is no stage.
     return false;
 }
 
@@ -406,8 +477,16 @@ void CheckStage(Stage stage, const char* where) {
     ReportStack("stage check", where);
 }
 
-void CheckBufferLock([[maybe_unused]] const char* where) {
-    // The interface first (T9a): checked once ParkB marks its op (T9's next step).
+void CheckBufferLock(const char* where) {
+    if (!g_check || !Active() || !g_pipeline.Options().cut_c) {
+        return;
+    }
+    // C only inside a ParkB op; A only inside its join; B and threads that are no stage at will.
+    if (OnStage(Stage::C) ? t_park_op : !Forwarding()) {
+        return;
+    }
+    Nx2Profile::Add(Counter::StageViolations, 1);
+    ReportStack("buffer lock check", where);
 }
 
 void ReportStageHazard(const char* what) {

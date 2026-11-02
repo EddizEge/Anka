@@ -216,7 +216,9 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 //   join's `op` runs on the joiner and may take it there: A in JoinFromA (B and C parked, holding
 //   none), B in JoinFromB, B again in JoinFromBLocked (the same thread; recursive). Threads that
 //   are no stage (the guest CPU's, the fence thread) take it as before and wait for a
-//   JoinFromBLocked to end.
+//   JoinFromBLocked to end; while they wait for it they hold no other cache lock (C may need
+//   the texture or query cache's to reach the join's target; one std::scoped_lock of several
+//   mutexes waits holding none of them, taking one inside another's scope does not).
 // - Every other cache lock (texture, query, the scheduler's): no stage holds one at a park point,
 //   when it asks (JoinFromB, JoinFromBLocked, ParkB) or while it writes or waits on ring 3. So an
 //   `op` may take any lock: the parked stage holds none.
@@ -261,8 +263,9 @@ void ParkB(FunctionRef op);
 /// buffer cache and C's caches and scheduler alike. They run on C at a record boundary of ring 3
 /// inside a ParkB (`run` its `op`; R2 F4), never inside a record (PrepareDrawC's TickWork) nor on
 /// B. True when the stages took them: `run` ran so, or waits for C's next record boundary, which
-/// calls GPU::TickWork again. False when the caller runs `run` now: cut c off (K1, =0, =3), or a
-/// thread that is no stage.
+/// calls GPU::TickWork again (from C inside a record, B, A outside a join). False when the caller
+/// runs `run` now: cut c off (K1, =0, =3), C inside a ParkB op or A inside its join (the others
+/// parked already), a thread that is no stage.
 bool StageTickWork(FunctionRef run);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and
