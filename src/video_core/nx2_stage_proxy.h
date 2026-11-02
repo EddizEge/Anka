@@ -17,7 +17,8 @@ namespace VideoCommon::Nx2Stages {
 /// with them, std::function moved to the heap as DeferFunction does) or runs on A with the stages
 /// parked (JoinFromA); from any other thread it calls the real rasterizer. K1 classes:
 /// - Draw, DrawIndirect, DrawTexture: a draw record, the side state that changed before it
-///   (WriteSideState, nx2_stage_api.h); BC applies it, then draws.
+///   (WriteSideState, nx2_stage_api.h) of the drawing primary, GPU::Maxwell3D() on A (K10); BC
+///   applies it to that primary's replica, then draws.
 /// - Join: the members returning a value (MustFlushRegion, HoldsGpuWrittenData, GetFlushArea,
 ///   PendingSemaphoreRelease, TryCacheInvalidation, OnCPUWrite, AccelerateSurfaceCopy, ...);
 ///   FlushRegion, FlushAll, FlushAndInvalidateRegion (S7); AccelerateConditionalRendering (S1);

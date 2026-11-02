@@ -80,6 +80,11 @@ void ApplyDelta(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count)
 void StageCbWrite(Tegra::Engines::Maxwell3D& replica, GPUVAddr address, const u32* data,
                   u32 count);
 
+/// The primary a draw's side state is for (K10; the proxy's Draw / DrawIndirect / DrawTexture
+/// get no engine): A's bound channel's Maxwell3D, GPU::Maxwell3D() on A. It is the one drawing
+/// because BindChannel joins when the channel changes (GPU::BindChannel runs on A, T5; PLAN §7/8:
+/// an Owner BindChannel to another channel would break this). The draw record carries it; the
+/// consumer applies the side state to ReplicaOf(primary, its stage).
 /// A: words of the side state parts that changed since they were last sent (0: none).
 u32 SideStateWords(Tegra::Engines::Maxwell3D& primary);
 /// A: writes them (SideStateWords words, Nx2RegReplica's format) and notes them sent.
