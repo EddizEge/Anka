@@ -759,6 +759,21 @@ public:
         EndJoin(id);
     }
 
+    /// B (cut c) inside a packet, holding the buffer cache mutex (K3 (a), R2 F6): as JoinFromB,
+    /// but it writes nothing to ring 3 (no wait for room there while it holds the mutex): the
+    /// deltas it has not passed stay pending, for its next ring 3 record. C's replica lags B's
+    /// by them meanwhile. Without cut c `op` runs at once.
+    template <typename Op>
+    void JoinFromBLocked(Op&& op) {
+        if (!to_c) {
+            op();
+            return;
+        }
+        const u32 id = AskJoin();
+        op();
+        EndJoin(id);
+    }
+
     /// C (cut c), at a record boundary of ring 3: B parks at its next park point (a record
     /// boundary of ring 2 or its wait for ring 2); C runs ring 3 on up to where B parked,
     /// answering B's joins once reached; then `op` runs on C and B goes on (R2 F1, F2). Inside a

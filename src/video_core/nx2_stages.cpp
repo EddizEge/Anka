@@ -386,9 +386,30 @@ void JoinFromB(FunctionRef op) {
 }
 
 void JoinFromBLocked(FunctionRef op) {
-    // The interface first (T9a): until its body (no ring 3 record, no ParkB served while B holds
-    // the mutex) it joins as JoinFromB does, as the record owner hook did before.
-    JoinFromB(op);
+    if (!Active() || !OnStage(Stage::B) || !g_pipeline.Options().cut_c ||
+        g_owner.load(std::memory_order_relaxed) == StageIdB) {
+        op();
+        return;
+    }
+    Nx2Profile::Add(Counter::JoinsB, 1);
+    const auto start =
+        g_check ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    g_pipeline.JoinFromBLocked([&] {
+        if (g_check) {
+            // B holds the buffer cache mutex while it waits: C reaching the join's target must
+            // not take it (K3 (a)); a long wait is the sign it does.
+            const auto waited = std::chrono::steady_clock::now() - start;
+            if (waited > std::chrono::milliseconds{50}) {
+                LOG_WARNING(HW_GPU,
+                            "GPU stages: a locked join from B waited {} ms for C to park "
+                            "(K3 deadlock suspect: C taking the buffer cache mutex)",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
+            }
+        }
+        g_owner.store(StageIdB, std::memory_order_release);
+        op();
+        g_owner.store(g_default_owner, std::memory_order_release);
+    });
 }
 
 void ParkB(FunctionRef op) {
