@@ -154,10 +154,7 @@ struct GpuHandler {
     void Parked() {
         Nx2Profile::Add(Counter::Parks, 1);
     }
-    /// A broken K3 rule (StagePipeline): counted.
-    void Hazard(u8, StageHazard, u64, u64) {
-        Nx2Profile::Add(Counter::StageViolations, 1);
-    }
+    void Hazard(u8 stage, StageHazard what, u64 a, u64 b);
     /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
     void BoundaryWork() {
         g_system->GPU().TickWork();
@@ -240,6 +237,22 @@ void CheckRecord(u32 payload_words) {
         ASSERT_MSG(!InJoin(), "GPU stages: a record from A inside a join");
         ASSERT_MSG(1 + payload_words <= MaxBodyWords, "GPU stages: a record of {} words",
                    1 + payload_words);
+    }
+}
+
+void GpuHandler::Hazard(u8 stage, StageHazard what, u64 a, u64 b) {
+    // A broken K3 rule (never in a correct run): counted, the first ones logged with their stack.
+    Nx2Profile::Add(Counter::StageViolations, 1);
+    const char* const text = what == StageHazard::ParkInRecord
+                                 ? "ParkB inside a record at =1 (C cannot run on to where B parks)"
+                                 : "a join from B acked short of its target";
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) < 8) {
+        LOG_CRITICAL(HW_GPU, "GPU stages: {} on {} ({:#x}, {:#x})", text,
+                     Nx2Profile::stage_report_names[stage], a, b);
+    }
+    if (g_check) {
+        ReportStack("stage hazard", text);
     }
 }
 
@@ -464,8 +477,16 @@ void CheckStage(Stage stage, const char* where) {
     ReportStack("stage check", where);
 }
 
-void CheckBufferLock([[maybe_unused]] const char* where) {
-    // The interface first (T9a): checked once ParkB marks its op (T9's next step).
+void CheckBufferLock(const char* where) {
+    if (!g_check || !Active() || !g_pipeline.Options().cut_c) {
+        return;
+    }
+    // C only inside a ParkB op; A only inside its join; B and threads that are no stage at will.
+    if (OnStage(Stage::C) ? t_park_op : !Forwarding()) {
+        return;
+    }
+    Nx2Profile::Add(Counter::StageViolations, 1);
+    ReportStack("buffer lock check", where);
 }
 
 void ReportStageHazard(const char* what) {
