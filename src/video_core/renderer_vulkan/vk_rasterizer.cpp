@@ -3740,6 +3740,8 @@ void RasterizerVulkan::JoinB(Func&& func) {
         func();
         b_in_join = was_in_join;
     });
+    // C ran everything B sent before.
+    stage_pools.clear();
 }
 
 template <typename Func>
@@ -3880,6 +3882,33 @@ void RasterizerVulkan::SendStageDraw() {
 u64 RasterizerVulkan::NextStageSeq() const noexcept {
     // While staged, what the runtime stamps with: the seq its next packet gets.
     return Nx2Record::SeqTicks::SeqOf(buffer_cache_runtime.UsageStamp());
+}
+
+void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) {
+    const auto note = [&](GPUVAddr pool, u32 limit) {
+        if (pool == 0) {
+            return;
+        }
+        const GPUVAddr end = pool + (u64{limit} + 1) * 32;
+        for (StagePool& known : stage_pools) {
+            if (known.begin == pool && known.end == end) {
+                known.seq = (std::max)(known.seq, seq);
+                return;
+            }
+        }
+        stage_pools.push_back({.seq = seq, .begin = pool, .end = end});
+    };
+    const auto& regs = mb.regs;
+    note(regs.tex_header.Address(), regs.tex_header.limit);
+    note(regs.tex_sampler.Address(), (std::max)(regs.tex_sampler.limit, regs.tex_header.limit));
+}
+
+bool RasterizerVulkan::WritesPoolsB(GPUVAddr address, u64 size) {
+    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
+    std::erase_if(stage_pools, [ran](const StagePool& pool) { return pool.seq <= ran; });
+    return std::ranges::any_of(stage_pools, [&](const StagePool& pool) {
+        return address < pool.end && pool.begin < address + size;
+    });
 }
 
 void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
@@ -4366,6 +4395,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         if (light_ok) {
             finish_head(seq, records, last.level);
+            NotePoolsB(mb, seq);
             PreSetTargets(mb, seq);
             if (pipeline.WritesMemory()) {
                 VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
@@ -4494,6 +4524,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                                                             : LightLevel::None;
     }
     finish_head(seq, records, follows);
+    NotePoolsB(mb, seq);
     if (params.command != StageCommand::None) {
         // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
         PreSetTargets(mb, seq);
@@ -4702,10 +4733,12 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
     // AccelerateInlineToMemory's halves: guest memory, the buffer cache and the shaders here,
     // the query and texture invalidations C's (in ring 3's order, before anything after).
     {
-        // eszaman-4: C reads the texture header and sampler pools from guest memory for draws B
-        // sent before this write. One into them is made in a join: C parked having run those,
-        // the old body here, its invalidations in order. (Images C uploads from guest memory
-        // would need a summary of their pages from C: not here yet.)
+        // eszaman-4 / omur-1: C reads the texture header and sampler pools from guest memory for
+        // draws B sent before this write (the pools they used: stage_pools; B's current ones).
+        // One into them is made in a join: C parked having run those, the old body here, its
+        // invalidations in order. Not covered here: images C uploads from guest memory (a
+        // summary of their pages from C), constant buffer data B writes into a pool (the CbData
+        // record: Maxwell3D::StageCbWrite on B, outside the rasterizer).
         const auto& regs = EngineB().regs;
         const auto pool_written = [&](GPUVAddr pool, u32 limit) {
             const GPUVAddr end = pool + (u64{limit} + 1) * 32;
@@ -4713,8 +4746,8 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
         };
         if (pool_written(regs.tex_header.Address(), regs.tex_header.limit) ||
             pool_written(regs.tex_sampler.Address(),
-                         (std::max)(regs.tex_sampler.limit, regs.tex_header.limit))) {
-            FlushStageCWork();
+                         (std::max)(regs.tex_sampler.limit, regs.tex_header.limit)) ||
+            WritesPoolsB(address, copy_size)) {
             JoinB([&] { AccelerateInlineToMemory(address, copy_size, memory); });
             return;
         }
@@ -4815,6 +4848,7 @@ void RasterizerVulkan::DrawTextureB() {
     const auto state = EngineB().draw_manager.draw_texture_state;
     // T8: the blit writes the bound targets, before the next packet.
     PreSetTargets(EngineB(), NextStageSeq());
+    NotePoolsB(EngineB(), NextStageSeq());
     StageToC([this, state] {
         maxwell3d->draw_manager.draw_texture_state = state;
         // The blit binds its own pipeline: no draw's pipeline-dependent state now (kayit-1).

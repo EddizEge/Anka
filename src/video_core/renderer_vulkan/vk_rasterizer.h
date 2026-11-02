@@ -367,6 +367,12 @@ private:
     void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
     /// B: the seq of the next packet (work sent between packets runs before it).
     [[nodiscard]] u64 NextStageSeq() const noexcept;
+    /// B (omur-1): the texture header and sampler pools C reads for work `seq` (a packet, or
+    /// DrawTexture before the next one), kept until C ran it.
+    void NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq);
+    /// B: whether a write of [address, address + size) hits a pool C may still read for work
+    /// B sent (the ones C ran dropped first).
+    [[nodiscard]] bool WritesPoolsB(GPUVAddr address, u64 size);
 
     /// C: ring 3's records.
     static void StageDrawThunk(const u64* payload, u32 words);
@@ -546,6 +552,14 @@ private:
         std::vector<std::pair<DAddr, u64>> ranges;
     };
     StageTargets stage_targets;
+    /// B (omur-1): the pool ranges [begin, end) of work C may not have run yet, each with the
+    /// last seq that reads it; dropped once C ran that seq (Nx2GpuPages::RanSeq) and at B's joins.
+    struct StagePool {
+        u64 seq;
+        GPUVAddr begin;
+        GPUVAddr end;
+    };
+    std::vector<StagePool> stage_pools;
 };
 
 } // namespace Vulkan
