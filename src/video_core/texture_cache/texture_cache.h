@@ -30,7 +30,9 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_gpu_pages.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/textures/decoders.h"
 
@@ -54,6 +56,95 @@ inline const bool g_nx2_alias_verify = [] {
     const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
     return value != nullptr && value[0] == '2';
 }();
+// Back stages, cut c or STAGE_CHECK: the page summary B asks instead of this cache whether a page
+// holds GPU-written data (Nx2Stages::GpuPages, nx2_gpu_pages.h). The hooks keep a mark on every
+// page an image marked GPU-modified covers (ImageBase::nx2_pages_set: once until it is unmarked)
+// and queue the pages no such image covers any more for clearing. Off: one branch each.
+
+/// An image's device ranges are marked: its own, or a sparse image's mapped segments
+/// (`for_each_segment` runs TextureCache::ForEachSparseSegment on it).
+template <typename ForEachSegment>
+void Nx2MarkImagePages(ImageBase& image, ForEachSegment&& for_each_segment) {
+    auto& pages = Nx2Stages::GpuPages();
+    if (False(image.flags & ImageFlagBits::Sparse)) {
+        pages.MarkImage(image.cpu_addr, image.guest_size_bytes);
+    } else {
+        for_each_segment([&pages](GPUVAddr, DAddr cpu_addr, size_t size) {
+            pages.MarkImage(cpu_addr, size);
+        });
+    }
+    image.nx2_pages_set = true;
+}
+
+/// The pages of [begin, begin + size) no registered image marked GPU-modified overlaps are
+/// queued for clearing. Walks the page table itself (no Picked flags): it may run inside another
+/// walk (UnregisterImage). `table_bits` is the page table's (YUZU_PAGEBITS).
+template <typename PageTable, typename MapViews, typename Images>
+void Nx2UnmarkUncovered(const PageTable& page_table, MapViews& map_views, Images& images,
+                        u64 table_bits, DAddr begin, size_t size) {
+    if (size == 0) {
+        return;
+    }
+    constexpr u32 bits = Nx2Stages::Nx2GpuPages::PageBits;
+    const DAddr end = begin + size;
+    const u64 first = begin >> bits;
+    const u64 last = (end - 1) >> bits;
+    boost::container::small_vector<u64, 16> covered((last - first) / 64 + 1);
+    for (u64 page = begin >> table_bits; page <= (end - 1) >> table_bits; ++page) {
+        const auto it = page_table.find(page);
+        if (it == page_table.end()) {
+            continue;
+        }
+        for (const ImageMapId map_id : it->second) {
+            const ImageMapView& map = map_views[map_id];
+            if (!map.Overlaps(begin, size) ||
+                False(images[map.image_id].flags & ImageFlagBits::GpuModified)) {
+                continue;
+            }
+            const u64 from = ((std::max)(DAddr{map.cpu_addr}, begin) >> bits) - first;
+            const u64 to = (((std::min)(DAddr{map.cpu_addr + map.size}, end) - 1) >> bits) - first;
+            for (u64 i = from; i <= to; ++i) {
+                covered[i / 64] |= u64{1} << (i % 64);
+            }
+        }
+    }
+    auto& pages = Nx2Stages::GpuPages();
+    u64 run = 0;
+    bool in_run = false;
+    for (u64 i = 0; i <= last - first + 1; ++i) {
+        const bool held = i > last - first || ((covered[i / 64] >> (i % 64)) & 1) != 0;
+        if (!held && !in_run) {
+            run = i;
+            in_run = true;
+        } else if (held && in_run) {
+            pages.UnmarkImage((first + run) << bits, (i - run) << bits);
+            in_run = false;
+        }
+    }
+}
+
+/// An image marked for the summary is no GPU-modified registered image any more: its ranges (a
+/// sparse image's from its map views, as registered) are unmarked where nothing else covers them.
+template <typename SparseViews, typename PageTable, typename MapViews, typename Images>
+void Nx2UnmarkImagePages(ImageBase& image, ImageId image_id, const SparseViews& sparse_views,
+                         const PageTable& page_table, MapViews& map_views, Images& images,
+                         u64 table_bits) {
+    image.nx2_pages_set = false;
+    if (False(image.flags & ImageFlagBits::Sparse)) {
+        Nx2UnmarkUncovered(page_table, map_views, images, table_bits, image.cpu_addr,
+                           image.guest_size_bytes);
+        return;
+    }
+    const auto it = sparse_views.find(image_id);
+    if (it == sparse_views.end()) {
+        return;
+    }
+    for (const auto map_id : it->second) {
+        const ImageMapView& map = map_views[map_id];
+        Nx2UnmarkUncovered(page_table, map_views, images, table_bits, map.cpu_addr, map.size);
+    }
+}
+
 // PrepareImage touches an image in the LRU once per frame: a second Touch with the same frame_tick
 // returns at once (its item's tick is not older), but finding the item costs two dependent loads
 // into the LRU's deque for every texture of every draw. EDEN_NX2_TEX_TOUCH_SKIP=0 touches on every
@@ -140,6 +231,16 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
         swizzle_chunk_size = 0;
         swizzle_slices_per_batch = 0;
     }
+
+    // Back stages with cut c, =2 or STAGE_CHECK: the page summary from the first image on (before
+    // any exists, no stage runs yet); its hazard counters with =2 and STAGE_CHECK.
+    const Nx2Stages::Config& stages = Nx2Stages::Get();
+    const bool verify = stages.mode == 2 || (stages.mode == 1 && stages.check);
+    if (verify || (stages.mode == 1 && stages.cut_c)) {
+        Nx2Stages::GpuPages().Start(verify);
+    } else {
+        Nx2Stages::GpuPages().Stop();
+    }
 }
 
 template <class P>
@@ -221,6 +322,10 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
 
 template <class P>
 void TextureCache<P>::TickFrame() {
+    if (Nx2Stages::GpuPages().Live()) [[unlikely]] {
+        // Between cache operations: the page summary's queued clean-ups are made.
+        Nx2Stages::GpuPages().Settle();
+    }
     // Upload buffers grown for one huge image (title 1's 341 MiB terrain layer pools) are freed
     // rather than kept for the rest of the session.
     for (auto* const scratch : {&swizzle_data_buffer, &unswizzle_data_buffer}) {
@@ -806,6 +911,12 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
     });
     if (images.empty()) {
         return;
+    }
+    if (Nx2Stages::GpuPages().Live()) [[unlikely]] {
+        for (const ImageId image_id : images) {
+            Nx2UnmarkImagePages(slot_images[image_id], image_id, sparse_views, page_table,
+                                slot_map_views, slot_images, YUZU_PAGEBITS);
+        }
     }
     std::ranges::sort(images, [this](ImageId lhs, ImageId rhs) {
         return slot_images[lhs].modification_tick < slot_images[rhs].modification_tick;
@@ -2737,6 +2848,11 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    if (Nx2Stages::GpuPages().Live() && True(image.flags & ImageFlagBits::GpuModified))
+        [[unlikely]] {
+        // A GPU-modified image registered (JoinImages' new image): marked whatever it was.
+        Nx2MarkImagePages(image, [&](auto&& func) { ForEachSparseSegment(image, func); });
+    }
     u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
     if ((IsPixelFormatASTC(image.info.format) &&
          True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
@@ -2779,6 +2895,27 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
     image.flags &= ~ImageFlagBits::Registered;
     image.flags &= ~ImageFlagBits::BadOverlap;
     lru_cache.Free(image.lru_index);
+    // Page summary: once out of the page tables, its pages no other GPU-modified image covers are
+    // unmarked (a sparse image's ranges taken now, before its map views go).
+    boost::container::small_vector<std::pair<DAddr, size_t>, 4> nx2_unmark;
+    if (Nx2Stages::GpuPages().Live() &&
+        (image.nx2_pages_set || True(image.flags & ImageFlagBits::GpuModified))) [[unlikely]] {
+        image.nx2_pages_set = false;
+        if (False(image.flags & ImageFlagBits::Sparse)) {
+            nx2_unmark.emplace_back(image.cpu_addr, image.guest_size_bytes);
+        } else if (const auto it = sparse_views.find(image_id); it != sparse_views.end()) {
+            for (const auto map_id : it->second) {
+                nx2_unmark.emplace_back(slot_map_views[map_id].cpu_addr,
+                                        slot_map_views[map_id].size);
+            }
+        }
+    }
+    const auto nx2_unmark_pages = [&] {
+        for (const auto& [cpu_addr, size] : nx2_unmark) {
+            Nx2UnmarkUncovered(page_table, slot_map_views, slot_images, YUZU_PAGEBITS, cpu_addr,
+                               size);
+        }
+    };
     const auto& clear_page_table =
         [image_id](u64 page, ::Common::unordered_map<u64, std::vector<ImageId>, Common::IdentityHash<u64>>& selected_page_table) {
             const auto page_it = selected_page_table.find(page);
@@ -2816,6 +2953,7 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
             image_map_ids.erase(vector_it);
         });
         slot_map_views.erase(map_id);
+        nx2_unmark_pages();
         return;
     }
     ForEachGPUPage(image.gpu_addr, image.guest_size_bytes, [this, &clear_page_table](u64 page) {
@@ -2851,6 +2989,7 @@ void TextureCache<P>::UnregisterImage(ImageId image_id) {
         slot_map_views.erase(map_view_id);
     }
     sparse_views.erase(it);
+    nx2_unmark_pages();
 }
 
 template <class P>
@@ -3218,6 +3357,9 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+    if (Nx2Stages::GpuPages().Live() && !image.nx2_pages_set) [[unlikely]] {
+        Nx2MarkImagePages(image, [&](auto&& func) { ForEachSparseSegment(image, func); });
+    }
     // The aliases are now older than this image: flag them for SynchronizeAliases, once until one
     // of them walks again (ImageBase::aliases_flagged).
     if (g_nx2_alias_lazy && !image.aliases_flagged && !image.aliased_images.empty()) {
@@ -3294,6 +3436,9 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     }
     if (any_modified) {
         image.flags |= ImageFlagBits::GpuModified;
+        if (Nx2Stages::GpuPages().Live() && !image.nx2_pages_set) [[unlikely]] {
+            Nx2MarkImagePages(image, [&](auto&& func) { ForEachSparseSegment(image, func); });
+        }
     }
     std::ranges::sort(aliased_images, [this](const AliasedImage* lhs, const AliasedImage* rhs) {
         const ImageBase& lhs_image = slot_images[lhs->id];
@@ -3323,6 +3468,12 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
     if (invalidate) {
         RestorePartialPages(image);
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
+        if (!is_modification && image.nx2_pages_set && Nx2Stages::GpuPages().Live())
+            [[unlikely]] {
+            // Marked again below when it is a modification (a full clear): nothing to unmark.
+            Nx2UnmarkImagePages(image, image_id, sparse_views, page_table, slot_map_views,
+                                slot_images, YUZU_PAGEBITS);
+        }
         if (False(image.flags & ImageFlagBits::Tracked)) {
             TrackImage(image, image_id);
         }

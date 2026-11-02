@@ -136,6 +136,10 @@ struct ImageBase {
     /// Every alias has alias_check set since this image's last modification flagged them; reset
     /// by an alias's walk, so MarkModification flags the aliases once until one checks again.
     bool aliases_flagged = false;
+    /// Back stages, cut c or STAGE_CHECK: the page summary (Nx2Stages::GpuPages) has this image's
+    /// pages marked since it was last GPU-modified; cleared when it is unmarked (not GPU-modified
+    /// or unregistered any more), so MarkModification marks them once, not on every draw.
+    bool nx2_pages_set = false;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
 
