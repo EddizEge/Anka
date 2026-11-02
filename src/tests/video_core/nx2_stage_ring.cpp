@@ -11,6 +11,7 @@
 #include <mutex>
 #include <random>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -91,6 +92,10 @@ struct FakeHandler {
     void (*on_mark)(u64 position){};
     /// Called by Verify, if set.
     void (*on_verify)(u8 stage){};
+    /// Called by BoundaryWork (C at a record boundary, asked), if set.
+    void (*on_boundary)(){};
+    /// Hazard reports by kind (StageHazard).
+    std::array<std::atomic<u32>, 2> hazards{};
 
     u32 PendingDeltas() {
         return static_cast<u32>(capture.size());
@@ -141,6 +146,14 @@ struct FakeHandler {
     }
     void Parked() {
         ++parks;
+    }
+    void Hazard(u8, StageHazard what, u64, u64) {
+        ++hazards[static_cast<size_t>(what)];
+    }
+    void BoundaryWork() {
+        if (on_boundary != nullptr) {
+            on_boundary();
+        }
     }
 };
 
@@ -589,83 +602,132 @@ TEST_CASE("Nx2StagePipeline: marks reach the last stage in order", "[video_core]
 }
 
 namespace {
-// JoinFromB and ParkB at once (S13).
-std::atomic<bool> g_c_in_tick{};
+// Joins and parks between B and C (K3 as decided after R2, nx2_stages.h): B parks only at a
+// record boundary of ring 2; C asks ParkB at a record boundary of its own and runs ring 3 on
+// while it waits; C answers a join only once it ran up to its target.
 std::atomic<bool> g_tick_done{};
 std::atomic<u32> g_spin_b{};
 std::atomic<u32> g_spin_c{};
 std::vector<char> g_order;
 std::mutex g_order_mutex;
-u32 g_parks_before{};
 u32 g_extra_records{};
-u8 g_mode{};
 
 void Order(char what) {
     std::scoped_lock lock{g_order_mutex};
     g_order.push_back(what);
 }
 
-void TickOnC(const u64*, u32) {
-    g_c_in_tick.store(true, std::memory_order_seq_cst);
+/// The op of the ParkB a record of C asked for at its next record boundary (C's own).
+void (*g_park_at_boundary)(){};
+/// FakeHandler::on_boundary: C at a record boundary runs the ParkB a record asked for.
+void ParkAtBoundary() {
+    if (void (*const op)() = std::exchange(g_park_at_boundary, nullptr)) {
+        g_pipe->ParkB(op);
+    }
+}
+/// On C, inside a record: a ParkB with `op` at the record boundary after it (StageTickWork's
+/// way).
+void AskPark(void (*op)()) {
+    g_park_at_boundary = op;
+    g_pipe->RequestBoundaryWork();
+}
+
+/// Counted records for C: B numbers them (g_sent, B's own), C keeps the last one's number + 1.
+u64 g_sent{};
+std::atomic<u64> g_c_count{};
+void CountOnC(const u64* payload, u32) {
+    g_c_count.store(payload[0] + 1, std::memory_order_relaxed);
+}
+/// B inside a record of ring 2 (maybe a packet: no park point).
+std::atomic<bool> g_b_in_record{};
+std::atomic<u32> g_b_progress{};
+std::atomic<u32> g_park_ops{};
+/// B's g_sent once it ended its record (C reads it in a ParkB op, B parked).
+u64 g_expected_c{};
+
+/// A ParkB op: B parked at a record boundary of ring 2, C ran everything B sent before it
+/// parked and took B's deltas (R2 F2); B runs nothing meanwhile.
+void CheckParked() {
+    Expect(!g_b_in_record.load(), "ParkB: B parks only at a record boundary of ring 2");
+    Expect(g_c_count.load() == g_expected_c, "ParkB: C ran ring 3 up to where B parked",
+           g_c_count.load(), g_expected_c);
+    Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
+           "ParkB: C's replica where B's is", g_handler->logs[StageIdC].deltas.size(),
+           g_handler->logs[StageIdB].deltas.size());
+    const u32 before = g_b_progress.load();
+    Spin(20000);
+    Expect(g_b_progress.load() == before, "ParkB: B runs nothing while parked",
+           g_b_progress.load(), before);
+    ++g_park_ops;
+    Order('c');
+}
+
+void AskCheckedPark(const u64*, u32) {
     Spin(g_spin_c.load(std::memory_order_relaxed));
-    g_pipe->ParkB([] {
-        // B parked for C.
-        Expect(g_handler->parks.load() == g_parks_before + 1, "ParkB: B parked",
-               g_handler->parks.load(), g_parks_before);
+    AskPark(&CheckParked);
+}
+
+void ResetK3(FakeHandler& handler, TestPipeline& pipe) {
+    ResetGlobals(handler, pipe);
+    handler.on_boundary = &ParkAtBoundary;
+    g_order.clear();
+    g_park_at_boundary = nullptr;
+    g_sent = 0;
+    g_c_count = 0;
+    g_expected_c = 0;
+    g_b_in_record = false;
+    g_b_progress = 0;
+    g_park_ops = 0;
+    g_tick_done = false;
+}
+
+void TickOnC(const u64*, u32) {
+    Spin(g_spin_c.load(std::memory_order_relaxed));
+    AskPark([] {
+        Expect(g_handler->parks.load() == 1, "ParkB: B parked", g_handler->parks.load(), 1);
+        Expect(g_ran_c.size() == g_extra_records, "ParkB: C ran ring 3 up to where B parked",
+               g_ran_c.size(), g_extra_records);
         Order('c');
     });
     g_tick_done.store(true, std::memory_order_seq_cst);
 }
 
-void MarkAfterTick(u64) {
-    // C runs nothing inside the tick (it parks where it stands): the mark after it comes after.
-    Expect(g_tick_done.load(std::memory_order_seq_cst), "the mark runs after the tick");
-}
-
-/// On B: C gets a tick (which asks B to park), a mark, maybe more than ring 3 holds; then B joins
-/// C (a JoinFromB) while C waits for B to park, or before.
+/// On B: C gets a tick (which asks B to park at C's next boundary), a mark, maybe more than ring
+/// 3 holds; then, without those, B joins C while C waits for B to park, or before.
 void TickAndJoinOnB(const u64* payload, u32) {
+    g_b_in_record = true;
     PostCallC(*g_pipe, &TickOnC, payload[0]);
     u64* const body = g_pipe->BeginC(RecordKind::Mark, 1);
     body[0] = payload[0] + 1;
     g_pipe->EndC();
     g_pipe->PublishC();
     for (u32 i = 0; i < g_extra_records; ++i) {
-        // Ring 3 fills while C waits in ParkB: B parks for it where it waits for room.
+        // Ring 3 fills while C waits in ParkB: C runs it on, B waits for room, parking nowhere.
         PostCallC(*g_pipe, &RanOnC, i, 200);
     }
-    if (g_extra_records != 0) {
-        return;
+    if (g_extra_records == 0) {
+        Spin(g_spin_b.load(std::memory_order_relaxed));
+        g_pipe->JoinFromB([] {
+            Expect(g_tick_done.load(), "JoinFromB: C ran the tick B sent before");
+            Order('b');
+        });
     }
-    Spin(g_spin_b.load(std::memory_order_relaxed));
-    g_pipe->JoinFromB([] {
-        if (g_mode == 1) {
-            // C answered in its ParkB wait, where it stood: inside its tick (S13, K3).
-            Expect(g_c_in_tick.load() && !g_tick_done.load(), "JoinFromB: C parked in its tick");
-        }
-        Order('b');
-    });
+    g_b_in_record = false;
 }
 } // Anonymous namespace
 
-TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13, K3)", "[video_core]") {
+TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (K3)", "[video_core]") {
     Watchdog watchdog{"JoinFromB and ParkB"};
     std::mt19937 random{1234};
     for (const u8 mode : {u8{1}, u8{2}}) {
         for (u32 round = 0; round < 300; ++round) {
             FakeHandler handler;
             TestPipeline pipe{handler};
-            ResetGlobals(handler, pipe);
-            handler.on_mark = &MarkAfterTick;
-            g_order.clear();
-            g_c_in_tick = false;
-            g_tick_done = false;
-            g_parks_before = 0;
-            // Who asks first varies: B joining before or after C's tick asks B to park.
+            ResetK3(handler, pipe);
+            // Who asks first varies: B joining before or after C asks B to park.
             g_spin_b = random() % 20000;
             g_spin_c = random() % 20000;
             g_extra_records = round % 3 == 2 ? 40 : 0;
-            g_mode = mode;
             REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
             PostCallB(pipe, &TickAndJoinOnB, 100);
             PostMarkB(pipe, 1000, true);
@@ -673,17 +735,17 @@ TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13, K3)", "[vid
             pipe.Stop();
             REQUIRE(g_failures == 0);
             REQUIRE(g_tick_done);
-            if (g_extra_records == 0 && mode == 1) {
-                // B's join first (C answers it in its ParkB wait), then C's park.
+            if (g_extra_records == 0) {
+                // B's join first (C answers it once reached, in its ParkB wait too), then
+                // C's park at B's next record boundary of ring 2.
                 REQUIRE(g_order == std::vector<char>({'b', 'c'}));
-            } else if (g_extra_records == 0) {
-                // =2: B waits for C to run the tick, parking for it meanwhile; then it joins.
-                REQUIRE(g_order == std::vector<char>({'c', 'b'}));
             } else {
                 REQUIRE(g_order == std::vector<char>({'c'}));
                 REQUIRE(g_ran_c.size() == g_extra_records);
             }
             REQUIRE(handler.parks == 1);
+            REQUIRE(handler.hazards[0] == 0);
+            REQUIRE(handler.hazards[1] == 0);
             REQUIRE(handler.logs[StageIdC].last_mark == 1000);
         }
     }
@@ -691,27 +753,28 @@ TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13, K3)", "[vid
 
 namespace {
 void TickOnly(const u64*, u32) {
-    g_pipe->ParkB([] { Order('c'); });
-    g_tick_done.store(true, std::memory_order_seq_cst);
+    AskPark([] {
+        ++g_park_ops;
+        Order('c');
+    });
 }
 void SendTick(const u64*, u32) {
     PostCallC(*g_pipe, &TickOnly, 0);
     g_pipe->PublishC();
 }
+std::atomic<u32> g_boundary_runs{};
 } // Anonymous namespace
 
 TEST_CASE("Nx2StagePipeline: ParkB wakes a B waiting for records", "[video_core]") {
     Watchdog watchdog{"ParkB wakes B"};
     FakeHandler handler;
     TestPipeline pipe{handler};
-    ResetGlobals(handler, pipe);
-    g_order.clear();
-    g_tick_done = false;
+    ResetK3(handler, pipe);
     REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true}));
     PostCallB(pipe, &SendTick, 0);
     pipe.PublishB();
     // B has nothing more and sleeps; C's park request wakes it.
-    while (!g_tick_done.load()) {
+    while (g_park_ops.load() == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     REQUIRE(handler.parks == 1);
@@ -719,6 +782,26 @@ TEST_CASE("Nx2StagePipeline: ParkB wakes a B waiting for records", "[video_core]
     pipe.Stop();
     REQUIRE(g_failures == 0);
     REQUIRE(g_order == std::vector<char>({'c'}));
+}
+
+TEST_CASE("Nx2StagePipeline: C's boundary work runs when asked while C waits", "[video_core]") {
+    Watchdog watchdog{"boundary work"};
+    FakeHandler handler;
+    TestPipeline pipe{handler};
+    ResetK3(handler, pipe);
+    g_boundary_runs = 0;
+    handler.on_boundary = [] { ++g_boundary_runs; };
+    REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true}));
+    // C sleeps waiting for ring 3: an ask from another thread wakes it.
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    pipe.RequestBoundaryWork();
+    while (g_boundary_runs.load() == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    Drain(pipe);
+    pipe.Stop();
+    REQUIRE(g_boundary_runs == 1);
+    REQUIRE(g_failures == 0);
 }
 
 namespace {
@@ -758,176 +841,334 @@ TEST_CASE("Nx2StagePipeline: Stop ends at a record boundary without what is held
     REQUIRE(g_ran_b.size() == 1);
 }
 
-namespace {
-// The park points of K3, one by one.
-std::atomic<u32> g_b_progress{};
-std::atomic<bool> g_b_in_record{};
-std::atomic<bool> g_a_join_acked{};
-std::atomic<u32> g_park_ops{};
-u32 g_fill_records{};
 
-/// On C: asks B to park (after `payload[0]` ms), checks B stays parked while `op` runs.
-void ParkFromC(const u64* payload, u32) {
-    std::this_thread::sleep_for(std::chrono::milliseconds{payload[0]});
-    g_pipe->ParkB([] {
-        const u32 before = g_b_progress.load();
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
-        Expect(g_b_progress.load() == before, "ParkB: B runs nothing while parked",
-               g_b_progress.load(), before);
-        Expect(!g_a_join_acked.load(), "ParkB: before A's join was acked");
-        ++g_park_ops;
-        Order('c');
-    });
+namespace {
+/// Stands for the buffer cache's mutex (recursive, B's).
+std::recursive_mutex g_buffer_mutex;
+
+/// A ParkB op takes the buffer mutex (K3: C only here, B parked holding none).
+void ParkTakesLock() {
+    const bool locked = g_buffer_mutex.try_lock();
+    Expect(locked, "ParkB: B holds the buffer mutex no more");
+    if (locked) {
+        g_buffer_mutex.unlock();
+    }
+    CheckParked();
+}
+void AskLockedPark(const u64*, u32) {
+    Spin(g_spin_c.load(std::memory_order_relaxed));
+    AskPark(&ParkTakesLock);
 }
 
-/// On B: C parks for B from inside the first record; then more than ring 3 holds (K3 a).
-void ParkThenFill(const u64* payload, u32) {
-    PostCallC(*g_pipe, &ParkFromC, payload[0]);
+/// On B (K3 (a), R2 F6): C asks to park; B sends counted records (with `payload[0]` > 0, more
+/// than ring 3 holds), then joins holding the buffer mutex, as the buffer runtime's hook does.
+void LockedJoinOnB(const u64* payload, u32) {
+    g_b_in_record = true;
+    PostCallC(*g_pipe, &AskLockedPark, 0);
+    for (u32 i = 0; i < 6; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++);
+    }
     g_pipe->PublishC();
-    for (u32 i = 0; i < g_fill_records; ++i) {
-        PostCallC(*g_pipe, &RanOnC, i, 100);
+    for (u64 i = 0; i < payload[0]; ++i) {
+        // Ring 3 full: B waits for room inside its record, serving no park; C runs ring 3 on.
+        PostCallC(*g_pipe, &CountOnC, g_sent++, 200);
         ++g_b_progress;
     }
-}
-
-/// On B, =2: the record for C asks B to park while B waits for its end (K3 b).
-void ParkInLockstep(const u64*, u32) {
-    g_b_in_record = true;
-    PostCallC(*g_pipe, &ParkFromC, 0);
-    // EndC returned: C ran the record, its ParkB served from inside EndC's wait.
-    Expect(g_park_ops.load() == 1, "=2: ParkB served while B waited for the record's end");
+    Spin(g_spin_b.load(std::memory_order_relaxed));
+    {
+        std::scoped_lock lock{g_buffer_mutex};
+        const size_t wrote = g_handler->wrote[StageIdC];
+        const u64 expected = g_sent;
+        g_pipe->JoinFromBLocked([wrote, expected] {
+            Expect(g_c_count.load() == expected, "JoinFromBLocked: C ran everything B sent before",
+                   g_c_count.load(), expected);
+            Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
+                   g_handler->wrote[StageIdC], wrote);
+            // The op locks it again: B's own, the same thread.
+            std::scoped_lock again{g_buffer_mutex};
+            Order('b');
+        });
+        ++g_b_progress;
+    }
+    g_expected_c = g_sent;
     g_b_in_record = false;
-    ++g_b_progress;
-}
-
-/// On B: a record for C that parks B after a while: B is at A's join by then (K3 c).
-void SlowParkForC(const u64* payload, u32) {
-    PostCallC(*g_pipe, &ParkFromC, payload[0]);
-    g_pipe->PublishC();
-    ++g_b_progress;
 }
 } // Anonymous namespace
 
-TEST_CASE("Nx2StagePipeline: K3 a, B parks for C while ring 3 is full", "[video_core]") {
-    Watchdog watchdog{"K3 a"};
-    for (const u8 mode : {u8{1}, u8{2}}) {
-        FakeHandler handler;
-        TestPipeline pipe{handler};
-        ResetGlobals(handler, pipe);
-        g_order.clear();
-        g_b_progress = 0;
-        g_park_ops = 0;
-        g_a_join_acked = false;
-        // 60 records of 103 words: three times ring 3; C holds the first while in ParkB.
-        g_fill_records = 60;
-        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
-        PostCallB(pipe, &ParkThenFill, 20);
-        pipe.PublishB();
-        Drain(pipe);
-        pipe.Stop();
-        REQUIRE(g_failures == 0);
-        REQUIRE(g_park_ops == 1);
-        REQUIRE(handler.parks == 1);
-        REQUIRE(g_ran_c.size() == 60);
-    }
-}
-
-TEST_CASE("Nx2StagePipeline: K3 b, =2 ParkB inside the record B waits for", "[video_core]") {
-    Watchdog watchdog{"K3 b"};
-    FakeHandler handler;
-    TestPipeline pipe{handler};
-    ResetGlobals(handler, pipe);
-    g_order.clear();
-    g_b_progress = 0;
-    g_park_ops = 0;
-    g_a_join_acked = false;
-    REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = true}));
-    for (u32 n = 0; n < 50; ++n) {
-        g_park_ops = 0;
-        PostCallB(pipe, &ParkInLockstep, 0);
-        REQUIRE(g_park_ops == 1);
-    }
-    Drain(pipe);
-    pipe.Stop();
-    REQUIRE(g_failures == 0);
-    REQUIRE(handler.parks == 50);
-}
-
-TEST_CASE("Nx2StagePipeline: K3 c, B parks for C while it waits for C's ack of A's join",
+TEST_CASE("Nx2StagePipeline: a locked join while C asks ParkB, ring 3 full or not (K3 a)",
           "[video_core]") {
-    Watchdog watchdog{"K3 c"};
+    Watchdog watchdog{"locked join"};
+    std::mt19937 random{4321};
     for (const u8 mode : {u8{1}, u8{2}}) {
-        for (const u64 delay : {u64{0}, u64{1}, u64{20}}) {
+        for (u32 round = 0; round < 200; ++round) {
             FakeHandler handler;
             TestPipeline pipe{handler};
-            ResetGlobals(handler, pipe);
-            g_order.clear();
-            g_b_progress = 0;
-            g_park_ops = 0;
-            g_a_join_acked = false;
+            ResetK3(handler, pipe);
+            g_spin_b = random() % 20000;
+            g_spin_c = random() % 20000;
             REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
-            PostCallB(pipe, &SlowParkForC, delay);
-            // B passes the join on to C and waits for C, which is in ParkB first.
-            const u32 join = pipe.JoinABegin();
-            g_a_join_acked = true;
-            Order('a');
-            REQUIRE(g_park_ops == 1);
-            pipe.JoinAEnd(join);
+            handler.capture = {u64{round} << 8 | 3};
+            // Every other round more than ring 3 holds (40 records of 203 words, 2048 words).
+            PostCallB(pipe, &LockedJoinOnB, round % 2 == 0 ? 0 : 40);
+            handler.capture = {u64{round} << 8 | 4};
+            PostCallB(pipe, &RanOnB, round);
+            Drain(pipe);
             pipe.Stop();
             REQUIRE(g_failures == 0);
-            REQUIRE(g_order == std::vector<char>({'c', 'a'}));
-            REQUIRE(handler.parks == 1);
+            REQUIRE(g_order == std::vector<char>({'b', 'c'}));
+            REQUIRE(g_park_ops == 1);
+            REQUIRE(handler.hazards[0] == 0);
+            REQUIRE(handler.hazards[1] == 0);
+            REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
         }
     }
 }
 
 namespace {
-std::atomic<u32> g_c_count{};
-void CountOnC(const u64* payload, u32) {
-    g_c_count.store(static_cast<u32>(payload[0]) + 1, std::memory_order_relaxed);
-}
-/// On B: records for C, then a JoinFromB: C ran them, its replica took B's deltas (K3, K11).
-void SendThenJoinB(const u64* payload, u32) {
-    const u32 count = static_cast<u32>(payload[0]);
-    // C ran everything before the last JoinFromB: nothing of its runs now.
-    g_c_count = 0;
-    for (u32 i = 0; i < count; ++i) {
-        PostCallC(*g_pipe, &CountOnC, i);
+std::atomic<bool> g_b_waits_record{};
+
+/// On C, inside a record: =2 runs the op at once (B waits for this record's end); =1 is a
+/// hazard, served at B's next record boundary of ring 2.
+void ParkInsideOnC(const u64*, u32) {
+    if (g_pipe->Options().mode == 2) {
+        g_pipe->ParkB([] {
+            Expect(g_b_waits_record.load(), "=2: B waits for the record C asked inside");
+            ++g_park_ops;
+            Order('c');
+        });
+    } else {
+        g_pipe->ParkB([] {
+            Expect(!g_b_in_record.load(), "=1: B parks at a record boundary of ring 2");
+            ++g_park_ops;
+            Order('c');
+        });
     }
-    g_pipe->JoinFromB([count] {
-        Expect(g_c_count.load() == count, "JoinFromB: C ran everything before", g_c_count.load(),
-               count);
-        Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
-               "JoinFromB: C's replica took B's deltas", g_handler->logs[StageIdC].deltas.size(),
-               g_handler->logs[StageIdB].deltas.size());
-        Order('b');
-    });
+}
+/// On B: a record for C that asks ParkB inside it; at =2 then a JoinFromB.
+void ParkInsideThenJoinOnB(const u64*, u32) {
+    g_b_in_record = true;
+    g_b_waits_record = true;
+    PostCallC(*g_pipe, &ParkInsideOnC, 0);
+    g_b_waits_record = false;
+    if (g_pipe->Options().mode == 2) {
+        Expect(g_park_ops.load() == 1, "=2: the op ran while B waited for the record's end",
+               g_park_ops.load(), 1);
+        g_pipe->JoinFromB([] { Order('b'); });
+    } else {
+        g_pipe->PublishC();
+    }
+    ++g_b_progress;
+    g_b_in_record = false;
 }
 } // Anonymous namespace
 
-TEST_CASE("Nx2StagePipeline: JoinFromB parks C after everything B sent before", "[video_core]") {
+TEST_CASE("Nx2StagePipeline: ParkB inside a record, =2 lockstep and =1 hazard", "[video_core]") {
+    Watchdog watchdog{"ParkB inside a record"};
+    for (const u8 mode : {u8{2}, u8{1}}) {
+        for (u32 round = 0; round < 50; ++round) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            PostCallB(pipe, &ParkInsideThenJoinOnB, 0);
+            pipe.PublishB();
+            if (mode == 1) {
+                // The hazard's limit: C, not running ring 3 on, would hang on a B blocked on C
+                // (a join from A passed on before C's request): B parks idle first.
+                while (g_park_ops.load() == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                }
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_park_ops == 1);
+            REQUIRE(handler.parks == 1);
+            if (mode == 2) {
+                REQUIRE(g_order == std::vector<char>({'c', 'b'}));
+                REQUIRE(handler.hazards[0] == 0);
+            } else {
+                REQUIRE(g_order == std::vector<char>({'c'}));
+                REQUIRE(handler.hazards[0] == 1);
+            }
+            REQUIRE(handler.hazards[1] == 0);
+        }
+    }
+}
+
+namespace {
+/// On B: maybe C asks to park, B sends `count` counted records, then joins (locked or not):
+/// the op runs after every record B sent before (R2 F1), with or without a ParkB waiting.
+void SendThenJoinB(const u64* payload, u32) {
+    const u32 count = static_cast<u32>(payload[0] & 0xff);
+    const bool locked = ((payload[0] >> 8) & 1) != 0;
+    const bool ask_park = ((payload[0] >> 9) & 1) != 0;
+    g_b_in_record = true;
+    if (ask_park) {
+        PostCallC(*g_pipe, &AskCheckedPark, 0);
+    }
+    for (u32 i = 0; i < count; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++);
+    }
+    const u64 expected = g_sent;
+    const size_t wrote = g_handler->wrote[StageIdC];
+    const auto op = [locked, expected, wrote] {
+        Expect(g_c_count.load() == expected, "a join from B: C ran everything B sent before",
+               g_c_count.load(), expected);
+        if (locked) {
+            Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
+                   g_handler->wrote[StageIdC], wrote);
+        } else {
+            Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
+                   "JoinFromB: C's replica took B's deltas",
+                   g_handler->logs[StageIdC].deltas.size(),
+                   g_handler->logs[StageIdB].deltas.size());
+        }
+        Order('b');
+    };
+    if (locked) {
+        g_pipe->JoinFromBLocked(op);
+    } else {
+        g_pipe->JoinFromB(op);
+    }
+    ++g_b_progress;
+    g_expected_c = g_sent;
+    g_b_in_record = false;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: a join from B runs after everything B sent before (K3, F1)",
+          "[video_core]") {
     Watchdog watchdog{"JoinFromB"};
+    std::mt19937 random{777};
     for (const u8 mode : {u8{1}, u8{2}}) {
         FakeHandler handler;
         TestPipeline pipe{handler};
-        ResetGlobals(handler, pipe);
-        g_order.clear();
-        g_c_count = 0;
+        ResetK3(handler, pipe);
         REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true, .check = true}));
-        for (u32 round = 0; round < 500; ++round) {
+        u32 parks_asked = 0;
+        for (u32 round = 0; round < 600; ++round) {
+            g_spin_c = random() % 4000;
+            const bool locked = round % 2 == 1;
+            const bool ask_park = round % 3 == 0;
+            parks_asked += ask_park ? 1 : 0;
             handler.capture = {u64{round} << 8 | 1, u64{round} << 8 | 2};
-            PostCallB(pipe, &SendThenJoinB, round % 40);
+            PostCallB(pipe, &SendThenJoinB,
+                      (round % 40) | (locked ? 0x100u : 0u) | (ask_park ? 0x200u : 0u));
+            handler.capture = {u64{round} << 8 | 5};
+            PostCallB(pipe, &RanOnB, round);
             if (round % 7 == 0) {
                 Drain(pipe);
             }
         }
         Drain(pipe);
+        // The last park asked runs at B's next record boundary of ring 2: wait for it.
+        while (g_park_ops.load() != parks_asked) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
         pipe.Stop();
         REQUIRE(g_failures == 0);
         REQUIRE(handler.bad_sequences == 0);
-        REQUIRE(g_order.size() == 500);
+        REQUIRE(g_order.size() == 600 + parks_asked);
+        REQUIRE(handler.hazards[0] == 0);
+        REQUIRE(handler.hazards[1] == 0);
         REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
-        REQUIRE(handler.logs[StageIdB].deltas.size() == 1000);
+        REQUIRE(handler.logs[StageIdB].deltas.size() == 1800);
+    }
+}
+
+namespace {
+/// On B: C asks to park; B sends `payload[0]` counted records (some long); its next record of
+/// ring 2 brings deltas B passes on only when it parks (R2 F2: C runs on up to there first).
+void SendAndParkOnB(const u64* payload, u32) {
+    g_b_in_record = true;
+    PostCallC(*g_pipe, &AskCheckedPark, 0);
+    for (u64 i = 0; i < payload[0]; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, i % 5 == 0 ? 150 : 0);
+    }
+    ++g_b_progress;
+    g_expected_c = g_sent;
+    g_b_in_record = false;
+}
+void ProgressOnB(const u64*, u32) {
+    ++g_b_progress;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: a ParkB's op runs once C ran up to where B parked (K3, F2)",
+          "[video_core]") {
+    Watchdog watchdog{"ParkB run on"};
+    std::mt19937 random{99};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        for (u32 round = 0; round < 300; ++round) {
+            g_spin_c = random() % 30000;
+            handler.capture = {u64{round} << 8 | 6};
+            PostCallB(pipe, &SendAndParkOnB, random() % 60);
+            // Deltas B applies and has not passed on when C's park comes after this record (B
+            // idle after it: A's join, which would pass them on, only once the park ran).
+            handler.capture = {u64{round} << 8 | 7, u64{round} << 8 | 8};
+            PostCallB(pipe, &ProgressOnB, 0);
+            pipe.PublishB();
+            while (g_park_ops.load() != round + 1) {
+                std::this_thread::yield();
+            }
+            Drain(pipe);
+        }
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(handler.parks == 300);
+        REQUIRE(handler.hazards[0] == 0);
+        REQUIRE(handler.hazards[1] == 0);
+    }
+}
+
+namespace {
+void SlowAskParkOnC(const u64* payload, u32) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{payload[0]});
+    AskPark([] {
+        const u32 before = g_b_progress.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        Expect(g_b_progress.load() == before, "ParkB: B runs nothing while parked",
+               g_b_progress.load(), before);
+        ++g_park_ops;
+        Order('c');
+    });
+}
+void SendSlowAsk(const u64* payload, u32) {
+    PostCallC(*g_pipe, &SlowAskParkOnC, payload[0]);
+    g_pipe->PublishC();
+    ++g_b_progress;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C waiting in ParkB parks for A's join on its way", "[video_core]") {
+    Watchdog watchdog{"ParkB and A's join"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (const u64 delay : {u64{0}, u64{1}, u64{20}}) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            PostCallB(pipe, &SendSlowAsk, delay);
+            // B passes the join on to C and waits for C's ack (no park point): C, maybe in its
+            // ParkB wait, runs ring 3 on to the Join and parks for A.
+            const u32 join = pipe.JoinABegin();
+            Order('a');
+            pipe.JoinAEnd(join);
+            while (g_park_ops.load() == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_order.size() == 2);
+            REQUIRE(handler.parks == 1);
+            REQUIRE(handler.hazards[0] == 0);
+        }
     }
 }
 
