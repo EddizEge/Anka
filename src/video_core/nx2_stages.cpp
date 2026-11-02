@@ -154,6 +154,12 @@ struct GpuHandler {
     void Parked() {
         Nx2Profile::Add(Counter::Parks, 1);
     }
+    /// A broken K3 rule (StagePipeline): counted.
+    void Hazard(u8, StageHazard, u64, u64) {
+        Nx2Profile::Add(Counter::StageViolations, 1);
+    }
+    /// C at a record boundary, asked (RequestBoundaryWork): nothing asks yet (StageTickWork).
+    void BoundaryWork() {}
 };
 
 GpuHandler g_handler;
