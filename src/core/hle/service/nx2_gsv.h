@@ -1671,6 +1671,11 @@ private:
         std::mutex mutex;
         Nx2Vi2Reply::Source source;
         std::atomic<u32> version{}; // for the PRESENT_DIAG line
+        // Under mutex, filled as sessions open (RegisterReplies): commands answered from the table
+        // and commands left to a handler of their own.
+        bool session_opened{};
+        std::set<u32> answered;
+        std::set<u32> own_handler;
     };
 
     static void LogReplyUpdate(Replies& replies, const Nx2Vi2Reply::Source::Update& update) {
@@ -1679,6 +1684,13 @@ private:
         if (update.kind == Kind::Loaded) {
             replies.version.store(version, std::memory_order_relaxed);
             LOG_INFO(Service, "nx2:vi2 reply table v{}: {}", version, update.message);
+            const std::string unanswered =
+                replies.session_opened
+                    ? Nx2Vi2Reply::Unanswered(replies.source.GetTable(), replies.answered, replies.own_handler)
+                    : std::string{};
+            if (!unanswered.empty()) {
+                LOG_WARNING(Service, "nx2:vi2 reply table v{}: {}", version, unanswered);
+            }
         } else if (update.kind == Kind::Same) {
             LOG_INFO(Service, "nx2:vi2 reply file changed, same table (v{})", version);
         } else if (update.kind == Kind::Failed) {
@@ -1729,11 +1741,13 @@ private:
             }
         }
         std::vector<FunctionInfo> functions;
+        std::set<u32> own;
         for (const u32 command : commands) {
             const auto it = handlers_tipc.find(command);
             if (it != handlers_tipc.end()) {
                 if (command != 104 && command != 105) {
                     LOG_WARNING(Service, "nx2:vi2 reply table: {} has a handler of its own, not replaced", command);
+                    own.insert(command);
                     continue;
                 }
                 handlers_tipc.erase(it);
@@ -1741,6 +1755,12 @@ private:
             functions.push_back({command, &INx2Vi2Session::ReplyFromTable, "ReplyFromTable (EDEN_NX2_VI2_REPLY)"});
         }
         RegisterHandlersTipc(functions.data(), functions.size());
+        std::scoped_lock lk{replies.mutex};
+        replies.session_opened = true;
+        for (const auto& function : functions) {
+            replies.answered.insert(function.expected_header);
+        }
+        replies.own_handler.insert(own.begin(), own.end());
     }
 
     // Success and the command's words; a command not in the table gets an empty success, the

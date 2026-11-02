@@ -195,3 +195,73 @@ TEST_CASE("Nx2Vi2Reply: hot reload from a file", "[core]") {
     REQUIRE(source.Version() == 2);
     REQUIRE(source.Find(107) != nullptr);
 }
+
+TEST_CASE("Nx2Vi2Reply: byte order marks, UTF-16, tabs, signs, empty files", "[core]") {
+    // Notepad's "UTF-8 with BOM": the mark is skipped (Parse alone sees it in the command).
+    auto parsed = ParseFile("\xEF\xBB\xBF" "104: 1\n");
+    REQUIRE(parsed.table.has_value());
+    REQUIRE(*parsed.table == Table{{104, {1}}});
+    REQUIRE(!Parse("\xEF\xBB\xBF" "104: 1\n").table.has_value());
+    REQUIRE(ParseFile("\xEF\xBB\xBF").table->empty());
+    REQUIRE(ParseFile("").table->empty());
+
+    // UTF-16 either way round: refused, saying why.
+    for (const std::string text : {std::string{"\xFF\xFE" "1\0" "0\0" "4\0" ":\0" "1\0", 12},
+                                   std::string{"\xFE\xFF" "\0" "1" "\0" "0" "\0" "4", 8}}) {
+        parsed = ParseFile(text);
+        REQUIRE(!parsed.table.has_value());
+        REQUIRE(parsed.error == "UTF-16 file, save it as UTF-8");
+    }
+
+    // Tabs anywhere a space may be.
+    parsed = Parse("104:\t1\t0x2\n\t105\t:\t3\t# tab\n");
+    REQUIRE(parsed.table.has_value());
+    REQUIRE(*parsed.table == Table{{104, {1, 2}}, {105, {3}}});
+
+    // Signs are not part of a word.
+    parsed = Parse("104: +1\n");
+    REQUIRE(!parsed.table.has_value());
+    REQUIRE(parsed.error == "line 1: word \"+1\" is not a 32-bit number");
+    REQUIRE(Parse("104: -1\n").error == "line 1: word \"-1\" is not a 32-bit number");
+    REQUIRE(Parse("+104: 1\n").error == "line 1: command \"+104\" is not a number");
+}
+
+TEST_CASE("Nx2Vi2Reply: empty, BOM and UTF-16 files on reload", "[core]") {
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "eden_nx2_vi2_reply_bom_test.txt";
+    WriteFile(path, "");
+    Source source{path};
+    auto t = Clock::now();
+
+    // A 0 byte file: an empty table, every command an empty success.
+    auto update = source.Poll(t);
+    REQUIRE(update.kind == Source::Kind::Loaded);
+    REQUIRE(update.message == "(empty)");
+    REQUIRE(source.Version() == 1);
+
+    WriteFile(path, "\xEF\xBB\xBF" "104: 1\n");
+    t += std::chrono::seconds{1};
+    update = source.Poll(t);
+    REQUIRE(update.kind == Source::Kind::Loaded);
+    REQUIRE(update.message == "104=[0x1]");
+
+    // Saved as UTF-16: a clear error, the table stays.
+    WriteFile(path, std::string{"\xFF\xFE" "1\0" "0\0" "4\0" ":\0" " \0" "2\0", 14});
+    t += std::chrono::seconds{1};
+    update = source.Poll(t);
+    REQUIRE(update.kind == Source::Kind::Failed);
+    REQUIRE(update.message.ends_with(": UTF-16 file, save it as UTF-8"));
+    REQUIRE(source.Version() == 2);
+    REQUIRE(*source.Find(104) == std::vector<u32>{1});
+    fs::remove(path);
+}
+
+TEST_CASE("Nx2Vi2Reply: table commands no session answers", "[core]") {
+    const Table table{{1, {}}, {104, {1}}, {105, {}}, {300, {2}}, {301, {}}};
+    REQUIRE(Unanswered(table, {1, 104, 105, 300, 301}, {}).empty());
+    REQUIRE(Unanswered({}, {}, {}).empty());
+    REQUIRE(Unanswered(table, {104, 105}, {1}) ==
+            "300, 301 not answered: commands get a table handler when a vi2 session opens (restart "
+            "the game); 1 not answered: a handler of its own");
+    REQUIRE(Unanswered(table, {104, 105, 300, 301}, {1}) == "1 not answered: a handler of its own");
+}

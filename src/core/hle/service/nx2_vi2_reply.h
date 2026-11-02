@@ -11,6 +11,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -24,7 +25,8 @@
 // frame (104, 105, 107) and once at setup (261, 265, 267, 271, 351). A listed command answers
 // success followed by its words; an empty list is a success without data words.
 //   File, one command a line:  "<command>: <word> <word> ..."  ('#' starts a comment; words
-//                               decimal or 0x hexadecimal, separated by spaces or commas)
+//                               decimal or 0x hexadecimal, separated by spaces, tabs or commas;
+//                               UTF-8 or ASCII, a byte order mark is skipped, UTF-16 refused)
 //   Inline, ';' between items: "104:1;105:1,0;107:0x3c"
 // The file is checked at most once a second while the game calls a listed command and re-read
 // when its time or size changes; a table that fails to read or parse leaves the previous one.
@@ -124,6 +126,18 @@ inline Parsed Parse(std::string_view text, char separator = '\n', std::string_vi
     return Parsed{std::move(table), {}};
 }
 
+// File contents: a leading UTF-8 byte order mark is skipped; UTF-16 (Notepad's "Unicode") is
+// refused with an error that says so.
+inline Parsed ParseFile(std::string_view text) {
+    if (text.starts_with("\xFF\xFE") || text.starts_with("\xFE\xFF")) {
+        return Parsed{std::nullopt, "UTF-16 file, save it as UTF-8"};
+    }
+    if (text.starts_with("\xEF\xBB\xBF")) {
+        text.remove_prefix(3);
+    }
+    return Parse(text);
+}
+
 inline Parsed ParseInline(std::string_view text) {
     return Parse(text, ';', "item");
 }
@@ -149,6 +163,32 @@ inline std::string Describe(const Table& table) {
             text += ' ';
         }
         text += std::to_string(command) + '=' + FormatWords(words);
+    }
+    return text;
+}
+
+// The table's commands that no open session answers from it, for the "reply table" line:
+// `answered` were registered to the table when a session opened, `own` kept a handler of their
+// own. Empty when every command is answered.
+inline std::string Unanswered(const Table& table, const std::set<u32>& answered,
+                              const std::set<u32>& own) {
+    std::string later;
+    std::string kept;
+    for (const auto& entry : table) {
+        const u32 command = entry.first;
+        if (answered.contains(command)) {
+            continue;
+        }
+        std::string& list = own.contains(command) ? kept : later;
+        list += (list.empty() ? "" : ", ") + std::to_string(command);
+    }
+    std::string text;
+    if (!later.empty()) {
+        text = later + " not answered: commands get a table handler when a vi2 session opens "
+                       "(restart the game)";
+    }
+    if (!kept.empty()) {
+        text += (text.empty() ? "" : "; ") + kept + " not answered: a handler of its own";
     }
     return text;
 }
@@ -218,7 +258,7 @@ public:
             return Fail("cannot read " + path.string());
         }
         error.clear(); // new contents: report their error even if it is the same
-        auto parsed = Parse(text);
+        auto parsed = ParseFile(text);
         if (!parsed.table) {
             return Fail(path.string() + ": " + parsed.error);
         }
