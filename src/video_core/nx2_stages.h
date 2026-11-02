@@ -228,7 +228,8 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 //   B inside a JoinFromB / JoinFromBLocked `op` is the record owner, RecordOwner() == Stage::B:
 //   it runs C's half of its work itself instead of sending it).
 // - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
-//   inside a record at =1; a JoinFromBLocked waiting past 50 ms (logged as a K3 deadlock suspect).
+//   inside a record at =1; a JoinFromB / JoinFromBLocked still waiting after 50 ms, reported
+//   while it waits (then every second), with B's stack, as a K3 deadlock suspect.
 
 /// K2, B inside a record of ring 2, outside any packet and holding no cache lock (a draw's
 /// joined setup, RESETFIX's FlushRegion, a WaitForIdle with a query sync pending, an event whose

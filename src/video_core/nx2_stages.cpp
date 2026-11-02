@@ -155,6 +155,7 @@ struct GpuHandler {
         Nx2Profile::Add(Counter::Parks, 1);
     }
     void Hazard(u8 stage, StageHazard what, u64 a, u64 b);
+    void JoinStall(u64 c_record, u64 target, u64 ms);
     /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
     void BoundaryWork() {
         g_system->GPU().TickWork();
@@ -167,6 +168,8 @@ StagePipeline<GpuHandler> g_pipeline{g_handler};
 /// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
 /// and run the GPU's sync requests (StageTickWork).
 thread_local bool t_park_op{};
+/// B inside JoinFromBLocked (the buffer cache mutex held): JoinStall's report says so.
+thread_local bool t_locked_join{};
 /// The same for the other threads (CheckRecordOwner): C uses the caches and the scheduler, the
 /// front may not, caught up or not (C holds the mark until the op ran: T9b review protokol-1).
 std::atomic<bool> g_c_park_op{};
@@ -257,6 +260,21 @@ void GpuHandler::Hazard(u8 stage, StageHazard what, u64 a, u64 b) {
     if (g_check) {
         ReportStack("stage hazard", text);
     }
+}
+
+void GpuHandler::JoinStall(u64 c_record, u64 target, u64 ms) {
+    // STAGE_CHECK, on B while its join still waits (T9b review kilit-4). A deadlock never ends:
+    // C waiting on a lock B holds on its way to the join's target (K3 (a): the buffer cache mutex
+    // in a locked join). A long wait for a C far behind ends and moves C's record on.
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) >= 8) {
+        return;
+    }
+    LOG_WARNING(HW_GPU,
+                "GPU stages: a {}join from B has waited {} ms for C, which began the record at "
+                "{:#x} (the join's target {:#x}): K3 deadlock suspect",
+                t_locked_join ? "locked " : "", ms, c_record, target);
+    ReportStack("join from B waits", t_locked_join ? "JoinFromBLocked" : "JoinFromB");
 }
 
 u64* BeginRecord(Ring ring, RecordKind kind, u32 body_words, u32 flags = 0) {
@@ -414,24 +432,16 @@ void JoinFromBLocked(FunctionRef op) {
         return;
     }
     Nx2Profile::Add(Counter::JoinsB, 1);
-    const auto start =
-        g_check ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // B holds the buffer cache mutex while it waits: C reaching the join's target must not take
+    // it (K3 (a)). STAGE_CHECK reports a wait that lasts while it lasts (GpuHandler::JoinStall).
+    t_locked_join = true;
     g_pipeline.JoinFromBLocked([&] {
-        if (g_check) {
-            // B holds the buffer cache mutex while it waits: C reaching the join's target must
-            // not take it (K3 (a)); a long wait is the sign it does.
-            const auto waited = std::chrono::steady_clock::now() - start;
-            if (waited > std::chrono::milliseconds{50}) {
-                LOG_WARNING(HW_GPU,
-                            "GPU stages: a locked join from B waited {} ms for C to park "
-                            "(K3 deadlock suspect: C taking the buffer cache mutex)",
-                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
-            }
-        }
+        t_locked_join = false;
         g_owner.store(StageIdB, std::memory_order_release);
         op();
         g_owner.store(g_default_owner, std::memory_order_release);
     });
+    t_locked_join = false;
 }
 
 void ParkB(FunctionRef op) {

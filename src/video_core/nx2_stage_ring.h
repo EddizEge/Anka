@@ -5,11 +5,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -416,6 +419,59 @@ inline void Signal(std::atomic<u32>& word, u32 value) {
     word.notify_one();
 }
 
+/// A handshake word's wait that tells when it lasts (STAGE_CHECK): AwaitValueWatched sleeps on
+/// the condition variable with a timeout instead of on the word, SignalWatched wakes it.
+struct WaitWatch {
+    std::mutex mutex;
+    std::condition_variable condition;
+};
+/// The first report of a watched wait (JoinStall), then one a second while it lasts.
+inline constexpr std::chrono::milliseconds WatchFirst{50};
+inline constexpr std::chrono::milliseconds WatchEvery{1000};
+
+/// AwaitValue that calls `stalled(milliseconds waited)` while it still waits: after WatchFirst,
+/// then every WatchEvery. The other side stores with SignalWatched.
+template <typename Scope, typename Stalled>
+void AwaitValueWatched(const std::atomic<u32>& word, u32 value, WaitWatch& watch,
+                       Stalled&& stalled) {
+    if (word.load(std::memory_order_acquire) == value) {
+        return;
+    }
+    [[maybe_unused]] Scope scope;
+    for (u32 spins = 0; spins < 8192; ++spins) {
+        if (word.load(std::memory_order_acquire) == value) {
+            return;
+        }
+        RingPause();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto next = start + WatchFirst;
+    std::unique_lock lock{watch.mutex};
+    for (;;) {
+        if (watch.condition.wait_until(lock, next, [&] {
+                return word.load(std::memory_order_acquire) == value;
+            })) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        // Without the mutex: the other side's SignalWatched does not wait for the report.
+        lock.unlock();
+        stalled(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count()));
+        lock.lock();
+        next = now + WatchEvery;
+    }
+}
+/// Signal for a word AwaitValueWatched may wait on.
+inline void SignalWatched(std::atomic<u32>& word, u32 value, WaitWatch& watch) {
+    Signal(word, value);
+    // A waiter between its look and its sleep holds the mutex: it sees the value or the notify.
+    {
+        std::scoped_lock lock{watch.mutex};
+    }
+    watch.condition.notify_all();
+}
+
 /// Wakes the one sleeping in AwaitServing on `wake` to look again (a request for it, or the value
 /// it waits for stored before this).
 inline void Nudge(std::atomic<u32>& wake) {
@@ -526,6 +582,10 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   void Busy(u8 stage, bool busy);                            around a stage's batches
 ///   void Wrote(u8 to_stage, size_t bytes); void Parked();      counters (Parked: B for ParkB)
 ///   void Hazard(u8 stage, StageHazard what, u64 a, u64 b);     K3 (on the stage's thread)
+///   void JoinStall(u64 c_record, u64 target, u64 ms);          STAGE_CHECK, on B: a join from B
+///                                                              waits that long (WatchFirst, then
+///                                                              every WatchEvery), C last began
+///                                                              the record at c_record
 ///   void BoundaryWork();                                       C at a record boundary, asked
 ///                                                              (RequestBoundaryWork); may ParkB
 template <typename Handler, size_t BWords = RingToBWords, size_t CWords = RingToCWords>
@@ -592,6 +652,7 @@ public:
         join_release.store(0, std::memory_order_relaxed);
         join_target.store(0, std::memory_order_relaxed);
         join_read.store(0, std::memory_order_relaxed);
+        c_progress.store(0, std::memory_order_relaxed);
         park_position.store(0, std::memory_order_relaxed);
         boundary_work.store(false, std::memory_order_relaxed);
         c_in_record = false;
@@ -948,7 +1009,11 @@ private:
         const u32 id = join_request.load(std::memory_order_acquire);
         join_served = id;
         join_read.store(read, std::memory_order_relaxed);
-        Signal(join_ack, id);
+        if (options.check) {
+            SignalWatched(join_ack, id, join_watch);
+        } else {
+            Signal(join_ack, id);
+        }
         AwaitValue<typename Scopes::ParkWait>(join_release, id);
     }
 
@@ -963,7 +1028,15 @@ private:
         // C may sleep waiting for ring 3's records, in its ParkB wait too.
         link.ring.Wake();
         Nudge(c_wake);
-        AwaitValue<typename Scopes::JoinWait>(join_ack, id);
+        if (options.check) {
+            // A wait that lasts is reported while it lasts, with B's stack (a deadlock ends never;
+            // T9b review kilit-4).
+            AwaitValueWatched<typename Scopes::JoinWait>(join_ack, id, join_watch, [&](u64 ms) {
+                handler.JoinStall(c_progress.load(std::memory_order_relaxed), target, ms);
+            });
+        } else {
+            AwaitValue<typename Scopes::JoinWait>(join_ack, id);
+        }
         const u64 read = join_read.load(std::memory_order_relaxed);
         if (read < target) [[unlikely]] {
             handler.Hazard(StageIdB, StageHazard::JoinShort, read, target);
@@ -1074,6 +1147,12 @@ private:
         // C inside the record (ParkB's choice, CInRecord); the record may run inside C's ParkB
         // wait, at its boundary.
         [[maybe_unused]] const InRecord in_record{IsB ? nullptr : &c_in_record};
+        if constexpr (!IsB) {
+            if (options.check) {
+                // Where C is for a join's report (JoinStall), from B.
+                c_progress.store(start, std::memory_order_relaxed);
+            }
+        }
         if (options.mode == 2 || options.check) {
             // Every record, in order: the 16 bits compared for equality (depth 1, K5).
             const u16 expected = ++in.seen_seq;
@@ -1352,6 +1431,9 @@ private:
     alignas(64) std::atomic<u32> join_ack{};
     std::atomic<u64> join_read{};
     alignas(64) std::atomic<u32> join_release{};
+    /// STAGE_CHECK: B's watched wait for join_ack, and the record C began last (Step).
+    WaitWatch join_watch;
+    alignas(64) std::atomic<u64> c_progress{};
     /// Where C sleeps in ParkB inside a record (=1, a hazard: AwaitServing).
     alignas(64) std::atomic<u32> c_wake{};
     /// C's boundary work asked (RequestBoundaryWork).

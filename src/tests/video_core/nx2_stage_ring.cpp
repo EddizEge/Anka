@@ -96,6 +96,9 @@ struct FakeHandler {
     void (*on_boundary)(){};
     /// Hazard reports by kind (StageHazard).
     std::array<std::atomic<u32>, 2> hazards{};
+    /// STAGE_CHECK's reports of a join from B that lasts (JoinStall), the last one's wait.
+    std::atomic<u32> join_stalls{};
+    std::atomic<u64> join_stall_ms{};
 
     u32 PendingDeltas() {
         return static_cast<u32>(capture.size());
@@ -154,6 +157,10 @@ struct FakeHandler {
         if (on_boundary != nullptr) {
             on_boundary();
         }
+    }
+    void JoinStall(u64, u64, u64 ms) {
+        join_stall_ms = ms;
+        ++join_stalls;
     }
 };
 
@@ -1190,6 +1197,65 @@ TEST_CASE("Nx2StagePipeline: =2 checks no record B writes as it parks, A going o
     REQUIRE(handler.parks == 200);
     REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
     REQUIRE(handler.logs[StageIdB].deltas.size() == 400);
+}
+
+namespace {
+/// T9b review kilit-4: C held inside a record (as by a lock B holds) while B joins.
+std::atomic<bool> g_c_held{};
+std::atomic<bool> g_c_release{};
+std::chrono::steady_clock::time_point g_c_released_at;
+std::atomic<s64> g_op_after_release_ms{-1};
+void HoldOnC(const u64*, u32) {
+    g_c_held = true;
+    while (!g_c_release.load()) {
+        std::this_thread::yield();
+    }
+}
+void HoldCThenJoinOnB(const u64*, u32) {
+    PostCallC(*g_pipe, &HoldOnC, 0);
+    g_pipe->JoinFromB([] {
+        Expect(g_c_release.load(), "the join's op runs once C went on");
+        g_op_after_release_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - g_c_released_at)
+                                    .count();
+        Order('b');
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: STAGE_CHECK reports a join from B while it waits (kilit-4)",
+          "[video_core]") {
+    Watchdog watchdog{"join stall"};
+    for (u32 round = 0; round < 3; ++round) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_c_held = false;
+        g_c_release = false;
+        g_op_after_release_ms = -1;
+        REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true, .check = true}));
+        PostCallB(pipe, &HoldCThenJoinOnB, 0);
+        pipe.PublishB();
+        // The report comes while the join waits (C still held), not once it ended.
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (handler.join_stalls.load() == 0 && std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        const u32 stalls = handler.join_stalls.load();
+        Expect(stalls >= 1, "a join waiting past 50 ms is reported while it waits", stalls);
+        Expect(handler.join_stall_ms.load() >= 50, "the report says how long it waited",
+               handler.join_stall_ms.load());
+        Expect(g_c_held.load(), "C is held meanwhile");
+        g_c_released_at = std::chrono::steady_clock::now();
+        g_c_release = true;
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_order == std::vector<char>({'b'}));
+        // C's ack wakes B at once (SignalWatched), not at the watch's next timeout.
+        REQUIRE(g_op_after_release_ms.load() >= 0);
+        REQUIRE(g_op_after_release_ms.load() < 300);
+    }
 }
 
 TEST_CASE("Nx2StagePipeline: C waiting in ParkB parks for A's join on its way", "[video_core]") {
