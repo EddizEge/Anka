@@ -111,6 +111,14 @@ inline int Nx2StorageKeep() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_STORAGE_KEEP");
 }
+/// EDEN_NX2_UBO_BIND_SKIP (elBart0 0015): BindGraphicsUniformBuffer keeps a binding resolved to
+/// the same device address and size whose buffer FindBuffer would return again, instead of
+/// clearing it for UpdateUniformBuffers to find; an unmapped address binds NULL_BINDING. =0 as
+/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds).
+inline int Nx2UboBindSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_UBO_BIND_SKIP");
+}
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
 inline bool Nx2VertexFast() {

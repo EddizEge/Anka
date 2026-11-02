@@ -420,6 +420,35 @@ template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (const int skip = Nx2UboBindSkip(); skip != 0) {
+        static u64 binds{};
+        static u64 kept{};
+        if ((++binds & ((u64{1} << 22) - 1)) == 0) {
+            LOG_INFO(HW_GPU, "Uniform buffer binds: {} of {} to the binding already resolved",
+                     kept, binds);
+        }
+        if (!device_addr) {
+            channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+            return;
+        }
+        // Kept only where UpdateUniformBuffers' FindBuffer would find that buffer: page_table
+        // still names it (live, registered there) and it holds the range; it may wait with the
+        // accurate GPU fence, so not then. Not with persistent bindings (OpenGL), which
+        // UpdateUniformBuffers marks dirty for the bind.
+        if constexpr (!HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+            const Binding& current = channel_state->uniform_buffers[stage][index];
+            if (current.device_addr == *device_addr && current.size == size &&
+                current.buffer_id && current.buffer_id != NULL_BUFFER_ID &&
+                page_table[*device_addr >> CACHING_PAGEBITS] == current.buffer_id &&
+                slot_buffers[current.buffer_id].IsInBounds(*device_addr, size) &&
+                !Settings::IsGPUFenceBehaviorAccurate()) {
+                ++kept;
+                if (skip != 2) {
+                    return;
+                }
+            }
+        }
+    }
     const Binding binding{
         .device_addr = *device_addr,
         .size = size,
