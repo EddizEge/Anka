@@ -3995,6 +3995,9 @@ void RasterizerVulkan::NoteStageSeq(u64 seq) {
     if (noted != 0) {
         scheduler.NoteSeqTick(noted);
     }
+    // T8: C ran the work up to `seq` (its caches marked what it wrote): B's presets for it end.
+    // The seq itself, the anchor's hold is the staging pool's alone.
+    VideoCommon::Nx2Stages::GpuPages().Ran(seq);
 }
 
 void RasterizerVulkan::ReleaseAnchorC() {
