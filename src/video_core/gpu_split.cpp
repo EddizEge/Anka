@@ -21,11 +21,13 @@
 #include "common/thread.h"
 #include "core/core.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_back_cpu.h"
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 
 namespace VideoCommon {
 
@@ -48,6 +50,11 @@ std::atomic<bool> g_back_busy{};
 
 void GpuSplit::CheckOwner(const char* where) {
 #ifdef _WIN32
+    if (Nx2Stages::Active()) [[unlikely]] {
+        // Back stages: the stage recording (RecordOwner) owns the scheduler.
+        Nx2Stages::Detail::CheckRecordOwner(where);
+        return;
+    }
     if (!g_back_busy.load(std::memory_order_acquire)) {
         return;
     }
@@ -126,6 +133,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     batch_direct = direct;
     pending_count = 0;
     ring = std::make_unique<u64[]>(RingWords);
+    // EDEN_NX2_BACK_STAGES: the stages below the back start first (nothing runs behind the
+    // front yet); the back thread then runs as stage A (BackLoop).
+    Nx2Stages::Start(system_);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
 #ifdef ARCHITECTURE_x86_64
@@ -145,6 +155,8 @@ void GpuSplit::Stop() {
     wake.fetch_add(1, std::memory_order_seq_cst);
     wake.notify_one();
     back_thread.join();
+    // EDEN_NX2_BACK_STAGES: the stages below A stop after it (they may read ring 1, =3).
+    Nx2Stages::Stop();
     // EDEN_NX2_BACK_CPU: the core the back had is the process's again.
     Nx2BackCpu::StopBack();
     active = false;
@@ -423,6 +435,10 @@ size_t GpuSplit::Execute(const u64* entry, u64 published_left) {
 }
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {
+    if (Nx2Stages::Active()) {
+        RunStagedBack(stop_token);
+        return;
+    }
     Common::SetCurrentThreadName("GPUBack");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
@@ -477,6 +493,310 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             // EDEN_NX2_GPU_BUSY_CLOCK: caught up while the front waits for a command?
             Nx2BusyClock::BackStored();
         }
+    }
+}
+
+void GpuSplit::StageConsumed(u64 position, bool caught_up) {
+    consumed.store(position, std::memory_order_release);
+    Nx2BackCpu::NoteBack();
+    if (caught_up && Nx2BusyClock::Tracked()) {
+        // EDEN_NX2_GPU_BUSY_CLOCK: caught up while the front waits for a command?
+        Nx2BusyClock::BackStored();
+    }
+}
+
+void GpuSplit::StageExecute(u64 position, u64 words) {
+    const u64 end = position + words;
+    u64 last_store = position;
+    while (position != end) {
+        const size_t index = position & RingMask;
+        const size_t size = Execute(&ring[index], end - position);
+        position += size != 0 ? size : RingWords - index;
+        if (position - last_store >= 4096 && position != end) {
+            consumed.store(position, std::memory_order_release);
+            last_store = position;
+        }
+    }
+    Nx2Profile::Add(Nx2Profile::Counter::PassThrough, words);
+}
+
+namespace {
+
+/// KeplerCompute's launch method: of the engines whose methods do not run on A, only its
+/// execution mask holds it (MaxwellDMA 0xC0, KeplerMemory 0x6C-0x6D, Fermi2D 0x880 on).
+constexpr size_t KeplerComputeLaunch = KEPLER_COMPUTE_REG_INDEX(launch);
+
+/// Whether the entry (Method, Multi or Batch) runs an executable method of `engine`.
+bool EntryExecutes(const Tegra::Engines::EngineInterface& engine, u64 head, const u64* entry,
+                   bool batch) {
+    if (!batch) {
+        return engine.execution_mask[(head >> 8) & 0xffff];
+    }
+    const u32 count = static_cast<u32>(head >> 32);
+    for (u32 i = 0; i < count; ++i) {
+        if (engine.execution_mask[entry[1 + i] & 0xffff]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void CountJoinCandidate(const Tegra::Engines::EngineInterface& engine) {
+    if (Nx2Profile::Enabled()) {
+        Nx2Profile::Add(Nx2Profile::Counter::JoinCandidates, 1);
+        if (engine.execution_mask[KeplerComputeLaunch]) {
+            Nx2Profile::Add(Nx2Profile::Counter::JoinCandidatesCompute, 1);
+        }
+    }
+}
+
+} // Anonymous namespace
+
+bool GpuSplit::StagedJoinStarts(const u64* entry, Nx2Stages::JoinReason& reason) {
+    const u64 head = entry[0];
+    const Kind kind = static_cast<Kind>(head & 0xf);
+    if (kind == Kind::Call) {
+        if (CallTarget(head) != DeferTarget::Join) {
+            return false;
+        }
+        reason = Nx2Stages::JoinReason::Tagged;
+        return true;
+    }
+    if (kind != Kind::Method && kind != Kind::Multi && kind != Kind::Batch) {
+        return false;
+    }
+    const auto& engine = *back_engine;
+    if (engine.stage_methods_on_a || !EntryExecutes(engine, head, entry, kind == Kind::Batch)) {
+        // Maxwell3D's methods run on A (they send what they do); state writes of the other
+        // engines too (method sink, registers).
+        return false;
+    }
+    CountJoinCandidate(engine);
+    reason = Nx2Stages::JoinReason::Engine;
+    return true;
+}
+
+bool GpuSplit::StagedJoinContinues(const u64* entry) const {
+    const u64 head = entry[0];
+    switch (static_cast<Kind>(head & 0xf)) {
+    case Kind::Wrap:
+        return true;
+    case Kind::Engine:
+        return !reinterpret_cast<const Tegra::Engines::EngineInterface*>(entry[1])
+                    ->stage_methods_on_a;
+    case Kind::Call:
+        return CallTarget(head) == DeferTarget::Join;
+    case Kind::Method:
+    case Kind::Multi:
+    case Kind::Batch: {
+        const auto& engine = *back_engine;
+        if (engine.stage_methods_on_a) {
+            return false;
+        }
+        if (EntryExecutes(engine, head, entry, static_cast<Kind>(head & 0xf) == Kind::Batch)) {
+            CountJoinCandidate(engine);
+        }
+        return true;
+    }
+    }
+    return false;
+}
+
+size_t GpuSplit::ExecuteStagedA(const u64* entry, u64 published_left) {
+    const u64 head = entry[0];
+    switch (static_cast<Kind>(head & 0xf)) {
+    case Kind::Wrap:
+        return 0;
+    case Kind::Engine:
+        back_engine = reinterpret_cast<Tegra::Engines::EngineInterface*>(entry[1]);
+        return 2;
+    case Kind::Method: {
+        const u32 method = static_cast<u32>((head >> 8) & 0xffff);
+        const u32 argument = static_cast<u32>(head >> 32);
+        auto* const engine = back_engine;
+        if ((head & Direct) != 0) {
+            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+            engine->ConsumeSink(*system);
+            // Macro writes to the engine's run methods (Maxwell3D: constant buffer data) that
+            // follow each other go to it together: published, before the ring's end, one word
+            // each (no segment).
+            using Tegra::Engines::EngineInterface;
+            if (method - engine->method_run_begin < engine->method_run_count && published_left > 1) {
+                const size_t to_end = RingWords - static_cast<size_t>(entry - ring.get());
+                const size_t limit = static_cast<size_t>(std::min<u64>(
+                    std::min<u64>(published_left, to_end), EngineInterface::MaxMethodRun));
+                u32 methods[EngineInterface::MaxMethodRun];
+                u32 arguments[EngineInterface::MaxMethodRun];
+                methods[0] = method;
+                arguments[0] = argument;
+                size_t count = 1;
+                for (; count < limit; ++count) {
+                    const u64 next = entry[count];
+                    const u32 next_method = static_cast<u32>((next >> 8) & 0xffff);
+                    if (static_cast<Kind>(next & 0xf) != Kind::Method ||
+                        (next & (Direct | HasSegment)) != Direct ||
+                        next_method - engine->method_run_begin >= engine->method_run_count) {
+                        break;
+                    }
+                    methods[count] = next_method;
+                    arguments[count] = static_cast<u32>(next >> 32);
+                }
+                if (count > 1) {
+                    engine->CallMethodRun(*system, methods, arguments, static_cast<u32>(count));
+                    return count;
+                }
+            }
+            engine->CallMethod(*system, method, argument, true);
+        } else if (!engine->execution_mask[method]) {
+            engine->method_sink.emplace_back(method, argument);
+        } else {
+            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+            engine->ConsumeSink(*system);
+            if ((head & HasSegment) != 0) {
+                engine->current_dma_segment = entry[1];
+            }
+            engine->CallMethod(*system, method, argument, (head & IsLast) != 0);
+        }
+        return (head & HasSegment) != 0 ? 2 : 1;
+    }
+    case Kind::Multi: {
+        const u32 method = static_cast<u32>((head >> 8) & 0xffff);
+        const u32 amount = static_cast<u32>(head >> 32);
+        const size_t data = (head & HasSegment) != 0 ? 3 : 2;
+        auto* const engine = back_engine;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        engine->ConsumeSink(*system);
+        if ((head & HasSegment) != 0) {
+            engine->current_dma_segment = entry[2];
+        }
+        engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
+                                amount, static_cast<u32>(entry[1]));
+        return data + (amount + 1) / 2;
+    }
+    case Kind::Batch: {
+        // EDEN_NX2_WRITE_BATCH: as Execute.
+        const u32 count = static_cast<u32>(head >> 32);
+        const u64* const writes = entry + 1;
+        auto* const engine = back_engine;
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        engine->ConsumeSink(*system);
+        if (batch_direct) {
+            engine->CallMethodBatch(*system, writes, count);
+            return 1 + size_t{count};
+        }
+        using Tegra::Engines::EngineInterface;
+        for (u32 i = 0; i < count;) {
+            const u32 method = static_cast<u32>(writes[i] & 0xffff);
+            const u32 argument = static_cast<u32>(writes[i] >> 32);
+            if (method - engine->method_run_begin < engine->method_run_count) {
+                u32 methods[EngineInterface::MaxMethodRun];
+                u32 arguments[EngineInterface::MaxMethodRun];
+                u32 run = 0;
+                for (; run < EngineInterface::MaxMethodRun && i + run < count; ++run) {
+                    const u32 next = static_cast<u32>(writes[i + run] & 0xffff);
+                    if (next - engine->method_run_begin >= engine->method_run_count) {
+                        break;
+                    }
+                    methods[run] = next;
+                    arguments[run] = static_cast<u32>(writes[i + run] >> 32);
+                }
+                if (run > 1) {
+                    engine->CallMethodRun(*system, methods, arguments, run);
+                    i += run;
+                    continue;
+                }
+            }
+            engine->CallMethod(*system, method, argument, true);
+            ++i;
+        }
+        return 1 + size_t{count};
+    }
+    case Kind::Call: {
+        const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
+        const auto thunk = reinterpret_cast<void (*)(const u64*)>(entry[1]);
+        const DeferTarget target = CallTarget(head);
+        if (target == DeferTarget::OnA || Nx2Stages::InJoin()) {
+            // Register and draw manager work (or anything while the stages are parked).
+            thunk(entry + 2);
+        } else if (target == DeferTarget::Join) {
+            Nx2Stages::JoinFromA(Nx2Stages::JoinReason::Tagged, [&] { thunk(entry + 2); });
+        } else {
+            // Owner: the stage owning the caches runs it, in the stream's order (D2).
+            Nx2Stages::Forward(Nx2Stages::Ring::ToB, thunk, entry + 2, static_cast<u32>(payload));
+        }
+        return 2 + payload;
+    }
+    }
+    return 1;
+}
+
+void GpuSplit::RunStagedBack(std::stop_token stop_token) {
+    Common::SetCurrentThreadName("GPUBack");
+    // Stage A is Highest (S19): B, the stage a frame waits on, has Critical and the back's core
+    // (EDEN_NX2_BACK_CPU); A runs off that core with the process's other threads.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
+    Common::SetCurrentThreadToPerformanceCores();
+    system->RegisterHostThread();
+    Nx2Stages::Detail::t_stage = static_cast<u8>(Nx2Stages::Stage::A);
+    const bool pass_through = Nx2Stages::Get().mode == 3;
+    u64 read_position = 0;
+    while (!stop_token.stop_requested()) {
+        Nx2Profile::Report(Nx2Profile::stage_report_names[0]);
+        u64 available = published.load(std::memory_order_acquire);
+        if (available == read_position) {
+            Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+            // The front usually sends more within microseconds: spin briefly before sleeping.
+            for (u32 spins = 0; spins < 8192 && available == read_position; ++spins) {
+                Pause();
+                available = published.load(std::memory_order_acquire);
+            }
+            if (available == read_position) {
+                // Publish bumps `wake` when it sees back_waiting: read it before the last look
+                // at `published`, so a publish in between ends the wait at once.
+                back_waiting.store(true, std::memory_order_seq_cst);
+                const u32 seen = wake.load(std::memory_order_seq_cst);
+                available = published.load(std::memory_order_seq_cst);
+                if (available == read_position && !stop_token.stop_requested()) {
+                    wake.wait(seen, std::memory_order_seq_cst);
+                }
+                back_waiting.store(false, std::memory_order_relaxed);
+                continue;
+            }
+        }
+        if (pass_through) {
+            // =3 (D7): B runs the range with Execute; the stage costs alone (ring 2, wake, mark).
+            Nx2Stages::Detail::PostExecA(read_position, available - read_position);
+            read_position = available;
+            Nx2Stages::Detail::PostBatchEnd(read_position);
+            continue;
+        }
+        u64 last_mark = read_position;
+        while (read_position != available) {
+            const size_t index = read_position & RingMask;
+            Nx2Stages::JoinReason reason{};
+            if (StagedJoinStarts(&ring[index], reason)) [[unlikely]] {
+                // With the stages parked: this entry and what follows of the engines whose
+                // methods do not run on A, and of Call entries tagged Join (S9/2).
+                Nx2Stages::JoinFromA(reason, [&] {
+                    do {
+                        const size_t at = read_position & RingMask;
+                        const size_t size = ExecuteStagedA(&ring[at], available - read_position);
+                        read_position += size != 0 ? size : RingWords - at;
+                    } while (read_position != available &&
+                             StagedJoinContinues(&ring[read_position & RingMask]));
+                });
+            } else {
+                const size_t size = ExecuteStagedA(&ring[index], available - read_position);
+                read_position += size != 0 ? size : RingWords - index;
+            }
+            // How far A ran, now and then while working through a long batch: the last stage
+            // hands ring space back with it (D1: A never stores `consumed`).
+            if (read_position - last_mark >= 4096 && read_position != available) {
+                Nx2Stages::PostMark(Nx2Stages::Ring::ToB, read_position);
+                last_mark = read_position;
+            }
+        }
+        Nx2Stages::Detail::PostBatchEnd(read_position);
     }
 }
 

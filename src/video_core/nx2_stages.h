@@ -57,6 +57,16 @@ inline constexpr u8 NoStage = 0xff;
 inline thread_local u8 t_stage = NoStage;
 /// A runs a join's work (JoinFromA): the stages below are parked at its point of the stream.
 inline thread_local bool t_in_join{};
+
+// T1's own, between A (gpu_split.cpp) and the stages (nx2_stages.cpp); not for other callers.
+/// A, =3: B runs `words` words of ring 1 from `ring1_position` with GpuSplit::Execute (ExecA).
+void PostExecA(u64 ring1_position, u64 words);
+/// A, the end of its batch: a Mark (MarkCaughtUp) for `ring1_position`, then ring 2 published.
+void PostBatchEnd(u64 ring1_position);
+/// GpuSplit::CheckOwner while Active(): reports a thread other than RecordOwner()'s using the
+/// scheduler (the front only while the record owner runs records; A outside a join counted as
+/// StageUnproxied too).
+void CheckRecordOwner(const char* where);
 } // namespace Detail
 
 /// Whether the stages run (Start to Stop), =3 included. Any thread. What depends on staged
