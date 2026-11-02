@@ -4245,6 +4245,9 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
             FlushWork();
             maxwell3d->draw_manager.draw_state.topology = mb.draw_manager.draw_state.topology;
+            // B's replica's flags set up the buffers here too: C's submissions do not reach them
+            // (esdeger-2).
+            ForceVertexBinds(mb);
             if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
                 return;
             }
