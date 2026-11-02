@@ -3796,6 +3796,91 @@ void RasterizerVulkan::SendStageDraw() {
     Stages::Commit(Stages::Ring::ToC);
 }
 
+u64 RasterizerVulkan::NextStageSeq() const noexcept {
+    // While staged, what the runtime stamps with: the seq its next packet gets.
+    return Nx2Record::SeqTicks::SeqOf(buffer_cache_runtime.UsageStamp());
+}
+
+void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
+    namespace Stages = VideoCommon::Nx2Stages;
+    Stages::Nx2GpuPages& pages = Stages::GpuPages();
+    if (!pages.Live()) {
+        // Off: Holds says every page may hold data.
+        return;
+    }
+    // The bound targets' GPU ranges, conservatively (D6): a layer's stride (pitch linear: pitch
+    // times height; neither: 16 bytes a texel) times the layers or depth.
+    const auto& regs = mb.regs;
+    using Regs = Tegra::Engines::Maxwell3D::Regs;
+    static constexpr u64 MaxTargetBytes = u64{256} << 20;
+    const auto target_bytes = [](u64 stride, u64 linear, u64 width, u64 height, u64 layers,
+                                 u64 texel) {
+        u64 layer = (std::max)(stride, linear);
+        if (layer == 0) {
+            layer = width * height * texel;
+        }
+        return (std::min)(layer * (std::max)(layers, u64{1}), MaxTargetBytes);
+    };
+    decltype(StageTargets::key) key{};
+    const u32 count = (std::min)(static_cast<u32>(regs.rt_control.count),
+                                 static_cast<u32>(Regs::NumRenderTargets));
+    for (u32 index = 0; index < count; ++index) {
+        const auto& rt = regs.rt[regs.rt_control.Map(index)];
+        if (rt.Address() == 0 || rt.format == Tegra::RenderTargetFormat::NONE) {
+            continue;
+        }
+        const u64 linear = rt.tile_mode.is_pitch_linear ? u64{rt.width} * rt.height : 0;
+        key[index] = {rt.Address(), target_bytes(u64{rt.array_pitch} * 4, linear, rt.width,
+                                                 rt.height, rt.depth.Value(), 16)};
+    }
+    if (regs.zeta_enable != 0 && regs.zeta.Address() != 0) {
+        const u64 layers = regs.zeta_size.dim_control ==
+                                   Regs::ZetaSize::DimensionControl::DefineArraySize
+                               ? u64{regs.zeta_size.depth.Value()}
+                               : 1;
+        key[Regs::NumRenderTargets] = {
+            regs.zeta.Address(), target_bytes(u64{regs.zeta.array_pitch} * 4, 0,
+                                              regs.zeta_size.width, regs.zeta_size.height,
+                                              layers, 8)};
+    }
+    StageTargets& targets = stage_targets;
+    if (!targets.valid || targets.gpu_memory != gpu_memory || targets.key != key) {
+        // Device pages found page by page, contiguous ones as one range (PreSetGpu's walk, kept
+        // for the packets after while the registers stay).
+        targets.ranges.clear();
+        for (const auto& [address, size] : key) {
+            DAddr run_begin = 0;
+            DAddr run_end = 0;
+            for (GPUVAddr page = address & ~GPUVAddr{0xfff}; size != 0 && page < address + size;
+                 page += 0x1000) {
+                const std::optional<DAddr> device = gpu_memory->GpuToCpuAddress(page);
+                if (device && *device == run_end && run_end != run_begin) {
+                    run_end += 0x1000;
+                    continue;
+                }
+                if (run_end != run_begin) {
+                    targets.ranges.emplace_back(run_begin, run_end - run_begin);
+                }
+                run_begin = device ? *device : 0;
+                run_end = device ? *device + 0x1000 : 0;
+            }
+            if (run_end != run_begin) {
+                targets.ranges.emplace_back(run_begin, run_end - run_begin);
+            }
+        }
+        targets.key = key;
+        targets.gpu_memory = gpu_memory;
+        targets.valid = true;
+    }
+    for (const auto& [begin, size] : targets.ranges) {
+        pages.PreSet(begin, size, seq);
+    }
+    if (targets.ranges.empty()) {
+        // Only the seq: work before it holds until C ran it.
+        pages.PreSet(0, 0, seq);
+    }
+}
+
 void RasterizerVulkan::StageInvalidateThunk(const u64* payload, u32 words) {
     auto* const rasterizer = reinterpret_cast<RasterizerVulkan*>(payload[0]);
     rasterizer->RunStageInvalidations(payload + 1, (words - 1) / 2);
@@ -4190,6 +4275,10 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         if (light_ok) {
             finish_head(seq, records, last.level);
+            PreSetTargets(mb, seq);
+            if (pipeline.WritesMemory()) {
+                VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+            }
             SendStageDraw();
             if (try_plain) {
                 Profile::Add(Profile::Counter::LightDraws, 1);
@@ -4310,6 +4399,14 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                                                             : LightLevel::None;
     }
     finish_head(seq, records, follows);
+    if (params.command != StageCommand::None) {
+        // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
+        PreSetTargets(mb, seq);
+        if (pipeline->WritesMemory()) {
+            // Storage images / global stores B does not place.
+            VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+        }
+    }
     SendStageDraw();
 }
 
@@ -4590,6 +4687,9 @@ void RasterizerVulkan::ClearB(u32 layer_count) {
     NoteLightWork();
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::Clears, 1);
     gpu_memory->FlushCaching();
+    // T8: the clear writes the bound targets, before the next packet.
+    EnsureSplitStaged();
+    PreSetTargets(EngineB(), NextStageSeq());
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, layer_count] {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Clear};
@@ -4602,6 +4702,9 @@ void RasterizerVulkan::DrawTextureB() {
     // All C's: the texture cache and the recording, with the side state of B's replica.
     NoteLightWork();
     const auto state = EngineB().draw_manager.draw_texture_state;
+    // T8: the blit writes the bound targets, before the next packet.
+    EnsureSplitStaged();
+    PreSetTargets(EngineB(), NextStageSeq());
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, state] {
         maxwell3d->draw_manager.draw_texture_state = state;
@@ -4625,6 +4728,9 @@ void RasterizerVulkan::WaitForIdleB() {
 
 void RasterizerVulkan::TickFrameB() {
     NoteLightWork();
+    // The targets' device ranges are found again (a mapping that changed under the same
+    // registers).
+    stage_targets.valid = false;
     StageBufferWork([&] { buffer_cache.TickFrame(); });
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this] { TickFrameC(); });
