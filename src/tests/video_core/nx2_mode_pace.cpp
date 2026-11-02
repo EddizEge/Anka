@@ -527,6 +527,50 @@ TEST_CASE("Nx2ModePace: precise sleep", "[video_core]") {
     }
 }
 
+TEST_CASE("Nx2ModePace: guest kernel sleep before the host's tail", "[video_core]") {
+    using namespace std::chrono;
+    // The part for the guest kernel: the wait less the tail, none under 200 us.
+    REQUIRE(GuestPart(milliseconds{30}, milliseconds{1}) == milliseconds{29});
+    REQUIRE(GuestPart(microseconds{1150}, milliseconds{1}) == nanoseconds{0});
+    REQUIRE(GuestPart(microseconds{1200}, milliseconds{1}) == microseconds{200});
+    REQUIRE(GuestPart(milliseconds{-5}, milliseconds{1}) == nanoseconds{0});
+    REQUIRE(GuestPart(milliseconds{5}, nanoseconds{0}) == milliseconds{5});
+
+    // A fake guest sleep (a host sleep here): asked once, for the wait less max(spin, tail); the
+    // host part still ends at the target, never before it.
+    struct Asked {
+        int calls{};
+        nanoseconds total{};
+    } asked;
+    const GuestSleeper sleeper{[](void* context, nanoseconds duration) {
+                                   auto& a = *static_cast<Asked*>(context);
+                                   ++a.calls;
+                                   a.total += duration;
+                                   std::this_thread::sleep_for(duration);
+                               },
+                               &asked};
+    for (const auto& [spin, tail] : {std::pair{0U, 1000U}, std::pair{1500U, 1000U},
+                                     std::pair{0U, 0U}}) {
+        asked = {};
+        const auto start = steady_clock::now();
+        const auto target = start + milliseconds{8};
+        SleepUntil(target, spin, &sleeper, tail);
+        REQUIRE(steady_clock::now() >= target);
+        REQUIRE(asked.calls == 1);
+        const nanoseconds most = milliseconds{8} - microseconds{(std::max)(spin, tail)};
+        REQUIRE(asked.total <= most);
+        REQUIRE(asked.total > most - milliseconds{2}); // the time before the call, local only
+    }
+    // Too short for the guest kernel: the host sleeps alone.
+    asked = {};
+    SleepUntil(steady_clock::now() + microseconds{900}, 0U, &sleeper, 1000U);
+    REQUIRE(asked.calls == 0);
+    // No sleeper, or one without a function: the host alone.
+    const GuestSleeper empty{};
+    SleepUntil(steady_clock::now() + milliseconds{2}, 0U, &empty, 1000U);
+    SleepUntil(steady_clock::now() + milliseconds{2}, 0U, nullptr, 1000U);
+}
+
 TEST_CASE("Nx2ModePace: failed up20 pushes back off, then stop", "[video_core]") {
     Controller ctl;
     std::vector<double> rests;

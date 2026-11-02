@@ -240,11 +240,36 @@ private:
     double last_busy{};
 };
 
+/// EDEN_NX2_PACE_GUEST_SLEEP: sleeps the calling thread in the guest kernel for that long, so the
+/// emulated core it holds runs other guest threads meanwhile (nx2_gsv.h).
+struct GuestSleeper {
+    void (*sleep)(void* context, std::chrono::nanoseconds duration){};
+    void* context{};
+};
+
+/// Of a wait of `left`: the part to sleep in the guest kernel, `tail` left to the host. None
+/// under 200 us: not worth a guest kernel wait.
+inline std::chrono::nanoseconds GuestPart(std::chrono::nanoseconds left,
+                                          std::chrono::nanoseconds tail) {
+    const std::chrono::nanoseconds part = left - tail;
+    return part >= std::chrono::microseconds{200} ? part : std::chrono::nanoseconds{0};
+}
+
 /// Sleeps until `target`; with `spin_us`, wakes that long before it and yields until it (the
 /// Windows timer overshoots a sleep by up to a few ms). 0: std::this_thread::sleep_until alone.
-/// Returns how long it yielded.
+/// With `guest`, sleeps in the guest kernel first until max(spin_us, tail_us) before the target
+/// (GuestPart), then as above. Returns how long it yielded.
 inline std::chrono::nanoseconds SleepUntil(std::chrono::steady_clock::time_point target,
-                                           u32 spin_us) {
+                                           u32 spin_us, const GuestSleeper* guest = nullptr,
+                                           u32 tail_us = 0) {
+    if (guest != nullptr && guest->sleep != nullptr) {
+        const std::chrono::nanoseconds part =
+            GuestPart(target - std::chrono::steady_clock::now(),
+                      std::chrono::microseconds{(std::max)(spin_us, tail_us)});
+        if (part.count() > 0) {
+            guest->sleep(guest->context, part);
+        }
+    }
     if (spin_us == 0) {
         std::this_thread::sleep_until(target);
         return {};

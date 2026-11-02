@@ -45,8 +45,10 @@
 #include "core/hle/kernel/k_resource_limit.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/k_session.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/memory.h"
 #include "video_core/host1x/host1x.h"
@@ -1056,7 +1058,8 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(PresentInterval(w));
         if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
-            if (VideoCommon::Nx2ModePace::Hold(PresentInterval(w)) && VblankGridMode() == 0) {
+            if (VideoCommon::Nx2ModePace::Hold(PresentInterval(w), GuestSleeperOrNull()) &&
+                VblankGridMode() == 0) {
                 // The vblank pacing starts over from the held present: no short frames after it.
                 m_next_vblank = std::chrono::steady_clock::now() +
                                 std::chrono::nanoseconds{100'000'000'000LL / 60 / 100 *
@@ -1097,13 +1100,27 @@ private:
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
+                // EDEN_NX2_PACE_GUEST_SLEEP: of the pacing, the guest kernel sleeps (the core free)
+                // and how late they woke.
+                std::string guest;
+                if (VideoCommon::Nx2ModePace::GuestSleepOn()) {
+                    auto& g = VideoCommon::Nx2ModePace::g_guest_sleep;
+                    const u64 sleeps = g.sleeps.exchange(0, std::memory_order_relaxed);
+                    const u64 slept = g.slept_ns.exchange(0, std::memory_order_relaxed);
+                    const u64 late = g.late_ns.exchange(0, std::memory_order_relaxed);
+                    const u64 late_max = g.late_max_ns.exchange(0, std::memory_order_relaxed);
+                    guest = fmt::format(" ({} us of it on the guest core: {} sleeps, {} us late on "
+                                        "average, max {})",
+                                        slept / 1000 / 600, sleeps,
+                                        sleeps != 0 ? late / 1000 / sleeps : 0, late_max / 1000);
+                }
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
-                         "pacing {} us",
+                         "pacing {} us{}",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600);
+                         m_stats.pace_us / 600, guest);
                 m_stats = {.last_present = entered};
             }
         }
@@ -1132,6 +1149,52 @@ private:
     // next vblank instead (title 4 ran at up to 160 fps, its timing and audio with it).
     std::chrono::steady_clock::time_point m_next_vblank{};
 
+    // EDEN_NX2_PACE_GUEST_SLEEP: the pacing's sleeps in the guest kernel. This session is served by
+    // AM's server thread (ISelfController 2000 -> gsv -> 305 register it with AM's ServerManager),
+    // a guest thread on emulated core 3 (RunOnGuestCoreProcess): a host sleep keeps that core
+    // running it, so the game's threads there wait out every pacing sleep.
+    static void SleepOnGuestCore(void* context, std::chrono::nanoseconds duration) {
+        auto& kernel = static_cast<Core::System*>(context)->Kernel();
+        Kernel::KThread* thread = Kernel::GetCurrentThreadPointer(kernel);
+        if (thread == nullptr || thread->IsDummyThread()) {
+            static std::once_flag once;
+            std::call_once(once, [] {
+                LOG_WARNING(Service, "EDEN_NX2_PACE_GUEST_SLEEP: the vi2 session is not served on "
+                                     "a guest core, the pacing sleeps on the host");
+            });
+            std::this_thread::sleep_for(duration);
+            return;
+        }
+        static std::once_flag once;
+        std::call_once(once, [] {
+            LOG_INFO(Service, "nx2:vi2 pace sleeps on the guest core (EDEN_NX2_PACE_GUEST_SLEEP), "
+                              "the last {} us on the host",
+                     (std::max)(VideoCommon::Nx2ModePace::GuestTailUs(),
+                                VideoCommon::Nx2ModePace::SpinUs()));
+        });
+        const auto start = std::chrono::steady_clock::now();
+        // CoreTiming's clock (the wall clock with multicore): Sleep takes an absolute tick in ns.
+        static_cast<void>(
+            thread->Sleep(kernel, kernel.HardwareTimer().GetTick() + duration.count()));
+        const auto late = std::chrono::steady_clock::now() - start - duration;
+        auto& stats = VideoCommon::Nx2ModePace::g_guest_sleep;
+        stats.sleeps.fetch_add(1, std::memory_order_relaxed);
+        stats.slept_ns.fetch_add(static_cast<u64>(duration.count()), std::memory_order_relaxed);
+        if (late.count() > 0) {
+            const u64 late_ns = static_cast<u64>(late.count());
+            stats.late_ns.fetch_add(late_ns, std::memory_order_relaxed);
+            if (late_ns > stats.late_max_ns.load(std::memory_order_relaxed)) {
+                stats.late_max_ns.store(late_ns, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    VideoCommon::Nx2ModePace::GuestSleeper m_guest_sleeper{&SleepOnGuestCore, &system};
+
+    const VideoCommon::Nx2ModePace::GuestSleeper* GuestSleeperOrNull() const {
+        return VideoCommon::Nx2ModePace::GuestSleepOn() ? &m_guest_sleeper : nullptr;
+    }
+
     void PaceToVblank(u32 vblanks) {
         if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
             return;
@@ -1149,7 +1212,7 @@ private:
             // Running slower than 60 fps (60 / vblanks): show at once and don't bank the lost time.
             m_next_vblank = now;
         } else if (now < m_next_vblank) {
-            VideoCommon::Nx2ModePace::SleepUntil(m_next_vblank);
+            VideoCommon::Nx2ModePace::SleepUntil(m_next_vblank, GuestSleeperOrNull());
         }
         m_next_vblank += interval;
     }
@@ -1261,7 +1324,8 @@ private:
             target = m_grid_origin + index * period;
         }
         if (target > now) {
-            VideoCommon::Nx2ModePace::SleepFor(std::chrono::nanoseconds{target - now});
+            VideoCommon::Nx2ModePace::SleepFor(std::chrono::nanoseconds{target - now},
+                                               GuestSleeperOrNull());
         }
     }
 

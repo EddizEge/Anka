@@ -43,6 +43,7 @@ namespace VideoCommon::Nx2ModePace {
 //
 // EDEN_NX2_PACE_SPIN_US=<0-3000> (default 0, with or without the controller): every vblank pacing
 // sleep (and the hold) wakes that long before its target and yields until it; 0 sleeps as before.
+// EDEN_NX2_PACE_GUEST_SLEEP (below): those sleeps in the guest kernel.
 
 inline bool On(const char* text) {
     return text != nullptr && text[0] != '0';
@@ -117,23 +118,71 @@ inline u32 SpinUs() {
     return spin;
 }
 
+// EDEN_NX2_PACE_GUEST_SLEEP=1 (multicore, off by default): the vblank pacing and the hold sleep
+// the vi2 service thread in the guest kernel (nx2_gsv.h passes a GuestSleeper), all but the last
+// EDEN_NX2_PACE_GUEST_TAIL_US=<0-5000> (default 1000; at least the spin) on the host as before.
+// That thread is AM's on emulated core 3: a host sleep held the core for the whole wait, the
+// game's threads there ran only between presents.
+inline bool GuestSleepOn() {
+    static const bool on = [] {
+        if (!On(std::getenv("EDEN_NX2_PACE_GUEST_SLEEP"))) {
+            return false;
+        }
+        if (!Settings::values.use_multi_core.GetValue()) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_PACE_GUEST_SLEEP needs multicore: off");
+            return false;
+        }
+        return true;
+    }();
+    return on;
+}
+
+/// EDEN_NX2_PACE_GUEST_TAIL_US: 0-5000, default 1000.
+inline u32 GuestTailUs() {
+    static const u32 tail = [] {
+        const char* text = std::getenv("EDEN_NX2_PACE_GUEST_TAIL_US");
+        if (text == nullptr) {
+            return 1000U;
+        }
+        const long value = std::strtol(text, nullptr, 10);
+        if (value < 0 || value > 5000) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_PACE_GUEST_TAIL_US={} out of 0-5000: 1000", text);
+            return 1000U;
+        }
+        return static_cast<u32>(value);
+    }();
+    return tail;
+}
+
 /// Nanoseconds the pacing sleeps yielded (EDEN_NX2_PACE_SPIN_US), for the 10 s line.
 inline std::atomic<u64> g_spun_ns{};
 
-inline void SleepUntil(std::chrono::steady_clock::time_point target) {
+/// EDEN_NX2_PACE_GUEST_SLEEP's guest kernel sleeps, for vi2's 600 present line (nx2_gsv.h).
+struct GuestSleepStats {
+    std::atomic<u64> sleeps{};
+    std::atomic<u64> slept_ns{};   ///< asked for
+    std::atomic<u64> late_ns{};    ///< woke after the asked time, summed
+    std::atomic<u64> late_max_ns{};
+};
+inline GuestSleepStats g_guest_sleep{};
+
+/// `guest`: EDEN_NX2_PACE_GUEST_SLEEP's sleeper, null to sleep on the host alone.
+inline void SleepUntil(std::chrono::steady_clock::time_point target,
+                       const GuestSleeper* guest = nullptr) {
     const u32 spin = SpinUs();
-    const std::chrono::nanoseconds spun = SleepUntil(target, spin);
+    const std::chrono::nanoseconds spun =
+        SleepUntil(target, spin, guest, guest != nullptr ? GuestTailUs() : 0U);
     if (spin != 0) {
         g_spun_ns.fetch_add(static_cast<u64>(spun.count()), std::memory_order_relaxed);
     }
 }
 
-inline void SleepFor(std::chrono::nanoseconds duration) {
-    if (SpinUs() == 0) {
+inline void SleepFor(std::chrono::nanoseconds duration, const GuestSleeper* guest = nullptr) {
+    if (SpinUs() == 0 && guest == nullptr) {
         std::this_thread::sleep_for(duration);
         return;
     }
-    SleepUntil(std::chrono::steady_clock::now() + duration);
+    SleepUntil(std::chrono::steady_clock::now() + duration, guest);
 }
 
 /// EDEN_NX2_MODE_PACE_<NAME>: a value out of its range is ignored (warning).
@@ -294,7 +343,8 @@ inline bool SpeedOk() {
 
 /// vi2 229, after the vblank pacing: hold the present the controller asks for, unless the game
 /// asked for another mode than the push's (`mode`: PresentInterval's vblanks). True if it slept.
-inline bool Hold(u32 mode) {
+/// `guest`: as SleepUntil's.
+inline bool Hold(u32 mode, const GuestSleeper* guest = nullptr) {
     if (!SpeedOk()) {
         return false;
     }
@@ -314,7 +364,7 @@ inline bool Hold(u32 mode) {
     }
     const auto start = std::chrono::steady_clock::now();
     s.holding.store(true, std::memory_order_relaxed);
-    SleepUntil(target);
+    SleepUntil(target, guest);
     s.holding.store(false, std::memory_order_relaxed);
     std::scoped_lock lock{s.mutex};
     s.held_now_ms =
