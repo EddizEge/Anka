@@ -744,6 +744,13 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     functions.vkGetDeviceProcAddr = dld.vkGetDeviceProcAddr;
 
     VmaAllocatorCreateFlags flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+    // EDEN_NX2_BACK_STAGES (nx2_stages.h) on: the split back's stages allocate and free from
+    // two threads at once (cut c: B buffers and its staging, C images), so VMA takes its own
+    // lock. Read here, as the device is made before the stages read their config.
+    if (const char* stages = std::getenv("EDEN_NX2_BACK_STAGES");
+        stages != nullptr && std::strtol(stages, nullptr, 10) != 0) {
+        flags &= ~VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+    }
     if (extensions.memory_budget) {
         flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     }
