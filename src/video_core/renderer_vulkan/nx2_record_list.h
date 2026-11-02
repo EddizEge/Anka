@@ -26,7 +26,8 @@ namespace Vulkan::Nx2Record {
 
 /// The tick handover (§3.6/2). C notes, in seq order, the scheduler tick each of B's seqs went
 /// into; B asks whether what it stamped with a seq is done: C recorded it and the GPU passed that
-/// tick. Seqs are 64-bit here, they never wrap; DrawToC carries their low 32 bits (Widen).
+/// tick. Seqs are u64 everywhere (DrawToC::seq, K5): they never wrap, "C is done with `seq`" is a
+/// plain DoneSeq() >= seq.
 class SeqTicks {
 public:
     static constexpr u64 WINDOW = u64{1} << 14;
@@ -42,11 +43,6 @@ public:
     }
     [[nodiscard]] static constexpr u64 SeqOf(u64 stamp) noexcept {
         return stamp & ~STAMP_BIT;
-    }
-    /// The 64-bit seq whose low 32 bits are `seq`, within 2^31 of `around`.
-    [[nodiscard]] static constexpr u64 Widen(u32 seq, u64 around) noexcept {
-        const s32 delta = static_cast<s32>(seq - static_cast<u32>(around));
-        return around + static_cast<u64>(static_cast<s64>(delta));
     }
 
     /// C: `seq` and every seq before it not noted yet went into `tick`. In seq order; noting the

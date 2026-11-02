@@ -540,11 +540,11 @@ void Scheduler::EndRenderPass()
     }
 
 
-void Scheduler::Replay(RecordList& list, u32 seq) {
+void Scheduler::Replay(RecordList& list, u64 seq) {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Replay");
     }
-    if (static_cast<u32>(list.Seq()) != seq) [[unlikely]] {
+    if (list.Seq() != seq) [[unlikely]] {
         LOG_ERROR(Render_Vulkan, "Record list of seq {} replayed for seq {}", list.Seq(), seq);
     }
     VideoCommon::Nx2Profile::Scope zone{VideoCommon::Nx2Profile::Zone::ListReplay};
@@ -558,8 +558,8 @@ void Scheduler::Replay(RecordList& list, u32 seq) {
                 });
 }
 
-void Scheduler::NoteSeqTick(u32 seq) {
-    seq_ticks.Note(Nx2Record::SeqTicks::Widen(seq, seq_ticks.DoneSeq()), CurrentTick());
+void Scheduler::NoteSeqTick(u64 seq) {
+    seq_ticks.Note(seq, CurrentTick());
 }
 
 void Scheduler::AcquireNewChunk() {

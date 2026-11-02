@@ -317,14 +317,21 @@ TEST_CASE("Nx2RecordList: seq ticks note in order, fill gaps and free conservati
     REQUIRE(ticks.TickOf(done + 1) == 9000);
 }
 
-TEST_CASE("Nx2RecordList: stamps and 32-bit seqs", "[video_core]") {
+TEST_CASE("Nx2RecordList: stamps and u64 seqs", "[video_core]") {
     REQUIRE(SeqTicks::IsStamp(SeqTicks::Stamp(5)));
     REQUIRE(!SeqTicks::IsStamp(5));
     REQUIRE(SeqTicks::SeqOf(SeqTicks::Stamp(0x1234'5678'9abcULL)) == 0x1234'5678'9abcULL);
-    REQUIRE(SeqTicks::Widen(10, 5) == 10);
-    REQUIRE(SeqTicks::Widen(3, 5) == 3);
-    REQUIRE(SeqTicks::Widen(0x0000'0002, 0x1'ffff'fff0ULL) == 0x2'0000'0002ULL);
-    REQUIRE(SeqTicks::Widen(0xffff'fff0, 0x2'0000'0002ULL) == 0x1'ffff'fff0ULL);
+    // Seqs past 32 bits are plain u64s (K5): no wrap anywhere.
+    SeqTicks ticks;
+    const u64 low = 0xffff'fff0ULL;
+    ticks.Note(low, 7);
+    ticks.Note(0x1'0000'0002ULL, 8);
+    REQUIRE(ticks.DoneSeq() == 0x1'0000'0002ULL);
+    REQUIRE(ticks.TickOf(low) == 7);
+    REQUIRE(ticks.TickOf(0x1'0000'0000ULL) == 8);
+    REQUIRE(ticks.IsFree(0x1'0000'0002ULL, 8));
+    REQUIRE(!ticks.IsFree(0x1'0000'0003ULL, 1000));
+    REQUIRE(!ticks.IsFree(0x2'0000'0002ULL, 1000));
 }
 
 TEST_CASE("Nx2RecordList: the graveyard frees in seq order", "[video_core]") {

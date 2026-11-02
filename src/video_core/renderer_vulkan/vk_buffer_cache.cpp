@@ -828,7 +828,7 @@ void BufferCacheRuntime::EndStages() {
         LOG_ERROR(Render_Vulkan, "Buffer runtime stopped staging inside a packet (seq {})",
                   pending_seq);
         if (RecordList* const list = EndRecords()) {
-            scheduler.Replay(*list, static_cast<u32>(list->Seq()));
+            scheduler.Replay(*list, list->Seq());
         }
     }
     // Everything stamped so far went into the current tick or before it.
@@ -836,12 +836,12 @@ void BufferCacheRuntime::EndStages() {
     staged = false;
 }
 
-u32 BufferCacheRuntime::BeginRecords() {
+u64 BufferCacheRuntime::BeginRecords() {
     records->Begin(pending_seq);
     target.list = records.get();
     descriptor_scratch->Restart(descriptor_scratch->UsesDescriptorBuffer());
     descriptor_queue = descriptor_scratch.get();
-    return static_cast<u32>(pending_seq);
+    return pending_seq;
 }
 
 RecordList* BufferCacheRuntime::EndRecords() {
@@ -878,7 +878,7 @@ void BufferCacheRuntime::JoinRecordOwner(StageJoin why,
             LOG_CRITICAL(Render_Vulkan, "Staged buffer runtime has no record owner hook");
         }
         if (sent != nullptr) {
-            scheduler.Replay(*sent, static_cast<u32>(sent->Seq()));
+            scheduler.Replay(*sent, sent->Seq());
         }
         op();
     }

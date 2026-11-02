@@ -349,11 +349,11 @@ public:
     /// before (Buffer's destructor).
     void BuryBuffer(vk::Buffer&& buffer, std::vector<vk::BufferView>&& views);
 
-    /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, noted by C with
-    /// Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime records
-    /// into B's record list (RecordTarget), adds the binds' descriptor entries to
+    /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, u64, K5; noted by C
+    /// with Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime
+    /// records into B's record list (RecordTarget), adds the binds' descriptor entries to
     /// DescriptorScratch and stamps with this seq.
-    u32 BeginRecords();
+    u64 BeginRecords();
 
     /// B: ends the packet's records; returns its list for DrawToC::records (null when nothing
     /// was recorded). After it the runtime records straight to the scheduler and the guest
