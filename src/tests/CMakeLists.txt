@@ -37,6 +37,8 @@ add_executable(tests
     video_core/nx2_stage_ring.cpp
     video_core/nx2_upscale_pick.cpp
     input_common/calibration_configuration_job.cpp
+    yuzu_cmd/nx2_auto_script.cpp
+    ../yuzu_cmd/nx2_auto_script.cpp
 )
 
 create_target_directory_groups(tests)
