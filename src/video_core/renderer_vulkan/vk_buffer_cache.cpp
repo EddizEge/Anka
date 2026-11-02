@@ -782,6 +782,10 @@ void BufferCacheRuntime::Wait(u64 tick) {
 
 void BufferCacheRuntime::Finish() {
     if (target.list != nullptr) [[unlikely]] {
+        // Right through JoinFromBLocked, but the CPU threads wait on the buffer cache mutex for
+        // the GPU meanwhile (K3 (a)): a download belongs outside the packet (T9a, STAGE_CHECK).
+        VideoCommon::Nx2Stages::ReportStageHazard("download inside B's packet (buffer runtime "
+                                                  "Finish)");
         JoinRecordOwner(StageJoin::Finish, [this] { scheduler.Finish(); });
         return;
     }
