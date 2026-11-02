@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <type_traits>
 
 #include "common/common_types.h"
 
@@ -31,7 +32,8 @@ enum class RecordKind : u8 {
 ///   bits 32-47 delta words: the first words after the header are register deltas
 ///              (Nx2RegReplica delta words) for the current Target, applied before the record
 ///              (S5/1: no record of their own; "delta before its consumer", D3)
-///   bits 48-63 sequence number (Join and =2 lockstep handshakes; wraps)
+///   bits 48-63 sequence number (Join and =2 lockstep handshakes, depth 1: compared for
+///              equality; wraps; any order test takes SeqAtLeast, K5)
 /// A record never wraps around the ring's end: the producer writes Wrap and starts over.
 constexpr u64 MakeHeader(RecordKind kind, u32 words, u32 delta_words, u16 seq, u32 flags = 0) {
     return static_cast<u64>(kind) | (u64{flags & 0xf} << 4) | (u64{words & 0xffffff} << 8) |
@@ -51,6 +53,18 @@ constexpr u32 HeaderDeltaWords(u64 header) {
 }
 constexpr u16 HeaderSeq(u64 header) {
     return static_cast<u16>(header >> 48);
+}
+
+/// Sequence numbers (K5). What counts draws or records across the stages (DrawToC::seq, T3's
+/// Replay / CDoneSeq / NoteSeqTick / TickOfSeq, Nx2GpuPages) is u64 and never wraps; a u32 would
+/// in ~3.8 h at 312.7k draws/s, and "done >= seq" would then never free a slice again. A narrower
+/// copy (the header's 16 bits, a u32 page slot) is compared with SeqAtLeast: whether `a` is `b`
+/// or later, wrap-safe while the two are less than half its range apart; a copy left behind by
+/// more than that reads as later.
+template <typename T>
+    requires std::is_unsigned_v<T>
+constexpr bool SeqAtLeast(T a, T b) {
+    return static_cast<std::make_signed_t<T>>(static_cast<T>(a - b)) >= 0;
 }
 
 /// Most words one record may hold after its header.

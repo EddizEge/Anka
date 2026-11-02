@@ -49,7 +49,8 @@ struct GeometrySlot {
 /// values (in config_stage order), `geometry_slots` GeometrySlot, the draw parameters
 /// (draw_state, indirect_state). Layout of the tail: T6 with T7.
 struct DrawToC {
-    u32 seq;            ///< B's draw sequence: the tick handover (T3: NoteSeqTick, CDoneSeq)
+    u64 seq;            ///< B's draw sequence, never wraps (K5): the tick handover (T3:
+                        ///< NoteSeqTick, CDoneSeq), the page summary (Nx2GpuPages::PreSet)
     DrawKind kind;
     bool is_indexed;
     bool indirect;
