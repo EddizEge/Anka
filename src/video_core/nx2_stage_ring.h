@@ -965,6 +965,9 @@ private:
                     u64* const out = BeginC(RecordKind::Mark, 1, HeaderFlags(header));
                     out[0] = body[0];
                     EndC();
+                    // C stores it (D1): the front's Drain waits for it, B may sleep or run long
+                    // records next.
+                    to_c->ring.Publish();
                     break;
                 }
             }
@@ -1082,6 +1085,13 @@ private:
                 if (self.read - handed >= 4096 && self.read != self.available) {
                     in.ring.Release(self.read);
                     handed = self.read;
+                }
+            }
+            if constexpr (IsB) {
+                // The end of B's batch: what it sent C is visible before B sleeps (ring 2's
+                // producer, A, publishes at the end of its batch the same way).
+                if (to_c) {
+                    to_c->ring.Publish();
                 }
             }
             in.ring.Release(self.read);

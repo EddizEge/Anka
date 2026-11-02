@@ -1028,3 +1028,75 @@ TEST_CASE("Nx2StagePipeline: B passes deltas on in records that hold them (K9, K
     REQUIRE(handler.logs[StageIdB].deltas == sent);
     REQUIRE(handler.logs[StageIdC].deltas == sent);
 }
+
+namespace {
+std::atomic<u64> g_stored_mark{};
+void StoreMark(u64 position) {
+    g_stored_mark.store(position, std::memory_order_release);
+}
+/// The front's Drain without a join: waits (up to 5 s) for the last stage to store `position`.
+bool WaitStored(u64 position) {
+    for (u32 ms = 0; ms < 5000; ++ms) {
+        if (g_stored_mark.load(std::memory_order_acquire) == position) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    return false;
+}
+std::atomic<u32> g_c_calls{};
+void CountCallOnC(const u64*, u32) {
+    ++g_c_calls;
+}
+/// On B: a call for C as the last record of B's batch.
+void SendCountToC(const u64*, u32) {
+    PostCallC(*g_pipe, &CountCallOnC, 0);
+}
+std::atomic<bool> g_unblock_b{};
+void BlockOnB(const u64*, u32) {
+    while (!g_unblock_b.load()) {
+        std::this_thread::yield();
+    }
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores B's marks without a join (R1 dikis-1)", "[video_core]") {
+    Watchdog watchdog{"marks without a join"};
+    FakeHandler handler;
+    TestPipeline pipe{handler};
+    ResetGlobals(handler, pipe);
+    handler.on_mark = &StoreMark;
+    g_stored_mark = 0;
+    g_unblock_b = false;
+    REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true}));
+    // Batches ending in a caught-up mark, as RunStagedBack's PostBatchEnd: B sleeps after each.
+    u64 position = 0;
+    for (u32 batch = 0; batch < 200; ++batch) {
+        for (u32 n = 0; n < batch % 5; ++n) {
+            PostCallB(pipe, &RanOnB, n);
+        }
+        position += 100;
+        PostMarkB(pipe, position, true);
+        pipe.PublishB();
+        REQUIRE(WaitStored(position));
+    }
+    // A record for C at the end of B's batch, no mark after it: C runs it while B sleeps.
+    g_c_calls = 0;
+    PostCallB(pipe, &SendCountToC, 0);
+    pipe.PublishB();
+    for (u32 ms = 0; ms < 5000 && g_c_calls.load() == 0; ++ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(g_c_calls == 1);
+    // A mark inside B's batch, the record after it long: C stores it meanwhile.
+    position += 100;
+    PostMarkB(pipe, position, false);
+    PostCallB(pipe, &BlockOnB, 0);
+    pipe.PublishB();
+    const bool stored = WaitStored(position);
+    g_unblock_b = true;
+    REQUIRE(stored);
+    Drain(pipe);
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+}
