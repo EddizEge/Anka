@@ -482,6 +482,9 @@ private:
 
     void BindHostVertexBuffers();
 
+    /// EDEN_NX2_GPU_PROFILE: counts the streams a draw binds (BindHostVertexBuffers).
+    void NoteVertexStreams(u32 enabled_mask) const;
+
     void BindHostDrawIndirectBuffers();
 
     void BindHostGraphicsUniformBuffers(size_t stage);

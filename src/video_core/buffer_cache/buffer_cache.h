@@ -944,6 +944,32 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
 }
 
 template <class P>
+void BufferCache<P>::NoteVertexStreams(u32 enabled_mask) const {
+    // EDEN_NX2_GPU_PROFILE: what this draw binds, before BindHostVertexBuffers clears flags.
+    const auto& flags = maxwell3d->dirty.flags;
+    std::array<BufferId, NUM_VERTEX_BUFFERS> seen;
+    u32 num_seen = 0;
+    u32 dirty = 0;
+    for (u32 mask = enabled_mask; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        const BufferId buffer_id = v_buffer[index].buffer_id;
+        if (std::find(seen.begin(), seen.begin() + num_seen, buffer_id) ==
+            seen.begin() + num_seen) {
+            seen[num_seen++] = buffer_id;
+        }
+        dirty += flags[Dirty::VertexBuffer0 + index] ? 1 : 0;
+    }
+    const u32 enabled = static_cast<u32>(std::popcount(enabled_mask));
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDraws, 1);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexEnabled, enabled);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexBuffers, num_seen);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDirtyEnabled, dirty);
+    if (plain_light_draw) {
+        Nx2Profile::Add(Nx2Profile::Counter::VertexSyncSkipped, enabled - dirty);
+    }
+}
+
+template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
 
 #ifdef __ANDROID__
@@ -956,6 +982,9 @@ void BufferCache<P>::BindHostVertexBuffers() {
         auto& flags = maxwell3d->dirty.flags;
         u32 enabled_mask = enabled_vertex_buffers_mask;
         const bool vertex_skip = VertexSkipEnabled();
+        if (Nx2Profile::Enabled()) {
+            NoteVertexStreams(enabled_mask);
+        }
         HostBindings<Buffer> bindings{};
         u32 last_index = (std::numeric_limits<u32>::max)();
         const auto flush_bindings = [&]() {
@@ -1670,11 +1699,27 @@ void BufferCache<P>::UpdateVertexBuffers() {
             }
         }
     }
+    // EDEN_NX2_GPU_PROFILE: the streams resolved again below (UpdateVertexBuffer passes clean
+    // ones), and of them those that bind nothing after.
+    u32 resolved_mask = 0;
+    if (Nx2Profile::Enabled()) {
+        for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
+            resolved_mask |= flags[Dirty::VertexBuffer0 + index] ? 1u << index : 0;
+        }
+    }
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
         // Clean streams cost a flag test here instead of a call each.
         if (!vertex_skip || flags[Dirty::VertexBuffer0 + index]) {
             UpdateVertexBuffer(index);
         }
+    }
+    if (Nx2Profile::Enabled()) {
+        Nx2Profile::Add(Nx2Profile::Counter::VertexUpdates, 1);
+        Nx2Profile::Add(Nx2Profile::Counter::VertexResolved,
+                        static_cast<u64>(std::popcount(resolved_mask)));
+        Nx2Profile::Add(Nx2Profile::Counter::VertexResolvedDisabled,
+                        static_cast<u64>(
+                            std::popcount(resolved_mask & ~enabled_vertex_buffers_mask)));
     }
 }
 
@@ -2203,6 +2248,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         };
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
+        bool memo_missed = false; // Counted only while profiling (EDEN_NX2_GPU_PROFILE)
         if (g_nx2_sync_memo && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
@@ -2217,10 +2263,22 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
                 memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
                 ++skipped;
+                Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
                 if (g_nx2_sync_skip_mode != 2) {
                     return true;
                 }
                 memo_hit = true;
+            } else if (Nx2Profile::Enabled()) {
+                // Why: no range yet, another range in the slot (a collision), one overlapping or
+                // touching this (not covering it), or this range's regions stamped since.
+                memo_missed = true;
+                Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
+                                : memo->begin <= device_addr && range_end <= memo->end
+                                    ? Nx2Profile::Counter::SyncMemoMissStamped
+                                : memo->begin <= range_end && device_addr <= memo->end
+                                    ? Nx2Profile::Counter::SyncMemoMissPartial
+                                    : Nx2Profile::Counter::SyncMemoMissOther,
+                                1);
             }
         }
         upload_copies.clear();
@@ -2258,6 +2316,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 memo->end = range_end;
             }
             memo->epoch = sync_epoch;
+        }
+        if (memo_missed && total_size_bytes != 0) {
+            Nx2Profile::Add(Nx2Profile::Counter::SyncMemoMissUploaded, 1);
         }
         if (memo_hit && total_size_bytes != 0) {
             static bool reported = false;
