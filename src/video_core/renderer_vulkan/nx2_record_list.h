@@ -223,14 +223,13 @@ private:
     std::deque<std::pair<u64, T>> objects; ///< In seq order
 };
 
-/// K3 (nx2_stages.h): a stage holds no cache lock when it calls JoinFromB or ParkB, or while it
-/// writes or waits on ring 3. The buffer runtime needs the recording stage from inside the buffer
-/// cache (Wait, Finish, multi-range: BufferCacheRuntime::JoinRecordOwner), where its caller holds
-/// the buffer cache mutex, and cannot release a lock it did not take. So B takes the cache locks
-/// it holds around its work through CacheLock, which lists them per thread, and the runtime drops
-/// every listed one around its record owner hook (Unlocked) and takes them again after: the hook
-/// writes ring 3 and calls JoinFromB holding none. A cache lock B takes another way stays held
-/// (Count tells how many are listed). Only for the stages; nothing takes one with them off.
+/// The cache locks B holds (K3). B takes them around its work through CacheLock, which lists them
+/// per thread: Count says whether B holds one (T7's FlushStageCWork writes no ring 3 record while
+/// it does). Unlocked lets go of every listed one and takes them again: the buffer runtime's joins
+/// used it around the record owner hook (K3 option (b)); with option (a), decided after R2, the
+/// joins keep the buffer cache mutex (BufferCacheRuntime::RecordOwnerHook) and nothing uses it.
+/// A cache lock B takes another way is not listed. Only for the stages; nothing takes one with
+/// them off.
 class HeldLocks {
 public:
     static constexpr size_t MAX_HELD = 4;

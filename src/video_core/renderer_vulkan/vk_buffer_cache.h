@@ -380,14 +380,14 @@ public:
     /// scheduler). The integration (T9) binds it to JoinFromB: `records` (B's list so far, may
     /// be null) is replayed by C first, then `op` runs on this thread with C parked; the runtime
     /// records straight to the scheduler inside `op` and goes on with a new list of the same seq
-    /// after. It runs inside buffer cache operations, whose callers hold BufferCache::mutex; the
-    /// runtime calls it with every cache lock B took through Nx2Record::CacheLock let go
-    /// (Nx2Record::HeldLocks::Unlocked) and takes them again after, so the hook writes ring 3 and
-    /// calls JoinFromB holding none (S13, K3). So B takes its cache locks (the buffer cache's,
-    /// and any other it holds around buffer cache work) through CacheLock only. Meanwhile other
-    /// threads may take the buffer cache mutex (CPU write traps marking pages, UnmapGPUMemory,
-    /// the fencing thread) and the operation in progress goes on after with what it held: only
-    /// B makes and deletes buffers, what the others may change there T9 checks (T3 report).
+    /// after. K3, option (a) (R2): it runs inside buffer cache operations, whose callers hold
+    /// BufferCache::mutex, and the runtime keeps it held through the hook: the operation stays
+    /// atomic for the CPU write traps and the fencing thread, which wait for it as they wait for
+    /// a Finish with the stages off. So the binding's join writes no ring 3 record and serves no
+    /// ParkB while B waits (JoinFromBLocked, T9), and C takes the buffer cache mutex only inside
+    /// ParkB work and the join's op; any other C path taking it is a deadlock (STAGE_CHECK, T9).
+    /// The per-packet joins (Finish from the garbage collector's downloads, Wait with accurate
+    /// fences, multi-range) should go to ~0 (§7/14) to keep the wait short.
     using RecordOwnerHook = void (*)(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     void SetRecordOwnerHook(RecordOwnerHook hook, void* context) noexcept {
