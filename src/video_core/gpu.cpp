@@ -38,6 +38,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_mode_gov.h"
+#include "video_core/nx2_stage_proxy.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -90,12 +91,12 @@ struct GPU::Impl {
 
     void InitChannel(Control::ChannelState& to_init, u64 program_id) {
         to_init.Init(system, program_id);
-        to_init.BindRasterizer(renderer->ReadRasterizer());
+        VideoCommon::Nx2Stages::BindNewChannel(to_init, *renderer->ReadRasterizer());
         renderer->ReadRasterizer()->InitializeChannel(to_init);
     }
 
     void InitAddressSpace(Tegra::MemoryManager& memory_manager) {
-        memory_manager.BindRasterizer(renderer->ReadRasterizer());
+        VideoCommon::Nx2Stages::BindNewAddressSpace(memory_manager, *renderer->ReadRasterizer());
     }
 
     void ReleaseChannel(Control::ChannelState& to_release) {

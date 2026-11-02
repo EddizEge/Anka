@@ -109,7 +109,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
-                    split.DeferFunction(std::move(run->func));
+                    // Unknown work: on A with the back stages parked (nx2_stages.h).
+                    split.DeferFunctionTo<VideoCommon::DeferTarget::Join>(std::move(run->func));
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
                         rasterizer_ptr->FlushRegion(addr, size);

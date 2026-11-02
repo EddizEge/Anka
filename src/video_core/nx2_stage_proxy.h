@@ -16,20 +16,20 @@ namespace VideoCommon::Nx2Stages {
 /// (Forwarding()) a member either goes to BC as a record (Post: the arguments copied, spans' bytes
 /// with them, std::function moved to the heap as DeferFunction does) or runs on A with the stages
 /// parked (JoinFromA); from any other thread it calls the real rasterizer. K1 classes:
-/// - Draw, DrawIndirect, DrawTexture: a draw record, the side state that changed before it
+/// - Draw, DrawIndirect, DrawTexture, Clear: a draw record, the side state that changed before it
 ///   (WriteSideState, nx2_stage_api.h) of the drawing primary, GPU::Maxwell3D() on A (K10); BC
 ///   applies it to that primary's replica, then draws.
 /// - Join: the members returning a value (MustFlushRegion, HoldsGpuWrittenData, GetFlushArea,
-///   PendingSemaphoreRelease, TryCacheInvalidation, OnCPUWrite, AccelerateSurfaceCopy, ...);
-///   FlushRegion, FlushAll, FlushAndInvalidateRegion (S7); AccelerateConditionalRendering (S1);
-///   InitializeChannel, BindChannel, ReleaseChannel.
+///   PendingSemaphoreRelease, TryCacheInvalidation, OnCPUWrite, AccelerateSurfaceCopy,
+///   WorkEpoch, BoundGeometryBuffer); FlushRegion, FlushAll, FlushAndInvalidateRegion (S7);
+///   AccelerateConditionalRendering (S1); InitializeChannel, BindChannel, ReleaseChannel.
 /// - The real one directly: HasDrawTransformFeedback (a device constant), LoadDiskResources.
-///   AccessAccelerateDMA and InvalidateRegion from A outside a join are reported (STAGE_CHECK,
-///   S7): MaxwellDMA's executable methods run in a ring level join.
-/// - Every other member: Post.
+/// - Only expected in a join (ring level for the engines but Maxwell3D), reported from A outside
+///   one (STAGE_CHECK, S7): AccessAccelerateDMA (then the real one), InvalidateRegion and
+///   DispatchCompute (then a join).
+/// - Every other member: Post (AccelerateInlineToMemory and InnerInvalidation with their data).
 /// A member whose record would pass MaxBodyWords (nx2_stage_ring.h, K9) runs in a join instead:
 /// AccelerateInlineToMemory's data (Upload), a draw whose side state is too long (Other).
-/// Skeleton (T0): every member calls the real rasterizer.
 class Nx2StageProxy final : public VideoCore::RasterizerInterface {
 public:
     explicit Nx2StageProxy(VideoCore::RasterizerInterface& real_);
@@ -126,5 +126,11 @@ void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::Rasterizer
 /// `real` as before. Under InstallProxy's lock.
 void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
                          VideoCore::RasterizerInterface& real);
+
+/// A, in the join of a channel's first bind in a split session or of a channel change
+/// (Control::Scheduler, S3): stages the channel if it is not; if it is, points its engines and
+/// memory manager at the proxy again (an address space the channel was given since). Nothing
+/// without the proxy.
+void StageBoundChannel(Tegra::Control::ChannelState& channel);
 
 } // namespace VideoCommon::Nx2Stages
