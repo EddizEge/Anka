@@ -433,6 +433,13 @@ void Start(Core::System& system) {
              : config.mode == 3 ? ", pass-through"
                                 : "",
              config.mode, options.cut_c ? ", cuts ac" : "", config.check ? ", STAGE_CHECK" : "");
+    // K2 (cut c) runs B | C before T9 classifies the events that need both: a trial of the
+    // plumbing, not for play or measuring. Once per process (Start runs again after a Stop).
+    static std::atomic_flag cut_c_warned{};
+    if (options.cut_c && !cut_c_warned.test_and_set(std::memory_order_relaxed)) {
+        LOG_WARNING(HW_GPU, "GPU back stages: cut c is a plumbing trial only until T9 "
+                            "(EDEN_NX2_BACK_CUTS holds 'c'): not for play or measuring");
+    }
 }
 
 void Stop() {
