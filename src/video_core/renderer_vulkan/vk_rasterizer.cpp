@@ -2752,7 +2752,7 @@ void RasterizerVulkan::UpdateDynamicStates() {
     }
 
     if (device.IsExtVertexInputDynamicStateSupported()) {
-        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
+        if (auto* gp = DynamicStatePipeline(); gp && gp->HasDynamicVertexInput()) {
             UpdateVertexInput(regs);
         }
     }
@@ -3285,13 +3285,17 @@ void RasterizerVulkan::UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& r
 }
 
 void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+    if (stage_dynamic.active && stage_dynamic.pipeline == nullptr) [[unlikely]] {
+        // Cut c, no draw's pipeline (C's DrawTexture): the next draw sets it (flag kept).
+        return;
+    }
     if (!state_tracker.TouchAlphaToCoverageEnable()) {
         return;
     }
     if (!device.SupportsDynamicState3AlphaToCoverageEnable()) {
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    GraphicsPipeline* const pipeline = DynamicStatePipeline();
     const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToCoverage() &&
                         regs.anti_alias_alpha_control.alpha_to_coverage != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
@@ -3300,6 +3304,9 @@ void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Re
 }
 
 void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+    if (stage_dynamic.active && stage_dynamic.pipeline == nullptr) [[unlikely]] {
+        return;
+    }
     if (!state_tracker.TouchAlphaToOneEnable()) {
         return;
     }
@@ -3311,7 +3318,7 @@ void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& r
         });
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    GraphicsPipeline* const pipeline = DynamicStatePipeline();
     const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToOne() &&
                         regs.anti_alias_alpha_control.alpha_to_one != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
@@ -4242,8 +4249,11 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                 return;
             }
             {
+                // The draw's pipeline, not the cache's current one (kayit-1).
                 Profile::Scope scope{Profile::Zone::DynamicState};
+                stage_dynamic = {.active = true, .pipeline = pipeline};
                 UpdateDynamicStates();
+                stage_dynamic = {};
             }
             query_cache.NotifySegment(true);
             HandleTransformFeedback();
@@ -4530,9 +4540,25 @@ void RasterizerVulkan::InnerInvalidationB(
 }
 
 bool RasterizerVulkan::HoldsGpuWrittenDataB(DAddr begin, size_t span) {
-    // C's caches (images, pending query results, writes around them) through the page summary,
-    // lock-free (T8; the skeleton says every page may); the buffer cache is B's.
-    if (stage_gpu_pages.Holds(begin, span)) {
+    // C's caches (images, pending query results, writes around them) through T8's page summary,
+    // lock-free (PLAN §7/25); the buffer cache is B's.
+    namespace Stages = VideoCommon::Nx2Stages;
+    Stages::Nx2GpuPages& pages = Stages::GpuPages();
+    bool holds;
+    if (Stages::Get().mode == 2) [[unlikely]] {
+        // =2's lockstep: C ran everything B sent (B waits for each record of ring 3) and waits,
+        // so the caches' own answer is at the same point of the stream (STAGE_CHECK counts a
+        // page the summary misses: HazardPages).
+        bool caches_hold = query_cache.HoldsQueries(begin, span);
+        if (!caches_hold) {
+            std::scoped_lock lock{texture_cache.mutex};
+            caches_hold = texture_cache.IsRegionGpuModified(begin, span);
+        }
+        holds = pages.CheckHolds(begin, span, caches_hold);
+    } else {
+        holds = pages.Holds(begin, span);
+    }
+    if (holds) {
         return true;
     }
     Nx2Record::CacheLock lock{buffer_cache.mutex};
@@ -4563,7 +4589,10 @@ void RasterizerVulkan::DrawTextureB() {
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, state] {
         maxwell3d->draw_manager.draw_texture_state = state;
+        // The blit binds its own pipeline: no draw's pipeline-dependent state now (kayit-1).
+        stage_dynamic = {.active = true, .pipeline = nullptr};
         DrawTexture();
+        stage_dynamic = {};
     });
 }
 
@@ -4708,8 +4737,11 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         return;
     }
     if (set_up) {
+        // The packet's pipeline: the pipeline cache is B's (kayit-1 / esdeger-1).
         Profile::Scope scope{Profile::Zone::DynamicState};
+        stage_dynamic = {.active = true, .pipeline = &pipeline};
         UpdateDynamicStates();
+        stage_dynamic = {};
     }
     query_cache.NotifySegment(true);
     HandleTransformFeedback();

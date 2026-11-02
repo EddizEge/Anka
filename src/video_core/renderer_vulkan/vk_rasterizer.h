@@ -343,6 +343,12 @@ private:
     void SendStageRecords(u64 seq, RecordList* records);
     /// B, no cache lock held: the draw packet in stage_writer.
     void SendStageDraw();
+    /// B (T8): the pages C may write for work `seq` (or, between packets, the next packet's): the
+    /// bound render targets and depth, every page when the pipeline writes memory it does not
+    /// place (storage images, global stores).
+    void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
+    /// B: the seq of the next packet (work sent between packets runs before it).
+    [[nodiscard]] u64 NextStageSeq() const noexcept;
 
     /// C: ring 3's records.
     static void StageDrawThunk(const u64* payload, u32 words);
@@ -373,6 +379,13 @@ private:
                               std::span<const u8> data);
 
     void UpdateDynamicStates();
+    /// UpdateDynamicStates' pipeline: the pipeline cache's current one, with cut c stage_dynamic's.
+    [[nodiscard]] GraphicsPipeline* DynamicStatePipeline() {
+        if (stage_dynamic.active) [[unlikely]] {
+            return stage_dynamic.pipeline;
+        }
+        return pipeline_cache.CurrentGraphicsPipeline();
+    }
 
     void HandleTransformFeedback();
 
@@ -492,8 +505,24 @@ private:
     /// B: C's half of B's invalidations not sent yet, two words each: the device address, the
     /// size with what in the top bits (vk_rasterizer.cpp: StageRangeTexture, StageRangeQuery).
     std::vector<u64> stage_c_ranges;
-    /// The pages C may hold GPU-written data on (T8's summary; skeleton: every page).
-    VideoCommon::Nx2Stages::Nx2GpuPages stage_gpu_pages;
+    /// Cut c: the pipeline UpdateDynamicStates sets its pipeline-dependent state for (vertex input,
+    /// alpha to coverage / one) while `active`: the draw's (C's packet, B's join), or none (C's
+    /// DrawTexture: those steps wait, their dirty flags kept). The pipeline cache is B's.
+    struct StageDynamicPipeline {
+        bool active{};
+        GraphicsPipeline* pipeline{};
+    };
+    StageDynamicPipeline stage_dynamic;
+    /// B: the device ranges of the bound render targets and depth (T8's PreSet for each packet),
+    /// found again when the registers or the memory manager change, and each frame.
+    struct StageTargets {
+        Tegra::MemoryManager* gpu_memory{};
+        std::array<std::pair<GPUVAddr, u64>, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets + 1>
+            key{};
+        bool valid{};
+        std::vector<std::pair<DAddr, u64>> ranges;
+    };
+    StageTargets stage_targets;
 };
 
 } // namespace Vulkan
