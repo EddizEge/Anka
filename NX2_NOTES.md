@@ -370,3 +370,27 @@ Offline shader check: `nx2work/lowertest/lowertest.exe C:/dev/shaders_title1 [-a
 5. Upstream-worthy pieces independent of Switch 2: MSVC 14.51 build fixes, eden-cli SDL3
    lifetime fixes and `_setmaxstdio`, ExeFS loader fixes, FAC/FAH offset fix, GetPseudoDeviceId
    without NACP.
+
+## b-hiz: back-thread cost per draw (perf/b-hiz)
+
+Each switch below is on by default (ASYNC_SKIP off); `=0` restores the previous code path, `=2`
+(where listed) runs the old way too and logs a difference. Offline tests:
+`src/tests/video_core/nx2_draw_memo.cpp` (shim; not in CMake).
+
+| Switch | What it skips | =2 |
+|---|---|---|
+| `EDEN_NX2_SYNC_SETS` | SynchronizeBuffer memo in 4 KiB pages, 4 ways a set (neighbours on a page hit) | walks hits, logs uploads |
+| `EDEN_NX2_SSBO_FAST` | layout size from a remembered kind run; one translation per SSBO; no multi-range query inside one page | old way, logs |
+| `EDEN_NX2_GPU_WRITTEN_FILTER` | GPU-written/download range sets answer from a hull + 4 KiB page bitmap | asks the trees, counts disagreements |
+| `EDEN_NX2_UNIFORM_SYNC_SKIP` | LIGHT_SYNC_SKIP for uniform light draws (clean streams) | syncs anyway, logs uploads |
+| `EDEN_NX2_DESC_HULL` | CheckDescriptorWords skips runs of one slot no written range reaches | both scans, logs |
+| `EDEN_NX2_STORAGE_KEEP` | UpdateStorageBuffers keeps a stage resolved under the same layout/mapping | resolves, logs |
+| `EDEN_NX2_UBO_BIND_SKIP` | a constant buffer rebound to the same range keeps its buffer (elBart0 0015) | counts only |
+| `EDEN_NX2_USAGE_RESET_SKIP`, `EDEN_NX2_SLOT_SKIP` | untouched usage trackers, empty slot words (Selevet d8c95fef47) | — |
+| `EDEN_NX2_KEY_CMP` | pipeline key: hashes, then state bytes (elBart0 0017) | both, logs |
+| `EDEN_NX2_INLINE_FIX` | inline index buffer deleted through DeleteBuffer (Duck912 4a6b890171; correctness) | — |
+| `EDEN_NX2_ASYNC_SKIP=1` | native draws with an unbuilt pipeline skipped (Selevet 8b076b167f; pop-in) | — |
+
+Log lines: "Buffer sync memo: X of Y synchronizations skipped" (hit rate), "GPU-written ranges: ..."
+(range count, share answered by the summary), "Uniform buffer binds: X of Y to the binding already
+resolved".
