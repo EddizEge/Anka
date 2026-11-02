@@ -273,6 +273,8 @@ public:
     //   | maxwell3d, gpu_memory (SetEngine: B's replica)           | B                         |
     //   | descriptor_values, descriptor_values_valid, used_tics,   | B (read by B's light      |
     //   | used_tscs                                                | decision)                 |
+    //   | descriptor_word_runs (EDEN_NX2_DESC_HULL; built by its   | B                         |
+    //   | first CheckDescriptorWords)                              |                           |
     //   | views_repeat, last_draw_changes, last_rescaling,         | C                         |
     //   | last_render_area, last_uses_render_area                  |                           |
     //   | image_descriptor_memos (EDEN_NX2_DESC_REUSE)             | C                         |

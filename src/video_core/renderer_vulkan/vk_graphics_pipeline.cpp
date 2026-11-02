@@ -1323,7 +1323,13 @@ bool GraphicsPipeline::ConfigureUniformsBuffersImpl(bool is_indexed, bool rebind
         }
     }
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
+    // EDEN_NX2_UNIFORM_SYNC_SKIP, as ConfigureUniformsImpl: B's uniform light draw follows B's
+    // chain as its plain one does (PrepareDrawB's checks on its replica, memory manager and
+    // light_epoch_b; ForceGeometryB flags the streams it forces), so a clean stream is left as
+    // B's plain light draw leaves it.
+    buffer_cache.uniform_light_draw = VideoCommon::Nx2UniformSyncSkip() != 0;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    buffer_cache.uniform_light_draw = false;
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const DescriptorUpdateEntry* const first = scratch.Cursor();
         buffer_cache.BindHostStageBuffers(stage);
