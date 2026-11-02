@@ -625,6 +625,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         Profile::Scope scope{Profile::Zone::DrawRecord};
         draw_func();
     }
+    if (Profile::Enabled()) {
+        buffer_cache.CommitVertexStreamNote();
+    }
     submitted = true;
     set_up = true;
     anchor.pipeline = pipeline;
@@ -1177,6 +1180,9 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     {
         Profile::Scope draw_scope{Profile::Zone::DrawRecord};
         draw_func();
+    }
+    if (Profile::Enabled()) {
+        buffer_cache.CommitVertexStreamNote();
     }
     Profile::Add(Profile::Counter::LightDraws, 1);
     if (indirect) {

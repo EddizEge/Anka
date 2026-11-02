@@ -445,6 +445,11 @@ public:
     /// EDEN_NX2_VERTEX_CLEAN=2: streams whose flag UpdateVertexBuffer cleared as disabled.
     u32 vertex_clean_mask = 0;
 
+    /// EDEN_NX2_GPU_PROFILE: counts the vertex streams the last BindHostVertexBuffers bound, once
+    /// its draw is recorded (the rasterizer calls it then, with the profile on; a light draw that
+    /// falls back binds them again in the full setup and is counted once, as set up there).
+    void CommitVertexStreamNote();
+
 private:
     template <typename Func>
     static void ForEachEnabledBit(u32 enabled_mask, Func&& func) {
@@ -484,8 +489,8 @@ private:
 
     void BindHostVertexBuffers();
 
-    /// EDEN_NX2_GPU_PROFILE: counts the streams a draw binds (BindHostVertexBuffers).
-    void NoteVertexStreams(u32 enabled_mask) const;
+    /// EDEN_NX2_GPU_PROFILE: notes the streams a draw binds (BindHostVertexBuffers).
+    void NoteVertexStreams(u32 enabled_mask);
 
     void BindHostDrawIndirectBuffers();
 
@@ -690,6 +695,18 @@ private:
     /// stream's last synchronization in BindHostVertexBuffers (0, never matching, before the
     /// first). Its range held no CPU-modified or untracked page as of then.
     std::array<u64, 32> vertex_synced_epoch{};
+    /// EDEN_NX2_GPU_PROFILE: what the last BindHostVertexBuffers bound (NoteVertexStreams),
+    /// counted by CommitVertexStreamNote.
+    struct VertexStreamNote {
+        u32 enabled;
+        u32 buffers;
+        u32 dirty;
+        u32 sync_skipped;
+        u32 sync_would_skip;
+        u32 sync_guarded;
+        bool pending;
+    };
+    VertexStreamNote vertex_note{};
 
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.

@@ -1140,7 +1140,8 @@ struct KeplerCompute::FrontState {
 KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
     if (!front) [[unlikely]] {
         // Copy the back's state and take the macros over while it is idle.
-        split.Drain();
+        VideoCommon::Nx2Profile::CountDrain(split,
+                                            VideoCommon::Nx2Profile::DrainSite::FrontCompute);
         front = std::make_unique<FrontState>();
         front->registers = native_registers;
         front->executing_macro = native_executing_macro;

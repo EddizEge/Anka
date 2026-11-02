@@ -134,7 +134,7 @@ struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ticks{}; ///< See Ticks
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
     std::array<u64, 128> counters{}; ///< See Counter
-    std::array<std::array<u64, 3>, 8> drains{}; ///< See DrainSite: calls, waits, wait ticks
+    std::array<std::array<u64, 3>, 9> drains{}; ///< See DrainSite: calls, waits, wait ticks
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ticks{}; ///< Time of the zones nested in the current one
     u64 window_start{};       ///< Now() when the window began
@@ -277,6 +277,8 @@ enum class Counter : u32 {
     VertexBuffers,        ///< Different buffers they bind
     VertexDirtyEnabled,   ///< Enabled streams flagged dirty (bound anew)
     VertexSyncSkipped,    ///< Clean streams of plain light draws not synchronized (LIGHT_SYNC_SKIP)
+    VertexSyncWouldSkip,  ///< The same at EDEN_NX2_LIGHT_SYNC_SKIP=2 (synchronized and checked)
+    VertexSyncGuarded,    ///< Clean ones synchronized as their range may have changed since
     // UpdateVertexBuffers with Dirty::VertexBuffers set, and the streams it resolved again:
     VertexUpdates,
     VertexResolved,
@@ -302,12 +304,14 @@ enum class DrainSite : u32 {
     PusherParameters,  ///< DmaPusher: macro / inline parameter blocks on GPU-written pages
     PusherSync,        ///< DmaPusher: command lists with the sync bit (sync_memory_operations)
     PusherCommandList, ///< DmaPusher: command lists on GPU-written pages
+    FrontCompute,      ///< KeplerCompute::Front (first use)
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "acquire resume", "semaphore acquire", "sem execute", "MME DMA read",
     "3D front other", "parameter blocks",  "sync lists",  "written lists",
+    "compute front",
 };
 static_assert(static_cast<size_t>(DrainSite::Count) <=
               std::tuple_size_v<decltype(ThreadData::drains)>);
@@ -604,11 +608,13 @@ inline void Report(const char* thread_name = "GPU thread") {
                              : 0.0;
         };
         line += fmt::format(" | vertex streams per draw: {:.2f} enabled, {:.2f} buffers, {:.2f} "
-                            "dirty, {:.2f} sync skipped; per update {:.2f} resolved ({:.2f} to "
-                            "nothing) in {:.0f} updates",
+                            "dirty, {:.2f} sync skipped ({:.2f} would skip, {:.2f} guarded); per "
+                            "update {:.2f} resolved ({:.2f} to nothing) in {:.0f} updates/s",
                             per(Counter::VertexEnabled, draws), per(Counter::VertexBuffers, draws),
                             per(Counter::VertexDirtyEnabled, draws),
                             per(Counter::VertexSyncSkipped, draws),
+                            per(Counter::VertexSyncWouldSkip, draws),
+                            per(Counter::VertexSyncGuarded, draws),
                             per(Counter::VertexResolved, updates),
                             per(Counter::VertexResolvedDisabled, updates),
                             counter(Counter::VertexUpdates));

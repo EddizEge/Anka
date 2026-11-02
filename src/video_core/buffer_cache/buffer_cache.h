@@ -944,8 +944,10 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
 }
 
 template <class P>
-void BufferCache<P>::NoteVertexStreams(u32 enabled_mask) const {
+void BufferCache<P>::NoteVertexStreams(u32 enabled_mask) {
     // EDEN_NX2_GPU_PROFILE: what this draw binds, before BindHostVertexBuffers clears flags.
+    // Kept until the draw is recorded (CommitVertexStreamNote): a light draw that falls back
+    // binds again in the full setup, and only that one counts.
     const auto& flags = maxwell3d->dirty.flags;
     std::array<BufferId, NUM_VERTEX_BUFFERS> seen;
     u32 num_seen = 0;
@@ -959,14 +961,27 @@ void BufferCache<P>::NoteVertexStreams(u32 enabled_mask) const {
         }
         dirty += flags[Dirty::VertexBuffer0 + index] ? 1 : 0;
     }
-    const u32 enabled = static_cast<u32>(std::popcount(enabled_mask));
-    Nx2Profile::Add(Nx2Profile::Counter::VertexDraws, 1);
-    Nx2Profile::Add(Nx2Profile::Counter::VertexEnabled, enabled);
-    Nx2Profile::Add(Nx2Profile::Counter::VertexBuffers, num_seen);
-    Nx2Profile::Add(Nx2Profile::Counter::VertexDirtyEnabled, dirty);
-    if (plain_light_draw) {
-        Nx2Profile::Add(Nx2Profile::Counter::VertexSyncSkipped, enabled - dirty);
+    vertex_note = VertexStreamNote{
+        .enabled = static_cast<u32>(std::popcount(enabled_mask)),
+        .buffers = num_seen,
+        .dirty = dirty,
+        .pending = true,
+    };
+}
+
+template <class P>
+void BufferCache<P>::CommitVertexStreamNote() {
+    if (!vertex_note.pending) {
+        return;
     }
+    vertex_note.pending = false;
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDraws, 1);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexEnabled, vertex_note.enabled);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexBuffers, vertex_note.buffers);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDirtyEnabled, vertex_note.dirty);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncSkipped, vertex_note.sync_skipped);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncWouldSkip, vertex_note.sync_would_skip);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncGuarded, vertex_note.sync_guarded);
 }
 
 template <class P>
@@ -987,6 +1002,11 @@ void BufferCache<P>::BindHostVertexBuffers() {
         }
         HostBindings<Buffer> bindings{};
         u32 last_index = (std::numeric_limits<u32>::max)();
+        // EDEN_NX2_GPU_PROFILE: clean streams of a plain light draw skipped, checked instead
+        // (=2) and synchronized as their range may have changed.
+        u32 sync_skipped = 0;
+        u32 sync_would_skip = 0;
+        u32 sync_guarded = 0;
         const auto flush_bindings = [&]() {
             if (bindings.buffers.empty()) {
                 return;
@@ -1012,7 +1032,10 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 const Binding& clean = v_buffer[index];
                 if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
                                               vertex_synced_epoch[index])) {
-                    if (g_nx2_light_sync_skip == 2) {
+                    if (g_nx2_light_sync_skip != 2) {
+                        ++sync_skipped;
+                    } else {
+                        ++sync_would_skip;
                         if (!SynchronizeBuffer(slot_buffers[clean.buffer_id], clean.device_addr,
                                                clean.size)) {
                             static u32 reported{};
@@ -1027,6 +1050,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
                     flush_bindings();
                     continue;
                 }
+                ++sync_guarded;
             }
             const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
@@ -1071,6 +1095,11 @@ void BufferCache<P>::BindHostVertexBuffers() {
             last_index = index;
         }
         flush_bindings();
+        if (Nx2Profile::Enabled()) {
+            vertex_note.sync_skipped = sync_skipped;
+            vertex_note.sync_would_skip = sync_would_skip;
+            vertex_note.sync_guarded = sync_guarded;
+        }
     } else {
         HostBindings<typename P::Buffer> host_bindings;
         bool any_valid{false};
