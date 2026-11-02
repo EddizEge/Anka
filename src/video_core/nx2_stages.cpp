@@ -284,6 +284,10 @@ void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address,
 }
 
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary) {
+    // The stages off (a capture without them, YUZU_TESTS' unit test): no ring to write to.
+    if (!Active()) {
+        return;
+    }
     CheckRecord(1);
     u64* const body = BeginRecord(ring, RecordKind::Target, 1);
     body[0] = reinterpret_cast<u64>(primary);
