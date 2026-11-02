@@ -150,10 +150,10 @@ void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,
 /// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7). K2: C holds
 /// it while its ParkB or boundary work is pending (StageTickWork's requests run after it in the
-/// stream), until their op ran. So the guest writes C makes for work before a mark (the queries
-/// and semaphore releases B sends it) are made when the front's Drain ends: the puller's
-/// PendingSemaphoreRelease and reads after a Drain see them (a DMA read waits for the releases
-/// before it, PLAN §7/19). No stage defers a guest write of work before a mark past it.
+/// stream), until their op ran. So the queries and semaphore releases B sent C before a mark are
+/// in C's query cache when the front's Drain ends, written or pending there: the puller's
+/// PendingSemaphoreRelease after its Drain sees them (a DMA read waits for the releases before
+/// it, PLAN §7/19). No stage holds a release of work before a mark outside the query cache.
 void PostMark(Ring ring, u64 ring1_position);
 
 /// Why A joins (counted: Counter::JoinsAEngine + reason).
