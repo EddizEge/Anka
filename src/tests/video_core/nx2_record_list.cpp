@@ -438,6 +438,19 @@ TEST_CASE("Nx2RecordList: taking the locks again keeps no order", "[video_core]"
     REQUIRE(HeldLocks::Count() == 0);
 }
 
+TEST_CASE("Nx2RecordList: the geometry mirror names the bound index type", "[video_core]") {
+    // R2 sifir-2: a quad LUT of up to 255 indices is UINT8 where the device has uint8 indices.
+    REQUIRE(GeometryIndexFormat(VK_INDEX_UINT8_VALUE) == GEOMETRY_INDEX_UINT8);
+    REQUIRE(GeometryIndexFormat(VK_INDEX_UINT16_VALUE) == GEOMETRY_INDEX_UINT16);
+    REQUIRE(GeometryIndexFormat(VK_INDEX_UINT32_VALUE) == GEOMETRY_INDEX_UINT32);
+    REQUIRE(GeometryIndexFormat(2) == GEOMETRY_INDEX_INVALID);
+    REQUIRE(GeometryIndexFormat(1000265001) == GEOMETRY_INDEX_INVALID);
+    // The three apart, as a consumer decodes them.
+    REQUIRE(GEOMETRY_INDEX_UINT8 != GEOMETRY_INDEX_UINT16);
+    REQUIRE(GEOMETRY_INDEX_UINT8 != GEOMETRY_INDEX_UINT32);
+    REQUIRE(GEOMETRY_INDEX_UINT16 != GEOMETRY_INDEX_UINT32);
+}
+
 TEST_CASE("Nx2RecordList: the graveyard frees in seq order", "[video_core]") {
     std::atomic<int> alive{0};
     SeqGraveyard<Counted> graveyard;

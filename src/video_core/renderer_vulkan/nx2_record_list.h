@@ -114,6 +114,33 @@ private:
     std::atomic<u64> released_list{};
 };
 
+/// The geometry mirror's index types (GeometrySlot::index_format, BufferCacheRuntime::
+/// PacketGeometry): the type bound, after the quad and uint8 passes.
+inline constexpr u8 GEOMETRY_INDEX_UINT16 = 0;
+inline constexpr u8 GEOMETRY_INDEX_UINT32 = 1;
+inline constexpr u8 GEOMETRY_INDEX_UINT8 = 2;
+inline constexpr u8 GEOMETRY_INDEX_INVALID = 0xff;
+/// The values of VK_INDEX_TYPE_UINT16 / UINT32 / UINT8_EXT (static_assert in vk_buffer_cache.cpp).
+inline constexpr u32 VK_INDEX_UINT16_VALUE = 0;
+inline constexpr u32 VK_INDEX_UINT32_VALUE = 1;
+inline constexpr u32 VK_INDEX_UINT8_VALUE = 1000265000;
+
+/// GeometrySlot::index_format of a bound VkIndexType (its value); GEOMETRY_INDEX_INVALID for any
+/// other. Every bind noting the mirror maps through it (the quad LUTs are UINT8 up to 255
+/// indices where the device has uint8 indices).
+[[nodiscard]] constexpr u8 GeometryIndexFormat(u32 vk_index_type) noexcept {
+    switch (vk_index_type) {
+    case VK_INDEX_UINT16_VALUE:
+        return GEOMETRY_INDEX_UINT16;
+    case VK_INDEX_UINT32_VALUE:
+        return GEOMETRY_INDEX_UINT32;
+    case VK_INDEX_UINT8_VALUE:
+        return GEOMETRY_INDEX_UINT8;
+    default:
+        return GEOMETRY_INDEX_INVALID;
+    }
+}
+
 /// One packet's commands from B, in order, with the outside render pass requests between them
 /// (marks). `Context` is what a command runs with (vk_scheduler.h: the two command buffers).
 template <typename Context>

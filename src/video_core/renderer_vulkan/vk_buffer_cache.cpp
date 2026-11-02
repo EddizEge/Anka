@@ -99,6 +99,17 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
 // another thread sees a buffer cache operation half done).
 constexpr bool StageJoinsUnlock = false;
 
+static_assert(VK_INDEX_TYPE_UINT16 == Nx2Record::VK_INDEX_UINT16_VALUE);
+static_assert(VK_INDEX_TYPE_UINT32 == Nx2Record::VK_INDEX_UINT32_VALUE);
+static_assert(VK_INDEX_TYPE_UINT8_EXT == Nx2Record::VK_INDEX_UINT8_VALUE);
+
+/// The geometry mirror's index_format of a bound index type (R2 sifir-2: the quad LUTs too).
+u8 GeometryIndexFormatOf(VkIndexType type) {
+    const u8 format = Nx2Record::GeometryIndexFormat(static_cast<u32>(type));
+    ASSERT(format != Nx2Record::GEOMETRY_INDEX_INVALID);
+    return format;
+}
+
 } // Anonymous namespace
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams null_params)
@@ -1129,9 +1140,7 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
     }
     if (target.list != nullptr) [[unlikely]] {
         NoteGeometry(GEOMETRY_INDEX_SLOT, vk_buffer, vk_offset, 0, 0,
-                     vk_index_type == VK_INDEX_TYPE_UINT32   ? GEOMETRY_INDEX_UINT32
-                     : vk_index_type == VK_INDEX_TYPE_UINT16 ? GEOMETRY_INDEX_UINT16
-                                                             : GEOMETRY_INDEX_UINT8);
+                     GeometryIndexFormatOf(vk_index_type));
     }
     target.Record([vk_buffer, vk_offset, vk_index_type](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(vk_buffer, vk_offset, vk_index_type);
@@ -1159,9 +1168,7 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         }
         const auto [buffer, offset, type] = quad_array_index_buffer->BindBuffer(first);
         if (target.list != nullptr) [[unlikely]] {
-            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0,
-                         type == VK_INDEX_TYPE_UINT32 ? GEOMETRY_INDEX_UINT32
-                                                      : GEOMETRY_INDEX_UINT16);
+            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0, GeometryIndexFormatOf(type));
         }
     } else if (topology == PrimitiveTopology::QuadStrip) {
         if (target.list != nullptr) [[unlikely]] {
@@ -1172,9 +1179,7 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         }
         const auto [buffer, offset, type] = quad_strip_index_buffer->BindBuffer(first);
         if (target.list != nullptr) [[unlikely]] {
-            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0,
-                         type == VK_INDEX_TYPE_UINT32 ? GEOMETRY_INDEX_UINT32
-                                                      : GEOMETRY_INDEX_UINT16);
+            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0, GeometryIndexFormatOf(type));
         }
     }
 }

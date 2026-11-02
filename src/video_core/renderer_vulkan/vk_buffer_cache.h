@@ -382,9 +382,9 @@ public:
     /// dynamic state).
     static constexpr u8 GEOMETRY_INDEX_SLOT = 32;
     static constexpr u8 GEOMETRY_TFB_SLOT = 33;
-    static constexpr u8 GEOMETRY_INDEX_UINT16 = 0;
-    static constexpr u8 GEOMETRY_INDEX_UINT32 = 1;
-    static constexpr u8 GEOMETRY_INDEX_UINT8 = 2;
+    static constexpr u8 GEOMETRY_INDEX_UINT16 = Nx2Record::GEOMETRY_INDEX_UINT16;
+    static constexpr u8 GEOMETRY_INDEX_UINT32 = Nx2Record::GEOMETRY_INDEX_UINT32;
+    static constexpr u8 GEOMETRY_INDEX_UINT8 = Nx2Record::GEOMETRY_INDEX_UINT8;
     [[nodiscard]] std::span<const VideoCommon::Nx2Stages::GeometrySlot> PacketGeometry()
         const noexcept {
         return packet_geometry;
