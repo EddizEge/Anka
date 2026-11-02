@@ -3906,7 +3906,9 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
     const u32 count = (std::min)(static_cast<u32>(regs.rt_control.count),
                                  static_cast<u32>(Regs::NumRenderTargets));
     for (u32 index = 0; index < count; ++index) {
-        const auto& rt = regs.rt[regs.rt_control.Map(index)];
+        // The targets C binds and writes: TextureCache::FindColorBuffer's rt[index] (Vulkan leaves
+        // rt_control's map to OpenGL's draw buffers; the two change together).
+        const auto& rt = regs.rt[index];
         if (rt.Address() == 0 || rt.format == Tegra::RenderTargetFormat::NONE) {
             continue;
         }
