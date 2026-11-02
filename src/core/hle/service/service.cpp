@@ -23,6 +23,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/service.h"
+#include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/reporter.h"
@@ -116,8 +117,9 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
-    // EDEN_NX2_IPC_TRACE=1 logs every dispatched command and the result word it returned.
-    static const bool ipc_trace = std::getenv("EDEN_NX2_IPC_TRACE") != nullptr;
+    // EDEN_NX2_IPC_TRACE=1 logs every dispatched command and the result word it returned (other
+    // values are a backtrace filter, see nx2_ipc_trace.h).
+    static const bool ipc_trace = Nx2IpcTrace::LogsEveryCommand();
     if (ipc_trace) {
         LOG_INFO(Service, "ipc {}::{} ({})", service_name, ctx.GetCommand(), info->name);
     }
@@ -144,7 +146,7 @@ void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
-    static const bool ipc_trace = std::getenv("EDEN_NX2_IPC_TRACE") != nullptr;
+    static const bool ipc_trace = Nx2IpcTrace::LogsEveryCommand();
     if (ipc_trace) {
         const auto* w = ctx.CommandBuffer();
         LOG_INFO(Service, "tipc {}::{} ({}) [2]={:#x} [3]={:#x} [4]={:#x}", service_name,
@@ -187,6 +189,17 @@ void CountRequest(const std::string& service, u32 command, u32 type, u32 result)
 }
 } // Anonymous namespace
 
+void ServiceFrameworkBase::TraceRequest(HLERequestContext& ctx) {
+    const char* handler = "control or close";
+    const auto type = ctx.GetCommandType();
+    if (ctx.IsTipc() || type == IPC::CommandType::Request || type == IPC::CommandType::RequestWithContext) {
+        const auto& table = ctx.IsTipc() ? handlers_tipc : handlers;
+        const auto it = table.find(ctx.GetCommand());
+        handler = it == table.end() ? nullptr : it->second.name;
+    }
+    Nx2IpcTrace::OnRequest(system, service_name, handler, ctx);
+}
+
 Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
     const auto guard = LockService();
@@ -206,6 +219,12 @@ Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
         }
         CountRequest(service_name, ctx.GetCommand(), type, result_word);
     };
+
+    // EDEN_NX2_IPC_TRACE=<filter>: the requesting thread's backtrace, once per new request.
+    static const bool backtrace = Nx2IpcTrace::Enabled();
+    if (backtrace) {
+        TraceRequest(ctx);
+    }
 
     Result result = ResultSuccess;
 

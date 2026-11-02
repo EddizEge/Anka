@@ -18,6 +18,7 @@ add_executable(tests
     common/unique_function.cpp
     core/core_timing.cpp
     core/internal_network/network.cpp
+    core/nx2_ipc_trace.cpp
     video_core/memory_tracker.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp

@@ -97,6 +97,7 @@ private:
     void RegisterHandlersBase(const FunctionInfoBase* functions, std::size_t n);
     void RegisterHandlersBaseTipc(const FunctionInfoBase* functions, std::size_t n);
     void ReportUnimplementedFunction(HLERequestContext& ctx, const FunctionInfoBase* info);
+    void TraceRequest(HLERequestContext& ctx);
 
 protected:
     ::Common::unordered_map<u32, FunctionInfoBase> handlers;
