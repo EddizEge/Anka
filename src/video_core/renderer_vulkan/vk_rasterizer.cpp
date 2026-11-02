@@ -4232,6 +4232,11 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         StageResetStores(mb);
         return;
     }
+    if (pipeline->HasDynamicVertexInput()) {
+        // FixedPipelineState::Refresh leaves it to UpdateVertexInput, which is C's on C's replica:
+        // B's flag is cleared here, after the key read it (esdeger-3).
+        mb.dirty.flags[Dirty::VertexInput] = false;
+    }
     // Update the engine: B's replica (the channel may be different).
     pipeline->SetEngine(&mb, gpu_memory);
     if (pipeline->SplitJoins()) {
@@ -4664,6 +4669,7 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         if (head.records != nullptr) {
             scheduler.Replay(*head.records, head.seq);
         }
+        mc.dirty.flags[VideoCommon::Dirty::VertexBuffers] = false;
         ReleaseAnchorC();
         NoteStageSeq(head.seq);
         return;
@@ -4680,6 +4686,10 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
     if (head.records != nullptr) {
         scheduler.Replay(*head.records, head.seq);
     }
+    // B's list bound the vertex streams (BufferCache::UpdateVertexBuffers clears this flag before
+    // UpdateDynamicStates on one replica; C's is set by register deltas and InvalidateState): no
+    // vertex input recorded again for it alone (esdeger-3).
+    mc.dirty.flags[VideoCommon::Dirty::VertexBuffers] = false;
     GraphicsPipeline& pipeline = *head.pipeline;
     const auto repair = [&](bool plain) {
         Profile::Scope scope{Profile::Zone::LightRepair};
