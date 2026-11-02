@@ -832,6 +832,7 @@ void BufferCacheRuntime::BeginStages() {
         descriptor_scratch = std::make_unique<UpdateDescriptorQueue>(
             device, STAGE_SCRATCH_ENTRIES, guest_descriptor_queue.SupportsDescriptorBuffer());
         record_arena = std::make_unique<Nx2Record::ChunkArena>();
+        record_arena->SetHazardReport(&VideoCommon::Nx2Stages::ReportStageHazard);
         records = std::make_unique<RecordList>(*record_arena);
     }
     pending_seq = scheduler.CDoneSeq() + 1;

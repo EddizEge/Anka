@@ -87,9 +87,31 @@ public:
     /// B: `size` bytes aligned to `align` for the list `list`.
     [[nodiscard]] void* Allocate(size_t size, size_t align, u64 list);
 
-    /// The Vulkan worker: the lists up to `list` ran, their commands are destroyed.
+    /// Called with what went wrong when a list is released out of order (the Vulkan side:
+    /// Nx2Stages::ReportStageHazard, counted and reported with STAGE_CHECK).
+    using HazardReport = void (*)(const char* what);
+    void SetHazardReport(HazardReport report) noexcept {
+        hazard_report = report;
+    }
+
+    /// The Vulkan worker: the lists up to `list` ran, their commands are destroyed. Lists run in
+    /// their order, so `list` only grows; one below the last released is a hazard (reported,
+    /// counted) and released nothing: the chunks of the later list may already be reused.
     void Release(u64 list) noexcept {
+        // One writer, the worker
+        if (list < released_list.load(std::memory_order_relaxed)) [[unlikely]] {
+            out_of_order.fetch_add(1, std::memory_order_relaxed);
+            if (hazard_report != nullptr) {
+                hazard_report("record list released out of order (Nx2Record::ChunkArena)");
+            }
+            return;
+        }
         released_list.store(list, std::memory_order_release);
+    }
+
+    /// Releases below the last one (each a hazard).
+    [[nodiscard]] u64 OutOfOrderReleases() const noexcept {
+        return out_of_order.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] u64 ReleasedList() const noexcept {
@@ -112,6 +134,8 @@ private:
     std::vector<std::unique_ptr<Chunk>> free_chunks;
     u64 last_list{};
     std::atomic<u64> released_list{};
+    std::atomic<u64> out_of_order{};
+    HazardReport hazard_report{};
 };
 
 /// The geometry mirror's index types (GeometrySlot::index_format, BufferCacheRuntime::

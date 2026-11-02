@@ -451,6 +451,36 @@ TEST_CASE("Nx2RecordList: the geometry mirror names the bound index type", "[vid
     REQUIRE(GEOMETRY_INDEX_UINT16 != GEOMETRY_INDEX_UINT32);
 }
 
+TEST_CASE("Nx2RecordList: a list released out of order is a hazard", "[video_core]") {
+    static int reports = 0;
+    reports = 0;
+    ChunkArena arena;
+    arena.SetHazardReport([](const char*) { ++reports; });
+    const u64 first = arena.NewList();
+    const u64 second = arena.NewList();
+    const u64 third = arena.NewList();
+    arena.Release(first);
+    arena.Release(third);
+    REQUIRE(arena.ReleasedList() == third);
+    // The worker released `second` after `third`: nothing moves back, the hazard is reported.
+    arena.Release(second);
+    REQUIRE(arena.ReleasedList() == third);
+    REQUIRE(arena.OutOfOrderReleases() == 1);
+    REQUIRE(reports == 1);
+    // The same list again is no hazard; a later one goes on.
+    arena.Release(third);
+    REQUIRE(arena.OutOfOrderReleases() == 1);
+    const u64 fourth = arena.NewList();
+    arena.Release(fourth);
+    REQUIRE(arena.ReleasedList() == fourth);
+    REQUIRE(reports == 1);
+    // Without a report set the count still goes up.
+    ChunkArena quiet;
+    quiet.Release(quiet.NewList() + 1);
+    quiet.Release(1);
+    REQUIRE(quiet.OutOfOrderReleases() == 1);
+}
+
 TEST_CASE("Nx2RecordList: the graveyard frees in seq order", "[video_core]") {
     std::atomic<int> alive{0};
     SeqGraveyard<Counted> graveyard;
