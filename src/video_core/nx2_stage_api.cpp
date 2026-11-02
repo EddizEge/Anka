@@ -120,9 +120,9 @@ Nx2RegReplica::RegCapture& Capture() {
     return capture;
 }
 
+// ApplyDelta and ApplySideState: the callers time them (Zone::ReplicaApply), and DeltaWords is
+// counted where A takes the words (Nx2Stages::TakeDeltas; B and C apply the same ones).
 void ApplyDelta(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count) {
-    Nx2Profile::Scope scope{Nx2Profile::Zone::ReplicaApply};
-    Nx2Profile::Add(Nx2Profile::Counter::DeltaWords, count);
     replica.StageApplyDelta(words, count);
 }
 
@@ -141,7 +141,6 @@ void WriteSideState(Tegra::Engines::Maxwell3D& primary, u64* out) {
 }
 
 void ApplySideState(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count) {
-    Nx2Profile::Scope scope{Nx2Profile::Zone::ReplicaApply};
     replica.StageApplySide(words, count);
 }
 
