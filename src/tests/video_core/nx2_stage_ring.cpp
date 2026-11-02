@@ -827,7 +827,8 @@ bool WaitFor(Done&& done, u32 seconds) {
     const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{seconds};
     while (!done()) {
         if (std::chrono::steady_clock::now() >= give_up) {
-            return false;
+            // A last look: this thread may have been off the processor the whole time.
+            return done();
         }
         std::this_thread::yield();
     }
@@ -1610,13 +1611,8 @@ void StoreMark(u64 position) {
 }
 /// The front's Drain without a join: waits (up to 5 s) for the last stage to store `position`.
 bool WaitStored(u64 position) {
-    for (u32 ms = 0; ms < 5000; ++ms) {
-        if (g_stored_mark.load(std::memory_order_acquire) == position) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-    return false;
+    return WaitFor(
+        [position] { return g_stored_mark.load(std::memory_order_acquire) == position; }, 5);
 }
 std::atomic<u32> g_c_calls{};
 void CountCallOnC(const u64*, u32) {
@@ -1736,6 +1732,141 @@ TEST_CASE("Nx2StagePipeline: C stores a mark after the ParkB asked before it (pr
         REQUIRE(g_failures == 0);
         REQUIRE(g_park_ops == 300);
         REQUIRE(handler.parks == 300);
+        REQUIRE(handler.logs[StageIdC].caught_up_marks == 300);
+    }
+}
+
+namespace {
+/// The first mark C holds in a round of the test below: a ParkB's op runs before C stores it.
+std::atomic<u64> g_first_held{};
+void HeldMarksOp() {
+    Expect(g_stored_mark.load() < g_first_held.load(),
+           "ParkB's op runs before C stores a mark it held for it", g_stored_mark.load(),
+           g_first_held.load());
+    ++g_park_ops;
+}
+/// From B: a mark straight into ring 3 (as B passes A's), not published.
+void PostMarkC(u64 position) {
+    u64* const body = g_pipe->BeginC(RecordKind::Mark, 1, MarkCaughtUp);
+    body[0] = position;
+    g_pipe->EndC();
+}
+void AskHeldMarksParkOnC(const u64*, u32) {
+    AskPark(&HeldMarksOp);
+}
+/// On B: C's boundary work asked for a ParkB, then what C runs in that ParkB's wait (C behind,
+/// the marks held meanwhile), by payload[1]:
+/// 0: two marks (the last one is stored);
+/// 1: a record asking a second ParkB, then a mark (stored after the second op);
+/// 2: a record asking boundary work with no ParkB (an empty TickWork queue), then a mark
+///    (stored once that boundary work ran).
+void HeldMarksOnB(const u64* payload, u32) {
+    const u64 position = payload[0];
+    g_park_at_boundary = &HeldMarksOp;
+    g_pipe->RequestBoundaryWork();
+    for (u64 i = 0; i < position % 8; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, i % 4 == 0 ? 200 : 0);
+    }
+    switch (payload[1]) {
+    case 0:
+        PostMarkC(position - 20);
+        PostCallC(*g_pipe, &CountOnC, g_sent++);
+        break;
+    case 1:
+        PostCallC(*g_pipe, &AskHeldMarksParkOnC, 0);
+        break;
+    default:
+        PostCallC(*g_pipe, &AskBoundaryOnC, 0);
+        break;
+    }
+    PostMarkC(position);
+    g_pipe->PublishC();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores the marks it held for ParkBs asked around them (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held marks"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (const u64 kind : {u64{0}, u64{1}, u64{2}}) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            handler.on_mark = &StoreMark;
+            g_stored_mark = 0;
+            u64 position = 0;
+            for (u32 round = 0; round < 100; ++round) {
+                position += 100 + round % 8;
+                // The two marks of kind 0 (position - 20 and position): the op before both.
+                g_first_held = kind == 0 ? position - 20 : position;
+                if (round == 0) {
+                    REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+                }
+                u64* const body = pipe.BeginB(RecordKind::Call, 3);
+                body[0] = reinterpret_cast<u64>(&HeldMarksOnB);
+                body[1] = position;
+                body[2] = kind;
+                pipe.EndB();
+                pipe.PublishB();
+                REQUIRE(WaitStored(position));
+                // Stored once every op of the round ran (the next round changes g_first_held).
+                REQUIRE(g_park_ops.load() == (round + 1) * (kind == 1 ? 2U : 1U));
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_park_ops == (kind == 1 ? 200U : 100U));
+            REQUIRE(handler.parks == g_park_ops.load());
+            // One stored a round: of kind 0's two marks C held, the later one stands for both.
+            REQUIRE(handler.logs[StageIdC].marks == 100);
+            REQUIRE(handler.logs[StageIdC].caught_up_marks == 100);
+        }
+    }
+}
+
+namespace {
+/// C's boundary work asks itself again until the pipeline stops: C holds a mark it ran meanwhile
+/// (its ask before the mark) and stops with it held.
+std::atomic<bool> g_ask_again{};
+void AskAgainAlways() {
+    if (g_ask_again.load()) {
+        g_pipe->RequestBoundaryWork();
+    }
+}
+void AskAgainOnC(const u64*, u32) {
+    g_ask_again = true;
+    g_pipe->RequestBoundaryWork();
+}
+/// On B, one batch of ring 3 (C runs it in one go, asking for boundary work at its start): the
+/// ask, a caught-up mark, a record that tells the test C ran past the mark.
+void AskThenMarkOnB(const u64* payload, u32) {
+    PostCallC(*g_pipe, &AskAgainOnC, 0);
+    PostMarkC(payload[0]);
+    PostCallC(*g_pipe, &RunOnC, 0);
+    g_pipe->PublishC();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores the mark it held as it stops (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held mark at stop"};
+    for (u32 round = 0; round < 20; ++round) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        handler.on_boundary = &AskAgainAlways;
+        g_ask_again = false;
+        g_c_ran = false;
+        // =1 only: at =2 B's EndC waits for C to run each record, C busy with its boundary work.
+        REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true}));
+        PostCallB(pipe, &AskThenMarkOnB, 700);
+        pipe.PublishB();
+        REQUIRE(WaitFor([] { return g_c_ran.load(); }, 5));
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(handler.logs[StageIdC].marks == 1);
+        REQUIRE(handler.logs[StageIdC].last_mark == 700);
+        REQUIRE(handler.logs[StageIdC].caught_up_marks == 1);
     }
 }
 
