@@ -146,7 +146,7 @@ void ApplySideState(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 co
 }
 
 bool VerifyReplica(Tegra::Engines::Maxwell3D& primary, Stage stage) {
-    const Tegra::Engines::Maxwell3D* const replica = ReplicaOf(primary, stage);
+    Tegra::Engines::Maxwell3D* const replica = ReplicaOf(primary, stage);
     if (replica == nullptr || !primary.stage_sent) {
         return true;
     }

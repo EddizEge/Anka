@@ -263,11 +263,20 @@ TEST_CASE("Nx2RegReplica: the capture's words, engines and constant buffer data"
     capture.Note(Engine(1), 0x41, 6, false, false);
     capture.TakeWords(words.data());
     REQUIRE(words[0] == MakeDelta(0x41, 6, false, false));
+    // SelectTarget (PostCbData's, K6): the source changes without a word; for the source it is
+    // a no-op that leaves what is pending.
+    capture.SelectTarget(Engine(0));
+    REQUIRE(capture.Source() == &Engine(0));
+    REQUIRE(capture.PendingWords() == 0);
+    capture.Note(Engine(0), 0x42, 7, true, false);
+    capture.SelectTarget(Engine(0));
+    REQUIRE(capture.Source() == &Engine(0));
+    REQUIRE(capture.PendingWords() == 1);
 }
 
 TEST_CASE("Nx2RegReplica: a write outside ProcessDirtyRegisters reaches the replica",
           "[video_core]") {
-    // Noted with dirty false (const_buffer.offset +=, shadow_scratch[0] = 1): the replica
+    // Noted with dirty false (shadow_scratch[0] = 1): the replica
     // takes the value; holding another one, it sets the dirty flags and notes a light change
     // (more than the primary did: extra work, never less).
     Setup setup;

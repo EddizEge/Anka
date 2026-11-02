@@ -3272,6 +3272,11 @@ public:
     /// The primary's side state (nx2_reg_replica.h, SidePart) as A last sent it.
     struct StageSent;
     std::unique_ptr<StageSent> stage_sent;
+    /// Replica, =2: a side state came with a record since the last VerifyReplica (StageApplySide),
+    /// and the light changes the last such draw left in place (DrawTexture does not clear them, a
+    /// draw through PrepareDraw does; K2).
+    bool stage_side_applied{};
+    u32 stage_light_base{};
 
     /// Replica: becomes a copy of `primary` (registers, dirty flags and tables, state, draw
     /// manager, light, engine_state, replace_table, execute_on; its macro context and
@@ -3294,9 +3299,10 @@ public:
     void StageWriteSide(u64* out);
     /// Replica: applies a side state (light.rebound ORed in, S2; =2 checks the light changes).
     void StageApplySide(const u64* words, u32 count);
-    /// Primary, =2: whether `replica` holds the registers it holds and the side state sent
-    /// (VerifyReplica); logs the first differences.
-    [[nodiscard]] bool StageVerify(const Maxwell3D& replica) const;
+    /// Primary, =2 (VerifyReplica, K2): whether `replica` holds its registers and A's light
+    /// changes since the last draw record, and after a side state the side state sent; logs the
+    /// first differences.
+    [[nodiscard]] bool StageVerify(Maxwell3D& replica) const;
 
     GPUVAddr GetMacroAddress(size_t index) const {
         size_t base = 0;
@@ -3429,7 +3435,7 @@ private:
 
     // Back stages, the primary on A while staged (T2): the paths the old functions take there.
     void StageNoteWrite(u32 method, u32 argument);
-    void StageNoteDirect(u32 method, bool changed);
+    void StageNoteDirect(u32 method, bool note_primary_light);
     void StageCbForward(const u32* start_base, u32 amount);
     void StageQueryCondition();
 
