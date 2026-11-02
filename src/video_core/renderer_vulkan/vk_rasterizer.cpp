@@ -4688,7 +4688,17 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                 // setup's barrier.
                 Profile::FineScope geometry_scope{Profile::Zone::LightGeometry};
                 if (buffer_cache.UpdateGeometryBuffers(is_indexed)) {
+                    // EDEN_NX2_LIGHT_SYNC_SKIP, as TryLightDraw: plain here by B's checks (its
+                    // replica's light changes, its memory manager's cached and same-value writes,
+                    // light_epoch_b), so B's chain synchronized every enabled stream after the
+                    // last memory change; only streams flagged dirty bind anew (ForceGeometryB's
+                    // flag them all), a clean stream whose range may hold CPU-modified or
+                    // untracked pages since is synchronized anyway (UnsetSince). Without it each
+                    // plain light draw synchronized its ~12 clean streams again (85: twice K1's
+                    // buffer syncs a draw).
+                    buffer_cache.plain_light_draw = VideoCommon::Nx2LightSyncSkip() != 0;
                     buffer_cache.BindHostGeometryBuffers(is_indexed);
+                    buffer_cache.plain_light_draw = false;
                     light_ok = !buffer_cache.any_buffer_uploaded;
                 }
                 if (light_ok) {
