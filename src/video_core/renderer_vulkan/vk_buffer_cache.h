@@ -379,7 +379,14 @@ public:
     /// vertex streams, GEOMETRY_INDEX_SLOT the index buffer, GEOMETRY_TFB_SLOT + n transform
     /// feedback n; index_format the bound index type (GEOMETRY_INDEX_UINT16 / UINT32 / UINT8);
     /// size 0 where the bind has none (index buffers, BindVertexBuffer(s) without extended
-    /// dynamic state).
+    /// dynamic state). For its consumer (T7, R2 review geometri-2 / geometri-3):
+    /// - A slot's VkBuffer lives only while B keeps that slot bound: once B binds another buffer
+    ///   there (or deletes the buffer), an older packet's entry for it may name a freed handle.
+    /// - Binds outside a packet are not in it: draws B sets up inside a JoinB (Joined: texture or
+    ///   image buffers, transform feedback) bind straight to the scheduler, so every transform
+    ///   feedback bind is missing and the GEOMETRY_TFB_SLOT + n slots stay empty with cut c.
+    /// - After a join (Joined draws, JoinFromB, the record owner hook replaying B's list) the
+    ///   mirror no longer says what the command buffer holds: the consumer resets it.
     static constexpr u8 GEOMETRY_INDEX_SLOT = 32;
     static constexpr u8 GEOMETRY_TFB_SLOT = 33;
     static constexpr u8 GEOMETRY_INDEX_UINT16 = Nx2Record::GEOMETRY_INDEX_UINT16;
