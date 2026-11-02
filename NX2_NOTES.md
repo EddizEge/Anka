@@ -327,6 +327,53 @@ handheld VRR without slowing down, so these are likely its VRR / HDR display que
    colours, a white halo: worth a try against H1). Bananza only asks for "default", so the
    error reply is not missed. The "# VRR experiment" example's `104: 1` above is the wrong
    size for it (one word of three).
+   Since then every command below 4096 without a handler answers from the table, so one the
+   game has not sent before can be answered once a line for it is added (an empty success as
+   before until then).
+
+### vi2 events and setup replies for the VRR path (all off by default)
+
+Bananza's VRR controller never runs: the swap interval word only takes 0x1003c/0x2003c/0x3003c
+whatever 107 answers. Selevet (8b076b167f) found that the SDK learns VRR support from a display
+event Eden never signals and patched the SDK in memory; these switches try the HLE side instead
+(no game or SDK code is changed or read). src/core/hle/service/nx2_gsv.h, nx2_vi2_events.h,
+src/core/hle/kernel/nx2_event_diag.h; tests src/tests/core/nx2_vi2_events.cpp. Built, not run yet.
+
+- `EDEN_NX2_VI2_DIAG=1`: "nx2:vi2 diag: first call of N \"handler\" (present #P): request [..] ->
+  reply [..]" once per command, "NEW: first call ..." (and an "nx2 ipc trace now" backtrace unless
+  `EDEN_NX2_IPC_TRACE` traces it) for a command Bananza was never seen sending; "nx2:vi2 diag:
+  31 [0x1] -> nx2:vi2:Vsync5 (31 [2]=0x1), handle 0x..." for each event reply; "diag: notify I
+  (why ...)" and "diag: 21 hands over notification bits ..." (first 32 each); every 10 s "nx2:vi2
+  diag events, last 10.0 s (V vblanks, P presents, 21 called N times); <event> handle 0x..
+  on vblanks: signalled S, cleared by the guest C, waited on at W vblanks (ever: thread ids),
+  guest calls: MainThread 0x.. polled X (Y signalled), reset R (Z signalled)...". "polled" is
+  svcWaitSynchronization with a zero timeout: the event the main thread polls every frame is
+  the one with polled ~ presents from MainThread.
+- `EDEN_NX2_VI2_KIND_EVENTS=1` / `=0` / `=1:once,2:never,3:vsync`: 31's events of kinds 1-3
+  (asked just before the first present, each followed by 26x with the same kind) are not
+  signalled on vblanks: "once" at the first present after the 31 call (or the first vblank 1 s
+  after it if no present came), "never" never. Kind 0 and 32's event stay on vblanks. Lines
+  "nx2:vi2 31 kind K: once", "present #1: signalled 31's kind K event once". "never" can hang a
+  thread that waits on it.
+- `EDEN_NX2_VI2_NOTIFY_OPEN=1` (right after 101) / `=2` (at the first present): sets the
+  display's notification (101's word 4, 1 in Bananza) once, signals the 11 event; 21 hands it
+  over. The SDK may take it for its display closing (teardown, black screen); with
+  `EDEN_NX2_VI2_DIAG` a following 102 shows as "NEW: first call of 102".
+- `EDEN_NX2_VI2_REPLY_OWN=1,3,101` (needs the reply table): those commands answer from the table
+  when it has a line for them, after their own handler ran (101 keeps its notification index);
+  no line, their own reply. 11, 21, 31, 32, 229 refused. Setup commands: the file must hold
+  them before the game starts. "nx2:vi2 reply v1: 1 -> [0x3ff] instead of its own reply
+  (EDEN_NX2_VI2_REPLY_OWN)".
+- `EDEN_NX2_VRR_VSYNC=1` (or `<max Hz>:<min Hz>`, 1 = 120:40): the vsync events follow the
+  presents like a VRR panel: a shown present starts a scan at once but no sooner than 1/120 s
+  after the previous one; without a present the panel scans again after 1/40 s. All scans run
+  on the timing thread. `EDEN_NX2_VSYNC_HZ` is ignored with it, `EDEN_NX2_VBLANK_GRID` turns it
+  off. The "last 600 presents" line ends with ", VRR vsync scans: A at a present, H held to the
+  top rate, B at the bottom rate".
+
+Evidence that the VRR path opened: word 12's low half 0x28-0x3b in the per-second diag line,
+"word 12 new value 0x1003c -> 0x100NN", a new vi2 command, or at 30-40 fps k=2 within a few
+frames.
 
 ## Where it stops now
 
