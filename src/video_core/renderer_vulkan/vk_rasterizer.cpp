@@ -2007,6 +2007,10 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 void RasterizerVulkan::FlushAll() {}
 
 void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    if (SplitOnB()) [[unlikely]] {
+        FlushRegionB(addr, size, which);
+        return;
+    }
     NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
@@ -2026,6 +2030,9 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 }
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    if (SplitOnB()) [[unlikely]] {
+        return MustFlushRegionB(addr, size, which);
+    }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         CheckBufferLockOffB("RasterizerVulkan::MustFlushRegion");
         std::scoped_lock lock{buffer_cache.mutex};
@@ -2099,6 +2106,10 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    if (SplitOnB()) [[unlikely]] {
+        InvalidateRegionB(addr, size, which);
+        return;
+    }
     NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
@@ -4813,6 +4824,69 @@ void RasterizerVulkan::InnerInvalidationB(
     for (const auto& [addr, size] : sequences) {
         pipeline_cache.InvalidateRegion(addr, size);
     }
+}
+
+void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    // InvalidateRegion's halves: the buffer cache and the shaders here, the texture and query
+    // caches C's (before anything B sends after).
+    using VideoCommon::CacheType;
+    NoteLightWork();
+    if (addr == 0 || size == 0) {
+        return;
+    }
+    const u64 c_bits = (True(which & CacheType::TextureCache) ? StageRangeTexture : 0) |
+                       (True(which & CacheType::QueryCache) ? StageRangeQuery : 0);
+    if (c_bits != 0) {
+        stage_c_ranges.push_back(addr);
+        stage_c_ranges.push_back(size | c_bits);
+    }
+    if (True(which & CacheType::BufferCache)) {
+        StageBufferWork([&] { buffer_cache.WriteMemory(addr, size); });
+    }
+    FlushStageCWork();
+    if (True(which & CacheType::ShaderCache)) {
+        pipeline_cache.InvalidateRegion(addr, size);
+    }
+}
+
+void RasterizerVulkan::FlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    // A download from C's caches and B's records and waits: the old body in a join, only where a
+    // cache may hold GPU data (C's through the page summary, whole pages as HoldsGpuWrittenData).
+    if (addr != 0 && size != 0) {
+        const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+        const size_t span = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - begin;
+        if (HoldsGpuWrittenDataB(begin, span)) {
+            JoinB([&] { FlushRegion(addr, size, which); });
+            return;
+        }
+    }
+    NoteLightWork();
+}
+
+bool RasterizerVulkan::MustFlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which) {
+    // MustFlushRegion with C's texture cache through the page summary (conservative).
+    namespace Stages = VideoCommon::Nx2Stages;
+    if (True(which & VideoCommon::CacheType::BufferCache)) {
+        Nx2Record::CacheLock lock{buffer_cache.mutex};
+        if (buffer_cache.IsRegionGpuModified(addr, size)) {
+            return true;
+        }
+    }
+    if (!Settings::IsGPULevelHigh() || False(which & VideoCommon::CacheType::TextureCache)) {
+        return false;
+    }
+    const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+    const size_t span = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - begin;
+    if (Stages::Get().mode == 2) [[unlikely]] {
+        // =2's lockstep: the cache's answer at the same point of the stream (HoldsGpuWrittenDataB).
+        bool modified;
+        {
+            std::scoped_lock lock{texture_cache.mutex};
+            modified = texture_cache.IsRegionGpuModified(addr, size);
+        }
+        return Stages::GpuPages().CheckHolds(begin, span, modified);
+    }
+    return Stages::GpuPages().Holds(begin, span);
 }
 
 bool RasterizerVulkan::HoldsGpuWrittenDataB(DAddr begin, size_t span) {

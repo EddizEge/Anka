@@ -330,6 +330,11 @@ private:
     void InlineRunsB(std::span<const std::pair<GPUVAddr, u32>> runs, std::span<const u8> data);
     void InlineToMemoryB(GPUVAddr address, size_t copy_size, std::span<const u8> memory);
     void InnerInvalidationB(std::span<const std::pair<DAddr, std::size_t>> sequences);
+    /// B: the memory manager's guest writes, reads and dirty checks (WriteBlock, ReadBlock,
+    /// IsMemoryDirty on B's replicas' memory managers).
+    void InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
+    void FlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
+    [[nodiscard]] bool MustFlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
     [[nodiscard]] bool HoldsGpuWrittenDataB(DAddr begin, size_t span);
     void ClearB(u32 layer_count);
     void DrawTextureB();
