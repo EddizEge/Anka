@@ -365,6 +365,37 @@ std::pair<VkBuffer, VkDeviceSize> Uint8Pass::Assemble(u32 num_vertices, VkBuffer
     return {staging.buffer, staging.offset};
 }
 
+std::pair<VkBuffer, VkDeviceSize> Uint8Pass::Assemble(RecordTarget& target,
+                                                      StageStagingBufferPool& stage_pool,
+                                                      u32 num_vertices, VkBuffer src_buffer,
+                                                      u32 src_offset) {
+    const u32 staging_size = static_cast<u32>(num_vertices * sizeof(u16));
+    const auto staging = stage_pool.Request(staging_size, MemoryUsage::DeviceLocal);
+
+    const std::array<DescriptorUpdateEntry, 2> descriptors{
+        VkDescriptorBufferInfo{src_buffer, src_offset, num_vertices},
+        VkDescriptorBufferInfo{staging.buffer, staging.offset, staging_size},
+    };
+    target.RequestOutsideRenderPassOperationContext();
+    target.Record([this, descriptors, num_vertices](vk::CommandBuffer cmdbuf) {
+        static constexpr u32 DISPATCH_SIZE = 1024;
+        static constexpr VkMemoryBarrier WRITE_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+        };
+        const VkDescriptorSet set = descriptor_allocator.Commit();
+        device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptors.data());
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+        cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+        cmdbuf.Dispatch(Common::DivCeil(num_vertices, DISPATCH_SIZE), 1, 1);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, WRITE_BARRIER);
+    });
+    return {staging.buffer, staging.offset};
+}
+
 QuadIndexedPass::QuadIndexedPass(const Device& device_, Scheduler& scheduler_,
                                  DescriptorPool& descriptor_pool_,
                                  StagingBufferPool& staging_buffer_pool_,
@@ -416,6 +447,56 @@ std::pair<VkBuffer, VkDeviceSize> QuadIndexedPass::Assemble(
         const std::array<u32, 3> push_constants{base_vertex, index_shift, is_strip ? 1u : 0u};
         const VkDescriptorSet set = descriptor_allocator.Commit();
         device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptor_data);
+        cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+        cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
+        cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                             &push_constants);
+        cmdbuf.Dispatch(Common::DivCeil(num_tri_vertices, DISPATCH_SIZE), 1, 1);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, WRITE_BARRIER);
+    });
+    return {staging.buffer, staging.offset};
+}
+
+std::pair<VkBuffer, VkDeviceSize> QuadIndexedPass::Assemble(
+    RecordTarget& target, StageStagingBufferPool& stage_pool,
+    Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format, u32 num_vertices, u32 base_vertex,
+    VkBuffer src_buffer, u32 src_offset, bool is_strip) {
+    const u32 index_shift = [index_format] {
+        switch (index_format) {
+        case Tegra::Engines::Maxwell3D::Regs::IndexFormat::UnsignedByte:
+            return 0;
+        case Tegra::Engines::Maxwell3D::Regs::IndexFormat::UnsignedShort:
+            return 1;
+        case Tegra::Engines::Maxwell3D::Regs::IndexFormat::UnsignedInt:
+            return 2;
+        }
+        ASSERT(false);
+        return 2;
+    }();
+    const u32 input_size = num_vertices << index_shift;
+    const u32 num_tri_vertices = (is_strip ? (num_vertices - 2) / 2 : num_vertices / 4) * 6;
+
+    const std::size_t staging_size = num_tri_vertices * sizeof(u32);
+    const auto staging = stage_pool.Request(staging_size, MemoryUsage::DeviceLocal);
+
+    const std::array<DescriptorUpdateEntry, 2> descriptors{
+        VkDescriptorBufferInfo{src_buffer, src_offset, input_size},
+        VkDescriptorBufferInfo{staging.buffer, staging.offset, staging_size},
+    };
+    target.RequestOutsideRenderPassOperationContext();
+    target.Record([this, descriptors, num_tri_vertices, base_vertex, index_shift,
+                   is_strip](vk::CommandBuffer cmdbuf) {
+        static constexpr u32 DISPATCH_SIZE = 1024;
+        static constexpr VkMemoryBarrier WRITE_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_INDEX_READ_BIT,
+        };
+        const std::array<u32, 3> push_constants{base_vertex, index_shift, is_strip ? 1u : 0u};
+        const VkDescriptorSet set = descriptor_allocator.Commit();
+        device.GetLogical().UpdateDescriptorSet(set, *descriptor_template, descriptors.data());
         cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
         cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
         cmdbuf.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
