@@ -1074,6 +1074,12 @@ private:
         }
         if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModePace::Present(PresentInterval(w), entered, composited, paced);
+            // EDEN_NX2_MODE_PACE=2: a released present lets the next one come early (a fast frame
+            // to the game, which is what takes it up); 0 with =1.
+            if (const auto release = VideoCommon::Nx2ModePace::Release();
+                release.count() > 0 && VblankGridMode() == 0) {
+                m_next_vblank = (std::min)(m_next_vblank, paced + release);
+            }
         }
         if (PresentDiagEnabled()) {
             DiagPresent(w, entered, waited, composited, paced);
