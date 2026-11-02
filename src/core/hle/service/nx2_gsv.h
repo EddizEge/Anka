@@ -1160,14 +1160,16 @@ private:
     // the 229 request (0 counts as 1, never below EDEN_NX2_PRESENT_INTERVAL), once
     // EDEN_NX2_PRESENT_DIAG has shown which word carries the game's swap interval. Neither set:
     // 1, the pacing as before.
-    static u32 PresentInterval(const u32* w) {
-        struct Source {
-            u32 minimum{1};
-            u32 word{}; // 0: none
-            u32 shift{};
-            u32 mask{};
-        };
-        static const Source source = [] {
+    struct IntervalSource {
+        u32 minimum{1};
+        u32 word{}; // 0: none
+        u32 shift{};
+        u32 mask{};
+    };
+
+    static const IntervalSource& PresentIntervalSource() {
+        static const IntervalSource source = [] {
+            using Source = IntervalSource;
             Source s{};
             if (const char* text = std::getenv("EDEN_NX2_PRESENT_INTERVAL")) {
                 s.minimum = static_cast<u32>(std::clamp(std::strtol(text, nullptr, 10), 1L, 4L));
@@ -1197,6 +1199,11 @@ private:
             }
             return s;
         }();
+        return source;
+    }
+
+    static u32 PresentInterval(const u32* w) {
+        const IntervalSource& source = PresentIntervalSource();
         u32 vblanks = source.minimum;
         if (source.word != 0) {
             const u32 value = (w[source.word] >> source.shift) & source.mask;
@@ -1264,9 +1271,13 @@ private:
     // since the previous present; (b) once a second, a histogram of the shown frame intervals, the
     // average fence and pacing waits, the presents per requested interval (PresentInterval), the
     // GPU pipeline's busy time (Nx2BusyClock: what EDEN_NX2_GPU_BUSY_CLOCK would time; "-" with
-    // single core), the vsync ticks and how often each vi2 command ran; (c) every 600
-    // presents, the values each 229 word took so far; (d) each vi2 request the first time its
-    // data words are seen (the first 256).
+    // single core), the vsync ticks, how often each vi2 command ran and the full values of the
+    // swap interval word (EDEN_NX2_PRESENT_INTERVAL_WORD's, else word 12: (k << 16) | 60 in
+    // Bananza's 60/30/20 modes, maybe (1 << 16) | n for n Hz under VRR) with their counts, at most
+    // 4 and "other"; (c) every 600 presents, the values each 229 word took so far; (d) each vi2
+    // request the first time its data words are seen (the first 256); (e) after the first 200
+    // presents, a value words 6-21 have not taken before (old -> new, at most 50 lines; a word
+    // past 32 values is no longer watched).
     static bool PresentDiagEnabled() {
         static const bool enabled = [] {
             const char* text = std::getenv("EDEN_NX2_PRESENT_DIAG");
@@ -1291,6 +1302,14 @@ private:
         u64 busy_ticks{}; // Nx2BusyClock::Ticks at the start of the second
         std::map<u32, u32> calls;
         std::set<std::vector<u32>> requests;
+        // (b) the swap interval word's full values this second, at most 4 and the rest.
+        std::array<std::pair<u32, u32>, 4> interval_words{}; // value, presents
+        u32 interval_word_kinds{};
+        u32 interval_word_other{};
+        // (e) every value words 6-21 took so far (at most 32 each).
+        std::array<std::vector<u32>, 22> seen{};
+        u32 unwatched{}; // bit i: word i took more than 32 values
+        u32 new_value_lines{};
     } m_diag;
 
     void DiagRequest(HLERequestContext& ctx) {
@@ -1366,6 +1385,31 @@ private:
                      m_presents, interval_us / 1000.0, shown_us / 1000.0, text,
                      d.change_lines == 200 ? " (further changes only in the word value lists)" : "");
         }
+        for (u32 i = 6; i <= 21; ++i) {
+            if (per_frame(i) || ((d.unwatched >> i) & 1) != 0) {
+                continue;
+            }
+            auto& seen = d.seen[i];
+            if (std::ranges::find(seen, w[i]) != seen.end()) {
+                continue;
+            }
+            if (seen.size() >= 32) {
+                d.unwatched |= 1U << i;
+                seen = {};
+                LOG_INFO(Service,
+                         "nx2:vi2 diag present #{}: word {} took more than 32 values, no "
+                         "longer watched for new ones",
+                         m_presents, i);
+                continue;
+            }
+            seen.push_back(w[i]);
+            if (m_presents > 200 && d.have_words && d.new_value_lines < 50) {
+                ++d.new_value_lines;
+                LOG_INFO(Service, "nx2:vi2 diag present #{}: word {} new value {:#x} -> {:#x}{}",
+                         m_presents, i, d.words[i], w[i],
+                         d.new_value_lines == 50 ? " (further new values not logged)" : "");
+            }
+        }
         std::copy(w, w + 26, d.words.begin());
         d.have_words = true;
         if ((m_presents % 600) == 0) {
@@ -1395,6 +1439,20 @@ private:
         }
         ++d.presents;
         ++d.intervals[PresentInterval(w)];
+        const u32 interval_word =
+            PresentIntervalSource().word != 0 ? PresentIntervalSource().word : 12;
+        {
+            const u32 value = w[interval_word];
+            const auto kinds = std::span{d.interval_words}.first(d.interval_word_kinds);
+            if (const auto it = std::ranges::find(kinds, value, &std::pair<u32, u32>::first);
+                it != kinds.end()) {
+                ++it->second;
+            } else if (d.interval_word_kinds < d.interval_words.size()) {
+                d.interval_words[d.interval_word_kinds++] = {value, 1};
+            } else {
+                ++d.interval_word_other;
+            }
+        }
         d.fence_us += to_us(waited - entered);
         d.pace_us += to_us(paced - composited);
         const bool busy_tracked = VideoCommon::Nx2BusyClock::Tracked();
@@ -1414,11 +1472,19 @@ private:
                                                  Common::WallClock::GPUTickFreq);
                 d.busy_ticks = busy_ticks;
             }
+            std::string interval_words = fmt::format(", word {}", interval_word);
+            for (u32 i = 0; i < d.interval_word_kinds; ++i) {
+                interval_words +=
+                    fmt::format(" {:#x}:{}", d.interval_words[i].first, d.interval_words[i].second);
+            }
+            if (d.interval_word_other != 0) {
+                interval_words += fmt::format(" other:{}", d.interval_word_other);
+            }
             LOG_INFO(Service,
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "
                      "requested interval 1x{} 2x{} 3x{} 4x{}, gpu busy {} ms, vsync ticks {}, "
-                     "vi2 calls{}{}",
+                     "vi2 calls{}{}{}",
                      to_us(paced - d.second) / 1e6, d.presents, d.shown[0], d.shown[1], d.shown[2],
                      d.shown[3], d.shown[4], d.min_us / 1000.0, d.max_us / 1000.0,
                      d.fence_us / 1000.0 / d.presents, d.pace_us / 1000.0 / d.presents,
@@ -1426,8 +1492,11 @@ private:
                      ticks - d.vsync_ticks, calls,
                      GetReplies() != nullptr
                          ? fmt::format(", reply v{}", GetReplies()->version.load(std::memory_order_relaxed))
-                         : std::string{});
+                         : std::string{},
+                     interval_words);
             d.vsync_ticks = ticks;
+            d.interval_word_kinds = 0;
+            d.interval_word_other = 0;
             d.second = paced;
             d.shown = {};
             d.intervals = {};
