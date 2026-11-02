@@ -4827,6 +4827,13 @@ void RasterizerVulkan::WaitForIdleB() {
     StageToC([this] { WaitForIdleRecord(); });
 }
 
+// C takes from the pipeline cache only what the packet names, the GraphicsPipeline (DrawToC::
+// pipeline; no ShaderInfo* or other entry of B's caches, T9c): B's
+// pipeline_cache.InvalidateRegion never frees one (graphics_cache only grows). An eviction would
+// have to wait for the seq C ran.
+static_assert(
+    std::is_same_v<decltype(VideoCommon::Nx2Stages::DrawToC::pipeline), GraphicsPipeline*>);
+
 void RasterizerVulkan::StageDrawThunk(const u64* payload, u32 words) {
     const StageDrawReader in{payload, words};
     StageDrawParams params;
