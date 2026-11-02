@@ -4,8 +4,10 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
+#include <optional>
 
 #include "common/assert.h"
 #include "common/logging.h"
@@ -24,6 +26,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_acquire_peek.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -56,9 +59,168 @@ void OnBack(const Func& func) {
     }
 }
 
+namespace Peek = VideoCommon::Nx2AcquirePeek;
+
+// Switch 2 acquires and the puller's releases are tracked with the split on while profiling (the
+// acquire peek line). Front thread only.
+bool PeekTracking() {
+    return VideoCommon::Nx2Profile::Enabled() && VideoCommon::GpuSplit::Get().Active();
+}
+
+Peek::Tracker& PeekTracker() {
+    static Peek::Tracker tracker;
+    return tracker;
+}
+
 // The caller is counted while profiling (EDEN_NX2_GPU_PROFILE, Nx2Profile::CountDrain).
 void DrainBack(VideoCommon::Nx2Profile::DrainSite site) {
     VideoCommon::Nx2Profile::CountDrain(VideoCommon::GpuSplit::Get(), site);
+    if (PeekTracking()) {
+        PeekTracker().Drained();
+    }
+}
+
+// A release the puller queued for the back (PeekTracking). A 16-byte one also writes a zero
+// word after the payload and the timestamp after that.
+void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool timestamp) {
+    if (!PeekTracking()) {
+        return;
+    }
+    auto& tracker = PeekTracker();
+    const s32 channel = dma_pusher.channel_state.bind_id;
+    for (u32 word = 0; word < (timestamp ? 4U : 1U); ++word) {
+        if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address + word * 4)) {
+            tracker.NoteRelease(*device, channel, word == 0 ? payload : 0, word < 2);
+        }
+    }
+}
+
+// The acquire peek line (EDEN_NX2_GPU_PROFILE): counted on the front, logged for the front's
+// profile window once the next one has begun.
+struct PeekStats {
+    u64 window{}; ///< Nx2Profile's window start these are counted in
+    std::array<u64, 3> acquires{};      ///< Equal, greater or equal, mask
+    std::array<u64, 3> met_in_memory{}; ///< Of them: met by guest memory before the drain
+    std::array<u64, static_cast<size_t>(Peek::Verdict::Count)> verdicts{}; ///< Of those
+    u64 met_then_unmet{}; ///< Met in memory before the drain, not after it
+    u64 may_skip_unmet{}; ///< Of them: Decide said Skip
+    u64 resumes{};        ///< Pending acquires checked again (CanResumeAcquire)
+    u64 resumes_met{};    ///< Of them: met in memory before the drain
+    u64 resumes_may_skip{};
+};
+
+thread_local PeekStats t_peek_stats;
+
+size_t OperationIndex(u32 operation) {
+    return operation == Peek::OpEqual ? 0 : operation == Peek::OpGequal ? 1 : 2;
+}
+
+void LogPeekStats(const PeekStats& stats, u64 window_ns) {
+    const double per_second = 1e9 / static_cast<double>(window_ns);
+    const auto rate = [per_second](u64 value) { return static_cast<double>(value) * per_second; };
+    const auto verdict = [&](Peek::Verdict which) {
+        return rate(stats.verdicts[static_cast<size_t>(which)]);
+    };
+    const auto& tracker = PeekTracker();
+    LOG_INFO(HW_GPU,
+             "GPU thread acquire peek per second: acquires {:.0f} (equal {:.0f}, greater or "
+             "equal {:.0f}, mask {:.0f}), met in memory before the drain {:.0f} ({:.0f}/{:.0f}/"
+             "{:.0f}): may skip {:.0f}; drain kept for mask {:.0f}, wrapped {:.0f}, queued "
+             "release {:.0f}, not monotonic {:.0f}, new {:.0f}, untracked {:.0f}; met in memory "
+             "but not after the drain {:.0f} (may skip {:.0f}) | resumes {:.0f} (met in memory "
+             "{:.0f}, may skip {:.0f}) | words {} ({} went down), releases queued {}",
+             rate(stats.acquires[0] + stats.acquires[1] + stats.acquires[2]),
+             rate(stats.acquires[0]), rate(stats.acquires[1]), rate(stats.acquires[2]),
+             rate(stats.met_in_memory[0] + stats.met_in_memory[1] + stats.met_in_memory[2]),
+             rate(stats.met_in_memory[0]), rate(stats.met_in_memory[1]),
+             rate(stats.met_in_memory[2]), verdict(Peek::Verdict::Skip),
+             verdict(Peek::Verdict::Operation), verdict(Peek::Verdict::Wrapped),
+             verdict(Peek::Verdict::QueuedRelease), verdict(Peek::Verdict::NotMonotonic),
+             verdict(Peek::Verdict::New), verdict(Peek::Verdict::Untracked),
+             rate(stats.met_then_unmet), rate(stats.may_skip_unmet), rate(stats.resumes),
+             rate(stats.resumes_met), rate(stats.resumes_may_skip), tracker.Words(),
+             tracker.WordsNotMonotonic(), tracker.QueuedReleases());
+}
+
+PeekStats& PeekStatsNow() {
+    auto& stats = t_peek_stats;
+    const u64 window = VideoCommon::Nx2Profile::t_data.window_start;
+    if (stats.window != window) {
+        if (stats.window != 0 && window > stats.window) {
+            LogPeekStats(stats, window - stats.window);
+        }
+        stats = PeekStats{};
+        stats.window = window;
+    }
+    return stats;
+}
+
+// An acquire's word in guest memory before the drain (PeekTracking), and what Decide says of it.
+struct PeekRead {
+    bool tracked{};
+    std::optional<u64> device;
+    u32 raw{};
+    Peek::Verdict verdict{Peek::Verdict::Untracked};
+};
+
+PeekRead PeekBefore(DmaPusher& dma_pusher, GPUVAddr address, u32 operation, u32 value,
+                    bool resume) {
+    PeekRead read;
+    if (!PeekTracking()) {
+        return read;
+    }
+    read.tracked = true;
+    read.raw = dma_pusher.memory_manager.Read<u32>(address);
+    read.device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    const bool met = Peek::Matches(operation, read.raw, value);
+    if (read.device) {
+        auto& tracker = PeekTracker();
+        tracker.Observe(*read.device, read.raw);
+        read.verdict = tracker.Decide(*read.device, dma_pusher.channel_state.bind_id, operation,
+                                      value, read.raw);
+    } else {
+        read.verdict = met ? Peek::Verdict::Untracked : Peek::Verdict::Unmet;
+    }
+    auto& stats = PeekStatsNow();
+    if (resume) {
+        ++stats.resumes;
+        stats.resumes_met += met ? 1 : 0;
+        stats.resumes_may_skip += read.verdict == Peek::Verdict::Skip ? 1 : 0;
+    } else {
+        const size_t index = OperationIndex(operation);
+        ++stats.acquires[index];
+        if (met) {
+            ++stats.met_in_memory[index];
+            ++stats.verdicts[static_cast<size_t>(read.verdict)];
+        }
+    }
+    return read;
+}
+
+// The word as the drain left it (`current`). Where it no longer meets an acquire memory met
+// before, a skip would have let the channel go on early: logged where Decide said Skip.
+void PeekAfter(DmaPusher& dma_pusher, const PeekRead& read, GPUVAddr address, u32 operation,
+               u32 value, u32 current) {
+    if (!read.tracked) {
+        return;
+    }
+    if (read.device) {
+        PeekTracker().Observe(*read.device, current);
+    }
+    if (!Peek::Matches(operation, read.raw, value) || Peek::Matches(operation, current, value)) {
+        return;
+    }
+    const bool may_skip = read.verdict == Peek::Verdict::Skip;
+    auto& stats = PeekStatsNow();
+    ++stats.met_then_unmet;
+    stats.may_skip_unmet += may_skip ? 1 : 0;
+    if (static std::atomic<u32> reported{}; may_skip && reported.fetch_add(1) < 16) {
+        LOG_WARNING(HW_GPU,
+                    "Acquire peek: channel {} semaphore {:#x} (op {}, {:#x}) met in memory "
+                    "({:#x}) but not after the drain ({:#x})",
+                    dma_pusher.channel_state.bind_id, address, operation, value, read.raw,
+                    current);
+    }
 }
 
 } // Anonymous namespace
@@ -80,10 +242,14 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
         return true;
     }
+    const PeekRead peek = PeekBefore(dma_pusher, pending_acquire->address,
+                                     pending_acquire->operation, pending_acquire->value, true);
     // The release may still be queued for the split GPU thread's back half (and the caches
     // ReadSemaphoreWord asks are its state).
     DrainBack(VideoCommon::Nx2Profile::DrainSite::PullerResume);
     const u32 current = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
+    PeekAfter(dma_pusher, peek, pending_acquire->address, pending_acquire->operation,
+              pending_acquire->value, current);
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
         if (static std::atomic<u32> rescued{};
             !pending_acquire->Matches(current) && rescued.fetch_add(1) < 64) {
@@ -232,6 +398,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 VideoCommon::Nx2ModeDiag::Source::PullerLong};
             rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
         });
+        NoteRelease(dma_pusher, sequence_address, payload,
+                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout);
     } else if (g_nx2_ampere) {
         // Switch 2 waits on semaphores the CPU (or another channel) releases, e.g. once it has
         // written the commands this channel runs next: suspend the channel until the value is
@@ -249,8 +417,12 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        const PeekRead peek =
+            PeekBefore(dma_pusher, acquire.address, acquire.operation, acquire.value, false);
         DrainBack(VideoCommon::Nx2Profile::DrainSite::PullerAcquire);
-        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+        const u32 current = ReadSemaphoreWord(dma_pusher, acquire.address);
+        PeekAfter(dma_pusher, peek, acquire.address, acquire.operation, acquire.value, current);
+        if (acquire.Matches(current)) {
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts
@@ -354,6 +526,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
             rasterizer->Query(address, VideoCommon::QueryType::Payload,
                               VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
         });
+        NoteRelease(dma_pusher, address, payload, false);
         return;
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
