@@ -11,6 +11,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_stage_api.h"
 
 namespace VideoCommon {
 
@@ -59,10 +60,14 @@ void ChannelSetupCaches<P>::BindToChannel(s32 id) {
     current_channel_id = it->second;
     channel_state = &channel_storage[current_channel_id];
     maxwell3d = &channel_state->maxwell3d;
+    if (Nx2Stages::ChannelStaged(channel_state->channel)) [[unlikely]] {
+        maxwell3d = &Nx2Stages::EngineFor(channel_state->channel, stage_role);
+    }
     kepler_compute = &channel_state->kepler_compute;
     gpu_memory = &channel_state->gpu_memory;
     program_id = channel_state->program_id;
     current_address_space = gpu_memory->GetID();
+    g_nx2_bound_channel.store(id, std::memory_order_relaxed);
 }
 
 /// Erase channel's channel_state.
@@ -75,6 +80,8 @@ void ChannelSetupCaches<P>::EraseChannel(s32 id) {
     free_channel_ids.push_back(this_id);
     channel_map.erase(it);
     if (this_id == current_channel_id) {
+        s32 bound = id;
+        g_nx2_bound_channel.compare_exchange_strong(bound, -1, std::memory_order_relaxed);
         current_channel_id = UNSET_CHANNEL;
         channel_state = nullptr;
         maxwell3d = nullptr;

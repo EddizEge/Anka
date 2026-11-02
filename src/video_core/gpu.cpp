@@ -36,8 +36,11 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_mode_gov.h"
+#include "video_core/nx2_stage_proxy.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -90,12 +93,12 @@ struct GPU::Impl {
 
     void InitChannel(Control::ChannelState& to_init, u64 program_id) {
         to_init.Init(system, program_id);
-        to_init.BindRasterizer(renderer->ReadRasterizer());
+        VideoCommon::Nx2Stages::BindNewChannel(to_init, *renderer->ReadRasterizer());
         renderer->ReadRasterizer()->InitializeChannel(to_init);
     }
 
     void InitAddressSpace(Tegra::MemoryManager& memory_manager) {
-        memory_manager.BindRasterizer(renderer->ReadRasterizer());
+        VideoCommon::Nx2Stages::BindNewAddressSpace(memory_manager, *renderer->ReadRasterizer());
     }
 
     void ReleaseChannel(Control::ChannelState& to_release) {
@@ -165,12 +168,39 @@ struct GPU::Impl {
                              current_sync_fence.load(std::memory_order_acquire)) {
             return;
         }
+        if (VideoCommon::Nx2Stages::Active()) [[unlikely]] {
+            // Back stages, cut c: on C at a record boundary in a ParkB, else left for one (R2 F4);
+            // nothing for an empty queue, whatever EDEN_NX2_TICK_SKIP says (no ParkB per draw).
+            const bool idle = requested_sync_fence.load(std::memory_order_acquire) ==
+                              current_sync_fence.load(std::memory_order_acquire);
+            if (VideoCommon::Nx2Stages::StageTickWork(idle, [this] { RunSyncRequests(); })) {
+                return;
+            }
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
             sync_request_mutex.unlock();
             request();
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkRequests, 1);
+            current_sync_fence.fetch_add(1, std::memory_order_release);
+            sync_request_mutex.lock();
+            sync_request_cv.notify_all();
+        }
+    }
+
+    /// TickWork's requests, for the back stages (StageTickWork: cut c runs them on C at a record
+    /// boundary, B parked and C caught up with it, so they see B's buffer cache and C's caches
+    /// and scheduler at one point of the stream).
+    void RunSyncRequests() {
+        std::unique_lock lck{sync_request_mutex};
+        while (!sync_requests.empty()) {
+            auto request = std::move(sync_requests.front());
+            sync_requests.pop_front();
+            sync_request_mutex.unlock();
+            request();
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkRequests, 1);
             current_sync_fence.fetch_add(1, std::memory_order_release);
             sync_request_mutex.lock();
             sync_request_cv.notify_all();
@@ -282,6 +312,7 @@ struct GPU::Impl {
                      reads.load(std::memory_order_relaxed));
         }
         const u64 fence = RequestSyncOperation([this, &raster_area]() {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkFlushes, 1);
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
         gpu_thread.TickGPU(is_async);
@@ -295,6 +326,7 @@ struct GPU::Impl {
             VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
             if (!rasterizer->TryCacheInvalidation(addr, size)) {
                 const u64 fence = RequestSyncOperation([rasterizer, addr, size] {
+                    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkFlushes, 1);
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
                     rasterizer->OnCacheInvalidation(addr, size);
                 });
@@ -332,6 +364,7 @@ struct GPU::Impl {
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
              composite_fences = std::move(fences)] {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkComposites, 1);
                 if (num_fences == 0) {
                     renderer->Composite(composite_layers);
                     return;
@@ -474,6 +507,7 @@ void GPU::OnCommandListEnd() {
 
 u64 GPU::RequestFlush(DAddr addr, std::size_t size) {
     return impl->RequestSyncOperation([this, addr, size]() {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkFlushes, 1);
         impl->renderer->ReadRasterizer()->FlushRegion(addr, size);
     });
 }

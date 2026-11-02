@@ -11,6 +11,7 @@
 #include "video_core/engines/engine_upload.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/decoders.h"
 
@@ -77,6 +78,13 @@ void State::ProcessData(std::span<const u8> read_buffer) {
             rasterizer->AccelerateInlineToMemory(dest_line, regs.line_length_in, buffer);
         }
     } else {
+        // Back stages: this writes guest memory around the proxy (nx2_stage_proxy.h); from A it
+        // runs with the stages parked.
+        if (VideoCommon::Nx2Stages::Forwarding()) [[unlikely]] {
+            VideoCommon::Nx2Stages::JoinFromA(VideoCommon::Nx2Stages::JoinReason::Upload,
+                                              [&] { ProcessData(read_buffer); });
+            return;
+        }
         u32 width = regs.dest.width;
         u32 x_elements = regs.line_length_in;
         u32 x_offset = regs.dest.x;

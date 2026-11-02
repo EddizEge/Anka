@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -41,6 +42,9 @@ class MemoryManager;
 
 namespace VideoCommon {
 class GpuSplit;
+namespace Nx2RegReplica {
+class RegCapture;
+}
 }
 
 namespace VideoCore {
@@ -3270,6 +3274,49 @@ public:
 
     DrawManager draw_manager;
 
+    // Back stages (nx2_stage_api.h, EDEN_NX2_BACK_STAGES; T2). A runs the primary Maxwell3D of a
+    // staged channel; the stages below read replicas of it, kept equal with what A sends.
+
+    /// The primary's register capture while its channel is staged (null otherwise and in
+    /// replicas): ProcessDirtyRegisters notes each write in it, after its DrawDeferred (S18).
+    VideoCommon::Nx2RegReplica::RegCapture* stage_capture{};
+    /// The primary's replicas while staged: B's (BC with cut a alone) and C's (cut c).
+    std::array<Maxwell3D*, 2> stage_replicas{};
+    /// The primary's side state (nx2_reg_replica.h, SidePart) as A last sent it.
+    struct StageSent;
+    std::unique_ptr<StageSent> stage_sent;
+    /// Replica, =2: a side state came with a record since the last VerifyReplica (StageApplySide),
+    /// and the light changes the last such draw left in place (DrawTexture does not clear them, a
+    /// draw through PrepareDraw does; K2).
+    bool stage_side_applied{};
+    u32 stage_light_base{};
+
+    /// Replica: becomes a copy of `primary` (registers, dirty flags and tables, state, draw
+    /// manager, light, engine_state, replace_table, execute_on; its macro context and
+    /// native_turing; S18), unarmed, drawing with `rasterizer` (the real one).
+    void StageCopyFrom(Maxwell3D& primary, VideoCore::RasterizerInterface* rasterizer);
+    /// Primary: staged, noting its writes in `capture` (StageChannel); what it holds is what
+    /// `replicas` hold. Unstaged (UnstageChannel): every dirty flag set, light unarmed (S18).
+    void StageBegin(VideoCommon::Nx2RegReplica::RegCapture* capture,
+                    std::array<Maxwell3D*, 2> replicas);
+    void StageEnd();
+    /// Replica: applies delta words (Nx2RegReplica::ApplyDelta), noting light changes as
+    /// ProcessDirtyRegisters does.
+    void StageApplyDelta(const u64* words, u32 count);
+    /// Replica: what ProcessCBMultiData writes on the primary, at `address` (a CbData record):
+    /// IsLightSameWrite, SAME_SKIP, NoteLightWrite, WriteBlockCached; the offset moves on.
+    void StageCbWrite(GPUVAddr address, const u32* data, u32 amount);
+    /// Primary (A): words of the side state parts changed since they were last sent (0: none);
+    /// StageWriteSide writes them (after StageSideWords) and notes them sent.
+    u32 StageSideWords();
+    void StageWriteSide(u64* out);
+    /// Replica: applies a side state (light.rebound ORed in, S2; =2 checks the light changes).
+    void StageApplySide(const u64* words, u32 count);
+    /// Primary, =2 (VerifyReplica, K2): whether `replica` holds its registers and A's light
+    /// changes since the last draw record, and after a side state the side state sent; logs the
+    /// first differences.
+    [[nodiscard]] bool StageVerify(Maxwell3D& replica) const;
+
     GPUVAddr GetMacroAddress(size_t index) const {
         size_t base = 0;
         for (const auto& [addr, count] : macro_segments) {
@@ -3330,21 +3377,7 @@ private:
         }
         light.changes |= kind;
     }
-    void NoteLightWrite(GPUVAddr address, u32 size) {
-        ++light.cb_writes;
-        auto& written = light.written;
-        if (light.written_count != 0 && light.written_count <= written.size()) {
-            auto& [last_address, last_size] = written[light.written_count - 1];
-            if (last_address + last_size == address) {
-                last_size += size;
-                return;
-            }
-        }
-        if (light.written_count < written.size()) {
-            written[light.written_count] = {address, size};
-        }
-        light.written_count = (std::min)(light.written_count + 1, static_cast<u32>(written.size()) + 1);
-    }
+    void NoteLightWrite(GPUVAddr address, u32 size);
     /// Whether a constant buffer write of `data` at `address` changes nothing a draw sees.
     bool IsLightSameWrite(GPUVAddr address, const u32* data, size_t size);
 
@@ -3401,6 +3434,16 @@ private:
 
     /// Handles conditional rendering.
     void ProcessQueryCondition();
+
+    /// ProcessCBMultiData's write at `address` (and StageCbWrite's): light tracking, SAME_SKIP,
+    /// the cached write; the offset moves on.
+    void CbWriteImpl(GPUVAddr address, const u32* start_base, u32 amount);
+
+    // Back stages, the primary on A while staged (T2): the paths the old functions take there.
+    void StageNoteWrite(u32 method, u32 argument);
+    void StageNoteDirect(u32 method, bool note_primary_light);
+    void StageCbForward(const u32* start_base, u32 amount);
+    void StageQueryCondition();
 
     /// Handles counter resets.
     void ProcessCounterReset();

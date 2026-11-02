@@ -19,6 +19,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/renderer_vulkan/nx2_record_list.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -36,6 +37,19 @@ class GraphicsPipeline;
 class StateTracker;
 
 struct QueryCacheParams;
+
+/// What B's recorded commands run with on the Vulkan worker (Scheduler::Replay).
+struct RecordContext {
+    vk::CommandBuffer cmdbuf;
+    vk::CommandBuffer upload_cmdbuf;
+};
+
+/// Cut c (Kesim-2): B's Vulkan commands for one packet to C (DrawToC::records), in order, with
+/// the outside render pass requests between them; it lives in B's arena until the worker ran it.
+class RecordList final : public Nx2Record::List<RecordContext> {
+public:
+    using List::List;
+};
 
 /// The scheduler abstracts command buffer and fence management with an interface that's able to do
 /// OpenGL-like operations on Vulkan command buffers.
@@ -92,7 +106,9 @@ public:
 
     /// Assigns the query cache.
     void SetQueryCache(VideoCommon::QueryCacheBase<QueryCacheParams>& query_cache_) {
-        query_cache = &query_cache_;
+        // addressof: the query cache's type may be incomplete here (vk_query_cache.h includes
+        // vk_buffer_cache.h, which includes this, before it defines QueryCacheParams).
+        query_cache = std::addressof(query_cache_);
     }
 
     // Registers a callback to perform on queue submission.
@@ -199,6 +215,38 @@ public:
     /// Returns the master timeline semaphore.
     [[nodiscard]] MasterSemaphore& GetMasterSemaphore() const noexcept {
         return *master_semaphore;
+    }
+
+    /// Cut c, C: records B's list for the packet of `seq` (DrawToC::seq and records) where the
+    /// packet sits in the stream: each outside render pass mark as
+    /// RequestOutsideRenderPassOperationContext, each run of commands between marks as one
+    /// RecordWithUploadBuffer (the upload command buffer's order kept). The worker frees the
+    /// list's arena memory once it ran the last run. It notes no tick: NoteSeqTick does.
+    void Replay(RecordList& list, u64 seq);
+
+    /// Cut c, C: everything B stamped with `seq` (and the seqs before it) went into the current
+    /// tick. Once per packet, after its last command (the draw): noting it before a submit that
+    /// comes ahead of the draw would let B reuse what the draw reads too early. Seqs are u64 and
+    /// never wrap (DrawToC::seq, K5).
+    void NoteSeqTick(u64 seq);
+
+    /// The last seq C noted (0: none): C is done with `seq` once CDoneSeq() >= seq. Any thread.
+    [[nodiscard]] u64 CDoneSeq() const noexcept {
+        return seq_ticks.DoneSeq();
+    }
+
+    /// The tick `seq` (at most CDoneSeq) went into, or a later one. Any thread.
+    [[nodiscard]] u64 TickOfSeq(u64 seq) const noexcept {
+        return seq_ticks.TickOf(seq);
+    }
+
+    /// Whether what B stamped with `seq` is done: C recorded it, the GPU passed its tick.
+    [[nodiscard]] bool IsSeqFree(u64 seq) const noexcept {
+        return seq_ticks.IsFree(seq, master_semaphore->KnownGpuTick());
+    }
+
+    [[nodiscard]] Nx2Record::SeqTicks& TickHandover() noexcept {
+        return seq_ticks;
     }
 
     std::mutex submit_mutex;
@@ -368,6 +416,57 @@ private:
     double last_target_fps{};
     u64 max_frame_count{};
     u64 frame_counter{};
+
+    Nx2Record::SeqTicks seq_ticks; ///< Cut c's tick handover (C notes, B reads)
 };
+
+/// Where the buffer runtime's commands go (§3.6/1): the scheduler, or with cut c on B, B's record
+/// list for C to replay. With the stages off the list is null and nothing else changes.
+struct RecordTarget {
+    Scheduler* scheduler;
+    RecordList* list; ///< Null: straight to the scheduler (stages off, cut a, joins)
+
+    template <typename T>
+        requires std::is_invocable_v<T, vk::CommandBuffer>
+    void Record(T&& command);
+
+    template <typename T>
+        requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
+    void RecordWithUploadBuffer(T&& command);
+
+    void RequestOutsideRenderPassOperationContext();
+};
+
+template <typename T>
+    requires std::is_invocable_v<T, vk::CommandBuffer>
+void RecordTarget::Record(T&& command) {
+    if (list == nullptr) {
+        scheduler->Record(std::forward<T>(command));
+        return;
+    }
+    list->Record([command = std::forward<T>(command)](RecordContext& context) {
+        command(context.cmdbuf);
+    });
+}
+
+template <typename T>
+    requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
+void RecordTarget::RecordWithUploadBuffer(T&& command) {
+    if (list == nullptr) {
+        scheduler->RecordWithUploadBuffer(std::forward<T>(command));
+        return;
+    }
+    list->Record([command = std::forward<T>(command)](RecordContext& context) {
+        command(context.cmdbuf, context.upload_cmdbuf);
+    });
+}
+
+inline void RecordTarget::RequestOutsideRenderPassOperationContext() {
+    if (list == nullptr) {
+        scheduler->RequestOutsideRenderPassOperationContext();
+        return;
+    }
+    list->MarkOutsideRenderPass();
+}
 
 } // namespace Vulkan

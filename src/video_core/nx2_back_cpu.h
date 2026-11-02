@@ -107,6 +107,10 @@ inline std::array<u8, 64> g_core_of = [] {
 inline std::atomic<u32> g_front_cpu{~0U};
 /// Set by the back once pinned; read by the front after the back thread ended (Stop).
 inline bool g_pinned{};
+/// Back stages (StartFront): the core (CoreIndex, group 0) the front has to itself, 0xff: none;
+/// set before the back (stage B) starts and pins, which keeps the process's threads off it too.
+inline u8 g_front_core{0xff};
+inline DWORD g_front_thread{};
 
 struct Placement {
     std::array<u32, 64> back{};
@@ -172,7 +176,7 @@ inline void StartBack() {
                 logicals += ' ';
             }
             logicals += std::to_string(u32{set.logical});
-        } else {
+        } else if (set.group != 0 || set.core != g_front_core) {
             other_ids.push_back(set.id);
         }
     }
@@ -196,11 +200,79 @@ inline void StartBack() {
              u32{core}, logicals, other_ids.size());
 }
 
+/// Back stages (EDEN_NX2_BACK_STAGES), the front, before stage B starts (Nx2Stages::Start),
+/// modes 1 and 2: the front (the GPU thread, which waits for the stages in Drain) runs on a core
+/// of its own as well (S19), the next one after the back's (EDEN_NX2_FRONT_CORE=<n> picks it by
+/// CoreIndex); StartBack then keeps the process's other threads off both.
+inline void StartFront() {
+    if (Mode() != 1 && Mode() != 2) {
+        return;
+    }
+    const std::vector<CpuSet> sets = ReadCpuSets();
+    std::vector<BYTE> cores;
+    for (const CpuSet& set : sets) {
+        if (set.group == 0 && std::find(cores.begin(), cores.end(), set.core) == cores.end()) {
+            cores.push_back(set.core);
+        }
+    }
+    std::sort(cores.begin(), cores.end());
+    if (cores.size() < 6) {
+        LOG_INFO(HW_GPU, "GPU back stages: the front is not pinned ({} cores)", cores.size());
+        return;
+    }
+    // The back's core as StartBack picks it.
+    BYTE back = cores[1];
+    if (const char* value = std::getenv("EDEN_NX2_BACK_CORE"); value != nullptr) {
+        char* end = nullptr;
+        const unsigned long wanted = std::strtoul(value, &end, 10);
+        if (end != value &&
+            std::find(cores.begin(), cores.end(), static_cast<BYTE>(wanted)) != cores.end()) {
+            back = static_cast<BYTE>(wanted);
+        }
+    }
+    BYTE front = cores[1] != back ? cores[1] : cores[2];
+    if (const char* value = std::getenv("EDEN_NX2_FRONT_CORE"); value != nullptr) {
+        char* end = nullptr;
+        const unsigned long wanted = std::strtoul(value, &end, 10);
+        if (end != value && wanted != back &&
+            std::find(cores.begin(), cores.end(), static_cast<BYTE>(wanted)) != cores.end()) {
+            front = static_cast<BYTE>(wanted);
+        } else {
+            LOG_WARNING(HW_GPU,
+                        "EDEN_NX2_FRONT_CORE={}: no such core or the back's, the front "
+                        "takes core {}",
+                        value, u32{front});
+        }
+    }
+    std::vector<ULONG> front_ids;
+    for (const CpuSet& set : sets) {
+        if (set.group == 0 && set.core == front) {
+            front_ids.push_back(set.id);
+        }
+    }
+    if (!SetThreadSelectedCpuSets(GetCurrentThread(), front_ids.data(),
+                                  static_cast<ULONG>(front_ids.size()))) {
+        LOG_WARNING(HW_GPU, "GPU back stages: the front's CPU Sets were refused (error {})",
+                    GetLastError());
+        return;
+    }
+    g_front_core = front;
+    g_front_thread = GetCurrentThreadId();
+    LOG_INFO(HW_GPU, "GPU back stages: the front runs on core {}", u32{front});
+}
+
 /// Front, once the back thread ended (GpuSplit::Stop): every core is the process's again.
 inline void StopBack() {
     if (g_pinned) {
         SetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0);
         g_pinned = false;
+    }
+    if (g_front_core != 0xff) {
+        // At shutdown the front thread already ended.
+        if (GetCurrentThreadId() == g_front_thread) {
+            SetThreadSelectedCpuSets(GetCurrentThread(), nullptr, 0);
+        }
+        g_front_core = 0xff;
     }
 }
 
@@ -262,6 +334,7 @@ inline void NoteBack() {
 #else
 
 inline void StartBack() {}
+inline void StartFront() {}
 inline void StopBack() {}
 inline void NoteFront() {}
 inline void NoteBack() {}

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/nx2_stages.h"
 
 namespace Tegra {
 
@@ -39,6 +41,8 @@ public:
     ChannelInfo(const ChannelInfo& state) = delete;
     ChannelInfo& operator=(const ChannelInfo&) = delete;
 
+    /// The channel (back stages: BindToChannel takes the Maxwell3D of its role, EngineFor).
+    Tegra::Control::ChannelState& channel;
     Tegra::Engines::Maxwell3D& maxwell3d;
     Tegra::Engines::KeplerCompute& kepler_compute;
     Tegra::MemoryManager& gpu_memory;
@@ -60,6 +64,13 @@ public:
     /// Erase channel's state.
     void EraseChannel(s32 id);
 
+    /// Back stages: the replica this cache reads while its channel is staged
+    /// (Nx2Stages::EngineFor; Record unless set: K1 sets none, K2 sets Memory for the buffer and
+    /// pipeline caches, T7). Takes effect at the next BindToChannel.
+    void SetStageRole(Nx2Stages::Role role) {
+        stage_role = role;
+    }
+
     Tegra::MemoryManager* GetFromID(size_t id) const {
         std::unique_lock<std::mutex> lk(config_mutex);
         const auto ref = address_spaces.find(id);
@@ -79,6 +90,7 @@ protected:
     static constexpr size_t UNSET_CHANNEL{(std::numeric_limits<size_t>::max)()};
 
     P* channel_state = nullptr;
+    Nx2Stages::Role stage_role{Nx2Stages::Role::Record};
     size_t current_channel_id{UNSET_CHANNEL};
     size_t current_address_space{};
     Tegra::Engines::Maxwell3D* maxwell3d{};
@@ -100,5 +112,10 @@ protected:
 
     virtual void OnGPUASRegister([[maybe_unused]] size_t map_id) {}
 };
+
+/// Back stages (nx2_stage_api.cpp): the bind id of the channel the caches were bound to last
+/// (ChannelSetupCaches<P>::BindToChannel; -1: none). StageChannel and UnstageChannel bind it
+/// again, the caches taking their Maxwell3D at BindToChannel.
+inline std::atomic<s32> g_nx2_bound_channel{-1};
 
 } // namespace VideoCommon

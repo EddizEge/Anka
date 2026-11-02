@@ -18,6 +18,7 @@
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
@@ -26,6 +27,19 @@
 #include "video_core/texture_cache/util.h"
 
 namespace Tegra {
+namespace {
+// EDEN_NX2_STAGE_CHECK: the paths below reach the rasterizer's caches (through the proxy from A,
+// nx2_stage_proxy.h), which belong to the stages below A. From A they must run inside a join
+// (JoinFromA); outside one (Forwarding) they are reported as a call off B's thread and counted
+// (Counter::StageViolations). CPU threads, the front and A inside a join are not reported. Off
+// the stages: one thread-local byte compared (Forwarding is false off A).
+void CheckNotForwarding(const char* where) {
+    if (VideoCommon::Nx2Stages::Forwarding() && VideoCommon::Nx2Stages::Get().check) [[unlikely]] {
+        VideoCommon::Nx2Stages::CheckStage(VideoCommon::Nx2Stages::Stage::B, where);
+    }
+}
+} // Anonymous namespace
+
 bool MemoryManager::IsShuttingDown() const {
     return system.IsShuttingDown();
 }
@@ -197,7 +211,11 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
         remaining_size -= page_size;
     }
     flush_modified();
-    kind_map.Map(gpu_addr, gpu_addr + size, kind);
+    {
+        // As BigPageTableOp: GetPageKind and GetMemoryLayoutSize read the map from other threads.
+        std::unique_lock<std::mutex> lock(guard);
+        kind_map.Map(gpu_addr, gpu_addr + size, kind);
+    }
     mapping_epoch.fetch_add(1, std::memory_order_release);
     return gpu_addr;
 }
@@ -527,6 +545,7 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
 }
 
 void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::ReadBlock");
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
 }
 
@@ -634,6 +653,7 @@ bool MemoryManager::WriteSmall(GPUVAddr gpu_dest_addr, const void* src_buffer, s
 }
 
 void MemoryManager::WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which) {
+    CheckNotForwarding("MemoryManager::WriteBlock");
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, which, false);
 }
 
@@ -669,6 +689,7 @@ void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buf
 
 void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
                                 VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::FlushRegion");
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
                           [[maybe_unused]] std::size_t copy_amount) {};
@@ -690,6 +711,8 @@ void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
 
 bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
                                   VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::IsMemoryDirty");
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::MemoryDirtyQueries, 1);
     bool result = false;
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
@@ -764,6 +787,7 @@ size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr, size_t max_size) co
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,
                                      VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::InvalidateRegion");
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
                           [[maybe_unused]] std::size_t copy_amount) {};
@@ -959,11 +983,17 @@ void MemoryManager::ReviewSkippedWrites() {
     // counter moved since the first skip, every skipped write is invalidated as if it had been
     // made: what happened before. Otherwise only those on pages written around the caches since.
     // Each counts as a cached write that is no same write, so no light draw follows it.
+    // Back stages, cut c (S12): on B, WorkEpoch is B's copy of the light epoch (C's events pass
+    // B first and move it there), and what C writes around the caches since (query results,
+    // images) only C's page summary knows: B's HoldsGpuWrittenData reads it (T8).
     const bool work = rasterizer->WorkEpoch() != skipped_epoch ||
                       Tegra::g_nx2_flushes.load(std::memory_order_relaxed) != skipped_flushes;
+    const bool stage_b = VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B) &&
+                         VideoCommon::Nx2Stages::Get().cut_c;
     for (u32 i = 0; i < skipped_count; ++i) {
         const SkippedWrite& write = skipped_writes[i];
-        if (work || Tegra::Nx2UntrackedWritten(write.device_addr, write.size)) {
+        if (work || Tegra::Nx2UntrackedWritten(write.device_addr, write.size) ||
+            (stage_b && rasterizer->HoldsGpuWrittenData(write.device_addr, write.size))) {
             ++cached_writes;
             accumulator.Add(write.gpu_addr, write.size);
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesInvalidatedLater, 1);

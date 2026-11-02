@@ -438,6 +438,19 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectCount();
 
+    /// The vertex streams BindHostVertexBuffers binds (a non-null binding of non-zero size): back
+    /// stages, cut c, the geometry mirror's live streams (DrawToC::vertex_live).
+    [[nodiscard]] u32 EnabledVertexBuffersMask() const noexcept {
+        return enabled_vertex_buffers_mask;
+    }
+
+    /// Back stages, cut c (geo-markusage-1): marks every enabled vertex stream's range used, for
+    /// each draw packet of B's. BindHostVertexBuffers marks only the streams it binds again (dirty
+    /// ones); B does not see the command buffer C records into, so a stream bound in an older one
+    /// would go unmarked there once TickFrame reset its buffer's marks, and an upload to it could
+    /// be moved ahead of the draws that read it (CanReorderUpload).
+    void MarkVertexStreamsUsed();
+
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
     template <typename Func>

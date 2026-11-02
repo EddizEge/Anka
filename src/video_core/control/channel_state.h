@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include "common/common_types.h"
@@ -58,6 +59,12 @@ struct ChannelState {
     };
     std::optional<Payload> payload;
     MemoryManager* memory_manager = nullptr;
+
+    /// Back stages (nx2_stage_api.h; T2): whether the channel is staged (any thread, acquire),
+    /// and its Maxwell3D replicas while it is: B's (BC with cut a alone) and C's (cut c).
+    std::atomic<bool> stage_staged{};
+    std::unique_ptr<Engines::Maxwell3D> stage_replica_b;
+    std::unique_ptr<Engines::Maxwell3D> stage_replica_c;
 
     s32 bind_id = -1;
     u64 program_id = 0;

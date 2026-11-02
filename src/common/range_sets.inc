@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstdlib>
 #include <limits>
+#include <new>
+#include <optional>
 #include <utility>
 
 #include <boost/icl/interval.hpp>
@@ -13,18 +16,111 @@
 #include <boost/icl/interval_set.hpp>
 #include <boost/icl/split_interval_map.hpp>
 #include <boost/pool/pool.hpp>
-#include <boost/pool/pool_alloc.hpp>
 #include <boost/pool/poolfwd.hpp>
 
 #include "common/range_sets.h"
 
 namespace Common {
 
+// The nodes of each set come from a pool of its own (it was one fast_pool_allocator for the whole
+// process, behind one std::mutex every set's node allocation and free took, from any thread).
+// A set is used by one thread at a time (its owner's lock: the buffer cache's mutex, the heap
+// mapper's), so its pool, used only with the set, needs no lock. The pool lives and dies with the
+// set (declared before it in the Impl, freed after it); its memory goes back when the set does.
+namespace RangeSetsDetail {
+class NodePool {
+public:
+    void* Allocate(std::size_t bytes) {
+        for (auto& slot : slots) {
+            if (slot.bytes == 0) {
+                slot.bytes = bytes;
+                slot.pool.emplace(bytes, FirstChunks, MaxChunks);
+            }
+            if (slot.bytes == bytes) {
+                if (void* const chunk = slot.pool->malloc()) {
+                    return chunk;
+                }
+                throw std::bad_alloc{};
+            }
+        }
+        return ::operator new(bytes);
+    }
+
+    void Deallocate(void* chunk, std::size_t bytes) noexcept {
+        for (auto& slot : slots) {
+            if (slot.bytes == bytes) {
+                slot.pool->free(chunk);
+                return;
+            }
+        }
+        ::operator delete(chunk);
+    }
+
+private:
+    // Chunks of the first block, and the most of a later one (a block doubles until then).
+    static constexpr std::size_t FirstChunks = 32;
+    static constexpr std::size_t MaxChunks = 2048;
+
+    // The tree's nodes (and, in debug builds, the container's proxy): one size each.
+    struct Slot {
+        std::size_t bytes{};
+        std::optional<boost::pool<boost::default_user_allocator_new_delete>> pool;
+    };
+    std::array<Slot, 2> slots{};
+};
+
+/// The pool a set made by MakeOnPool takes (its allocator is default constructed in the
+/// container's constructor: Boost.ICL passes it no allocator).
+inline thread_local NodePool* t_constructing{};
+
+template <class T>
+class Allocator {
+public:
+    using value_type = T;
+
+    Allocator() noexcept : pool{t_constructing} {}
+    template <class U>
+    Allocator(const Allocator<U>& other) noexcept : pool{other.pool} {}
+
+    T* allocate(std::size_t count) {
+        if (count == 1 && pool != nullptr) {
+            return static_cast<T*>(pool->Allocate(sizeof(T)));
+        }
+        return static_cast<T*>(::operator new(count * sizeof(T)));
+    }
+
+    void deallocate(T* pointer, std::size_t count) noexcept {
+        if (count == 1 && pool != nullptr) {
+            pool->Deallocate(pointer, sizeof(T));
+        } else {
+            ::operator delete(pointer);
+        }
+    }
+
+    template <class U>
+    bool operator==(const Allocator<U>& other) const noexcept {
+        return pool == other.pool;
+    }
+
+    NodePool* pool;
+};
+
+/// A container whose allocator (and every allocator rebound from it) allocates from `pool`.
+template <typename Container>
+Container MakeOnPool(NodePool& pool) {
+    struct Binding {
+        NodePool* previous;
+        ~Binding() {
+            t_constructing = previous;
+        }
+    } const binding{std::exchange(t_constructing, &pool)};
+    return Container{};
+}
+} // namespace RangeSetsDetail
+
 namespace {
 template <class T>
-using RangeSetsAllocator =
-    boost::fast_pool_allocator<T, boost::default_user_allocator_new_delete,
-                               boost::details::pool::default_mutex, 1024, 2048>;
+using RangeSetsAllocator = RangeSetsDetail::Allocator<T>;
 
 /// EDEN_NX2_RANGE_SKIP=0: RangeSet::Add always inserts, as before. Read once (not a
 /// function-local static: Add runs several times per draw).
@@ -106,7 +202,8 @@ struct RangeSet<AddressType>::RangeSetImpl {
         }
     }
 
-    IntervalSet m_ranges_set;
+    RangeSetsDetail::NodePool m_pool; ///< Before the set: freed after it
+    IntervalSet m_ranges_set = RangeSetsDetail::MakeOnPool<IntervalSet>(m_pool);
 };
 
 template <typename AddressType>
@@ -196,7 +293,8 @@ struct OverlapRangeSet<AddressType>::OverlapRangeSetImpl {
         }
     }
 
-    IntervalSet m_split_ranges_set;
+    RangeSetsDetail::NodePool m_pool; ///< Before the set: freed after it
+    IntervalSet m_split_ranges_set = RangeSetsDetail::MakeOnPool<IntervalSet>(m_pool);
 };
 
 template <typename AddressType>
@@ -207,15 +305,21 @@ RangeSet<AddressType>::RangeSet() {
 template <typename AddressType>
 RangeSet<AddressType>::~RangeSet() = default;
 
+// A move takes the other's Impl whole (its nodes are its pool's) and leaves it an empty one, as
+// moving the set left it empty.
 template <typename AddressType>
 RangeSet<AddressType>::RangeSet(RangeSet&& other) {
-    m_impl = std::make_unique<RangeSet<AddressType>::RangeSetImpl>();
-    m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+    m_impl = std::move(other.m_impl);
+    other.m_impl = std::make_unique<RangeSet<AddressType>::RangeSetImpl>();
 }
 
 template <typename AddressType>
 RangeSet<AddressType>& RangeSet<AddressType>::operator=(RangeSet&& other) {
-    m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+    if (this != &other) {
+        m_impl = std::move(other.m_impl);
+        other.m_impl = std::make_unique<RangeSet<AddressType>::RangeSetImpl>();
+    }
+    return *this;
 }
 
 template <typename AddressType>
@@ -273,13 +377,17 @@ OverlapRangeSet<AddressType>::~OverlapRangeSet() = default;
 
 template <typename AddressType>
 OverlapRangeSet<AddressType>::OverlapRangeSet(OverlapRangeSet&& other) {
-    m_impl = std::make_unique<OverlapRangeSet<AddressType>::OverlapRangeSetImpl>();
-    m_impl->m_split_ranges_set = std::move(other.m_impl->m_split_ranges_set);
+    m_impl = std::move(other.m_impl);
+    other.m_impl = std::make_unique<OverlapRangeSet<AddressType>::OverlapRangeSetImpl>();
 }
 
 template <typename AddressType>
 OverlapRangeSet<AddressType>& OverlapRangeSet<AddressType>::operator=(OverlapRangeSet&& other) {
-    m_impl->m_split_ranges_set = std::move(other.m_impl->m_split_ranges_set);
+    if (this != &other) {
+        m_impl = std::move(other.m_impl);
+        other.m_impl = std::make_unique<OverlapRangeSet<AddressType>::OverlapRangeSetImpl>();
+    }
+    return *this;
 }
 
 template <typename AddressType>

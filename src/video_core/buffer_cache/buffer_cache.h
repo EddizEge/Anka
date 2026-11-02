@@ -985,6 +985,18 @@ void BufferCache<P>::CommitVertexStreamNote() {
 }
 
 template <class P>
+void BufferCache<P>::MarkVertexStreamsUsed() {
+    for (u32 mask = enabled_vertex_buffers_mask; mask != 0; mask &= mask - 1) {
+        const Binding& binding = v_buffer[std::countr_zero(mask)];
+        if (binding.buffer_id == NULL_BUFFER_ID) {
+            continue;
+        }
+        Buffer& buffer = slot_buffers[binding.buffer_id];
+        buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+    }
+}
+
+template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
 
 #ifdef __ANDROID__

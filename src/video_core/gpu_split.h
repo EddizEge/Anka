@@ -21,7 +21,19 @@ namespace Tegra::Engines {
 class EngineInterface;
 }
 
+namespace VideoCommon::Nx2Stages {
+enum class JoinReason : u8;
+}
+
 namespace VideoCommon {
+
+/// Where a deferred call runs with the back stages on (EDEN_NX2_BACK_STAGES, nx2_stages.h): bits
+/// 4-5 of its Call entry, which the unstaged back (GpuSplit::Execute) ignores.
+enum class DeferTarget : u8 {
+    Owner = 0, ///< The stage owning the caches (K1: BC), forwarded in the stream's order
+    OnA = 1,   ///< A: register and draw manager work (FinishFrontMacro, IndirectDrawCall)
+    Join = 2,  ///< A, the stages below parked (RunCommand, a channel to stage, ...)
+};
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
 // CPU's commands, parses command lists and runs the puller; engine method calls and everything
@@ -93,18 +105,33 @@ public:
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     template <typename Func>
     void Defer(const Func& func) {
+        DeferTo<DeferTarget::Owner>(func);
+    }
+    /// Defer, on `Target`'s stage when the back stages run.
+    template <DeferTarget Target, typename Func>
+    void DeferTo(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = ReserveEntry(2 + payload);
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] = static_cast<u64>(Kind::Call) | TargetBits(Target) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
     }
     void DeferFunction(std::function<void()>&& func);
+    /// DeferFunction on `Target`'s stage.
+    template <DeferTarget Target>
+    void DeferFunctionTo(std::function<void()>&& func) {
+        auto* const heap = new std::function<void()>(std::move(func));
+        DeferTo<Target>([heap] {
+            (*heap)();
+            delete heap;
+        });
+    }
 
     /// Defer, returning where the copy of `func` went. Until Published(start) the back cannot
-    /// see it: the front may still change the copy, e.g. merge a following draw into it.
+    /// see it: the front may still change the copy, e.g. merge a following draw into it. Runs on
+    /// A with the back stages (its users are register and draw manager work).
     template <typename Func>
     u64* DeferEditable(const Func& func, u64& start) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
@@ -112,7 +139,8 @@ public:
         u64* const entry = ReserveEntry(2 + payload);
         // After a skip to the ring's start (ReserveSlow) too, the entry is at write_position.
         start = write_position;
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] =
+            static_cast<u64>(Kind::Call) | TargetBits(DeferTarget::OnA) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
@@ -147,6 +175,14 @@ public:
         return consumed.load(std::memory_order_seq_cst) == published.load(std::memory_order_seq_cst);
     }
 
+    /// Back stages (nx2_stages.h), the last stage at a Mark: the back ran ring 1 up to
+    /// `position` (D1; Drain, WaitForSpace and BackCaughtUp read it as from BackLoop).
+    /// `caught_up`: A had run everything published then (the busy clock's BackStored).
+    void StageConsumed(u64 position, bool caught_up);
+    /// Back stages, =3 (ExecA): B runs `words` words of ring 1 from `position` as BackLoop did,
+    /// handing ring space back every 4096 words (B is the last stage).
+    void StageExecute(u64 position, u64 words);
+
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
@@ -160,6 +196,13 @@ private:
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
+    /// Call: bits 4-5 the DeferTarget.
+    static constexpr u64 TargetBits(DeferTarget target) {
+        return static_cast<u64>(target) << 4;
+    }
+    static constexpr DeferTarget CallTarget(u64 head) {
+        return static_cast<DeferTarget>((head >> 4) & 3);
+    }
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;
@@ -231,6 +274,20 @@ private:
     void BackLoop(std::stop_token stop_token);
     /// Runs the entry; `published_left`: words published from it on. Returns its size.
     size_t Execute(const u64* entry, u64 published_left);
+
+    /// Back stages (nx2_stages.h): BackLoop as stage A. Runs the engines' entries against the
+    /// primary registers, sends ring 1's Call entries to their stage (DeferTarget), marks how far
+    /// it ran (PostMark) instead of storing `consumed`; =3: only sends ring 1's ranges (ExecA).
+    void RunStagedBack(std::stop_token stop_token);
+    /// Execute on A: a Call entry runs by its DeferTarget (OnA here; Join in a join; Owner
+    /// forwarded to B); the rest as Execute.
+    size_t ExecuteStagedA(const u64* entry, u64 published_left);
+    /// Whether A runs the entry in a join, and why: an executable method of an engine whose
+    /// methods do not run on A (stage_methods_on_a false), or a Call entry tagged Join.
+    bool StagedJoinStarts(const u64* entry, Nx2Stages::JoinReason& reason);
+    /// In such a join, whether the next entry joins it too: an entry of an engine whose methods do
+    /// not run on A (or a switch to one), a Call entry tagged Join (S9/2).
+    bool StagedJoinContinues(const u64* entry) const;
 
     Core::System* system{};
     bool active{};
