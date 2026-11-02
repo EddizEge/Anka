@@ -1124,7 +1124,7 @@ private:
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
-        if (!m_once_events.empty()) {
+        if (m_once_waiting) {
             SignalOnceEvents();
         }
         if (NotifyOpenMode() == 2 && m_presents == 1) {
@@ -2440,18 +2440,34 @@ private:
         return modes;
     }
 
-    // EDEN_NX2_VI2_KIND_EVENTS: the "once" events still to signal at the next present, and kinds.
-    std::vector<std::pair<Kernel::KEvent*, u32>> m_once_events;
+    // EDEN_NX2_VI2_KIND_EVENTS: a "once" event waits for the next present (VsyncState::Event).
+    bool m_once_waiting{};
+
+    // A thread waiting on a "once" event before the first present would wait for ever: a vblank
+    // signals it if no present came this long after the 31 call.
+    static constexpr s64 OnceFallbackNs = 1'000'000'000;
 
     void SignalOnceEvents() {
-        for (const auto& [event, kind] : m_once_events) {
+        m_once_waiting = false;
+        std::vector<std::pair<Kernel::KEvent*, u32>> due;
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            for (auto& tracked : m_vsync->events) {
+                if (tracked.once_pending) {
+                    tracked.once_pending = false;
+                    --m_vsync->once_pending;
+                    due.emplace_back(tracked.event, tracked.kind);
+                }
+            }
+        }
+        // Signalled without the vsync mutex: this is a guest thread (see StartVrrVsync).
+        for (const auto& [event, kind] : due) {
             event->Signal(system.Kernel());
             DiagSignalled(event);
             LOG_INFO(Service, "nx2:vi2 present #{}: signalled 31's kind {} event once "
                               "(EDEN_NX2_VI2_KIND_EVENTS)",
                      m_presents, kind);
         }
-        m_once_events.clear();
     }
 
     // EDEN_NX2_VRR_VSYNC=1 (off by default; "<max Hz>:<min Hz>", 1 = 120:40): the vsync events
@@ -2568,14 +2584,18 @@ private:
             LOG_INFO(Service, "nx2:vi2 31 kind {}: {} (EDEN_NX2_VI2_KIND_EVENTS)", kind,
                      Nx2Vi2Events::ModeName(mode));
         }
-        if (mode == Nx2Vi2Events::KindMode::Once) {
-            m_once_events.emplace_back(event, kind);
-        }
         {
             std::scoped_lock lk{m_vsync->mutex};
             auto& tracked = m_vsync->events.emplace_back();
             tracked.event = event;
             tracked.on_vsync = mode == Nx2Vi2Events::KindMode::Vsync;
+            if (mode == Nx2Vi2Events::KindMode::Once) {
+                tracked.kind = kind;
+                tracked.once_pending = true;
+                tracked.once_deadline = system.CoreTiming().GetGlobalTimeNs().count() + OnceFallbackNs;
+                ++m_vsync->once_pending;
+                m_once_waiting = true;
+            }
             if (Vi2DiagEnabled()) {
                 tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
                 tracked.calls_slot = Kernel::Nx2EventDiag::Track(&event->GetReadableEvent());
@@ -2625,6 +2645,11 @@ private:
             bool was_signalled{}; // after the previous vblank
             bool handing_over{};  // 21 is clearing it
             int calls_slot{-1};   // Kernel::Nx2EventDiag: the guest's polls, waits and resets
+            // EDEN_NX2_VI2_KIND_EVENTS "once": 31's kind, waiting for the next present (or the
+            // first vblank after once_deadline, CoreTiming ns)
+            u32 kind{};
+            bool once_pending{};
+            s64 once_deadline{};
             u32 signalled{};
             u32 cleared{};       // by the guest: signalled at one vblank, not at the next
             u32 handed_over{};   // 21 (GetNotifications) cleared it
@@ -2634,6 +2659,7 @@ private:
         std::mutex mutex;
         std::vector<Event> events;
         std::atomic<u32> ticks{}; // vblanks signalled (EDEN_NX2_PRESENT_DIAG)
+        u32 once_pending{};       // events with once_pending set
         // EDEN_NX2_VI2_DIAG summary
         s64 diag_since{-1}; // CoreTiming ns
         u32 diag_ticks{};
@@ -2658,8 +2684,31 @@ private:
                 tracked.event->Signal(system.Kernel());
             }
         }
+        if (state.once_pending != 0) {
+            OnceFallbackLocked(state, system);
+        }
         if (Vi2DiagEnabled()) {
             DiagAfterVblank(state, system);
+        }
+    }
+
+    // At a vblank, under state.mutex: the "once" events no present signalled in time.
+    static void OnceFallbackLocked(VsyncState& state, Core::System& system) {
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        for (auto& tracked : state.events) {
+            if (!tracked.once_pending || now < tracked.once_deadline) {
+                continue;
+            }
+            tracked.once_pending = false;
+            --state.once_pending;
+            tracked.event->Signal(system.Kernel());
+            if (Vi2DiagEnabled()) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+            LOG_INFO(Service, "nx2:vi2 31's kind {} event signalled once at a vblank: no present "
+                              "within {} ms of the 31 call (EDEN_NX2_VI2_KIND_EVENTS)",
+                     tracked.kind, OnceFallbackNs / 1'000'000);
         }
     }
 
