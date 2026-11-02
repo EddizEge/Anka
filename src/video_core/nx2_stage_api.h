@@ -85,9 +85,22 @@ void WriteSideState(Tegra::Engines::Maxwell3D& primary, u64* out);
 /// Consumer: applies a side state to the replica (S2: ORs light.rebound in).
 void ApplySideState(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count);
 
-/// =2 (T1 calls it after a record while the producer waits): compares `stage`'s replica with the
-/// primary (registers, cb binds, draw_state, engine_state, replace_table; light: rebound, armed,
-/// same_writes, cb_writes and changes, S2); logs the first 16 differences, counts the rest
+/// =2 (T1 calls it on the consumer after a record it compares, EDEN_NX2_BACK_STAGES_EVERY, while
+/// the producer waits): compares `stage`'s replica of `primary` (the current target) with it as
+/// far as the two are kept equal (K2):
+/// - After every compared record: the registers (memcmp; T2 lists the exceptions with reasons),
+///   and light.changes with A's shadow of it (what A noted since the last draw record it sent)
+///   without UniformSame and UniformData: cb data writes note those on the replica alone
+///   (StageCbWrite).
+/// - After a record that carried side state (ApplySideState notes it for T2): the side state
+///   parts (cb binds, draw_state with its inline index data, indirect_state, draw_texture_state,
+///   engine_state, replace_table, execute_on). They go only with draws (D4): after any other
+///   record they may differ. And none of A's light.rebound bits may be left unsent (S2); the
+///   replica's own bits are not compared, the rasterizer clearing them runs on the stage.
+/// - Never: light.armed, same_writes, same_device, cb_writes, written, first_blocking and
+///   first_blocking_uniform. The stage's rasterizer and StageCbWrite make them on the replica
+///   alone; the primary has none to compare (=4, the single threaded split path, would).
+/// Counts the checks (Counter::VerifyChecks), logs the first 16 differences, counts the rest
 /// (Counter::VerifyMismatches). Returns whether they matched.
 bool VerifyReplica(Tegra::Engines::Maxwell3D& primary, Stage stage);
 

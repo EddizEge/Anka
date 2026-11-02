@@ -158,10 +158,12 @@ private:
 
 /// A: the stages below run everything sent before this point and park (B writes a Join to ring
 /// 3 and waits for C's park with cut c); then `op` runs on A with every cache, the scheduler and
-/// the replicas (equal to the primaries there), A being the record owner (InJoin, RecordOwner,
-/// CheckOwner); then they go on. The ack wait spins briefly, then sleeps (an atomic wait); with
-/// STAGE_CHECK one past 50 ms is logged. =2 lockstep: for a Join record the producer waits for
-/// the park ack, never for the record's end (the consumer ends it only once A releases; S8).
+/// the replicas, A being the record owner (InJoin, RecordOwner, CheckOwner); then they go on.
+/// There the replicas' registers equal the primaries' (the Join record takes the pending deltas);
+/// their side state may lag, it goes only with draws (K2, D4): `op` must not depend on it. The
+/// ack wait spins briefly, then sleeps (an atomic wait); with STAGE_CHECK one past 50 ms is
+/// logged. =2 lockstep: for a Join record the producer waits for the park ack, never for the
+/// record's end (the consumer ends it only once A releases; S8).
 void JoinFromA(JoinReason reason, FunctionRef op);
 /// K2, B: C runs everything before this point and parks; `op` runs on B (RESETFIX's FlushRegion,
 /// Wait/Finish from the buffer runtime, ...). B never calls it holding the buffer cache mutex
