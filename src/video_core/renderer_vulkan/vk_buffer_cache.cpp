@@ -850,6 +850,10 @@ u64 BufferCacheRuntime::BeginRecords() {
 }
 
 RecordList* BufferCacheRuntime::EndRecords() {
+    if (!pending_owner_drops.empty()) [[unlikely]] {
+        // JoinRecordOwner retires them
+        JoinRecordOwner(StageJoin::MultiRange, [] {});
+    }
     RecordList* const list = TakeRecords();
     target.list = nullptr;
     descriptor_queue = &guest_descriptor_queue;
@@ -873,12 +877,17 @@ void BufferCacheRuntime::JoinRecordOwner(StageJoin why,
     ++stage_joins[static_cast<size_t>(why)];
     RecordList* const sent = TakeRecords();
     target.list = nullptr;
+    // Every join retires the multi-range owners the packet deleted so far, first.
+    const auto run = [this, op] {
+        DropPendingMultiRangeOwners();
+        op();
+    };
     if (record_owner_hook != nullptr) [[likely]] {
         if constexpr (StageJoinsUnlock) {
             const Nx2Record::HeldLocks::Unlocked unlocked;
-            record_owner_hook(record_owner_context, sent, op);
+            record_owner_hook(record_owner_context, sent, run);
         } else {
-            record_owner_hook(record_owner_context, sent, op);
+            record_owner_hook(record_owner_context, sent, run);
         }
     } else {
         // Nothing bound the hook (T9): record here, the stage owning the scheduler unchecked.
@@ -890,7 +899,7 @@ void BufferCacheRuntime::JoinRecordOwner(StageJoin why,
         if (sent != nullptr) {
             scheduler.Replay(*sent, sent->Seq());
         }
-        op();
+        run();
     }
     target.list = records.get();
 }
@@ -904,8 +913,14 @@ void BufferCacheRuntime::StageDropMultiRangeOwner(VkBuffer owner) {
         // No entry was ever made: nothing to retire
         return;
     }
-    JoinRecordOwner(StageJoin::MultiRange,
-                    [this, owner] { multi_range_buffers.DropOwner(scheduler, owner); });
+    pending_owner_drops.push_back(owner);
+}
+
+void BufferCacheRuntime::DropPendingMultiRangeOwners() {
+    for (const VkBuffer owner : pending_owner_drops) {
+        multi_range_buffers.DropOwner(scheduler, owner);
+    }
+    pending_owner_drops.clear();
 }
 
 bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,

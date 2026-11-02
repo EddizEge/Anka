@@ -425,7 +425,12 @@ private:
     /// Wait for a tick or a stamp while staged.
     void WaitStaged(u64 tick);
 
+    /// Inside a packet: a deleted buffer's multi-range entries are retired at the packet's next
+    /// join, at the latest in EndRecords (one join a packet, not one a deleted buffer; R2
+    /// eszaman-2). Its VkBuffer lives in the graveyard until then, so no handle is reused.
     void StageDropMultiRangeOwner(VkBuffer owner);
+    /// The record owner (a join's op): retires what StageDropMultiRangeOwner held back.
+    void DropPendingMultiRangeOwners();
 
     /// EDEN_NX2_UBO_REUSE while staged: a slice of B's stream buffer is reused within the stream
     /// epoch it was handed out in, its regions held until the reuse is done (§3.6/2).
@@ -522,6 +527,7 @@ private:
     };
     Nx2Record::SeqGraveyard<BufferGrave> buffer_graveyard;
     Nx2Record::SeqGraveyard<vk::Buffer> lut_graveyard;
+    std::vector<VkBuffer> pending_owner_drops; ///< StageDropMultiRangeOwner's, for the next join
     bool multi_range_used{}; ///< BindMultiRangeStorageBuffer made an entry once
     RecordOwnerHook record_owner_hook{};
     void* record_owner_context{};
