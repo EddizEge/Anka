@@ -7,6 +7,7 @@
 #include <bitset>
 
 #include "common/common_types.h"
+#include "video_core/nx2_stages.h"
 
 namespace Tegra::Engines {
 class Maxwell3D;
@@ -31,6 +32,11 @@ using DirtyTables = std::array<std::array<u8, NumRegs>, 2>;
 inline constexpr u64 DeltaDirty = u64{1} << 16;
 inline constexpr u64 DeltaChanged = u64{1} << 17;
 
+/// MAXWELL3D_REG_INDEX(const_buffer.buffer): the 16 constant buffer data registers from here on
+/// (asserted in maxwell_3d.cpp).
+inline constexpr u32 CbDataMethod = 0x8e4;
+inline constexpr u32 CbDataCount = 16;
+
 constexpr u64 MakeDelta(u32 method, u32 value, bool dirty, bool changed) {
     return (method & 0xffff) | (dirty ? DeltaDirty : 0) | (changed ? DeltaChanged : 0) |
            (u64{value} << 32);
@@ -53,20 +59,62 @@ public:
     /// The constant buffer data registers (const_buffer.buffer[0..15]) are left out but at =2
     /// (S5/4: no stage reads them). A write to another engine than Source() first sends
     /// Nx2Stages::PostTarget(Ring::ToB, &engine): what is pending goes there, for the old one.
-    void Note(Tegra::Engines::Maxwell3D& engine, u32 method, u32 value, bool dirty, bool changed) {}
+    void Note(Tegra::Engines::Maxwell3D& engine, u32 method, u32 value, bool dirty, bool changed) {
+        if (method - CbDataMethod < CbDataCount && !keep_cb_data) {
+            return;
+        }
+        if (&engine != source) [[unlikely]] {
+            // The record takes the words pending (Nx2Stages::Reserve), for the old target.
+            Nx2Stages::PostTarget(Nx2Stages::Ring::ToB, &engine);
+            source = &engine;
+        }
+        const u64 bits = (dirty ? DeltaDirty : 0) | (changed ? DeltaChanged : 0);
+        u16& slot = slots[method];
+        if (slot == 0) {
+            words[count] = MakeDelta(method, value, false, false) | bits;
+            slot = static_cast<u16>(++count);
+            return;
+        }
+        // Written again since the last record: its last value, Dirty and Changed ORed (an A -> B
+        // -> A write still sets the dirty flags and notes the light change it made).
+        u64& word = words[slot - 1];
+        word = (word & (0xffff | DeltaDirty | DeltaChanged)) | bits | (u64{value} << 32);
+    }
 
     /// Delta words pending (each record from A takes them, Nx2Stages::Reserve).
     [[nodiscard]] u32 PendingWords() const {
-        return 0;
+        return count;
     }
     /// The engine they were written to.
     [[nodiscard]] Tegra::Engines::Maxwell3D* Source() const {
-        return nullptr;
+        return source;
     }
     /// Writes the PendingWords() words at `out` and starts over.
-    void TakeWords(u64* out) {}
+    void TakeWords(u64* out) {
+        for (u32 i = 0; i < count; ++i) {
+            out[i] = words[i];
+            slots[DeltaMethod(words[i])] = 0;
+        }
+        count = 0;
+    }
     /// Drops everything (Start, Stop).
-    void Reset() {}
+    void Reset() {
+        for (u32 i = 0; i < count; ++i) {
+            slots[DeltaMethod(words[i])] = 0;
+        }
+        count = 0;
+        source = nullptr;
+        keep_cb_data = Nx2Stages::Get().mode == 2;
+    }
+
+private:
+    /// Per register: its word's index plus 1 (0: not written since the last record). The written
+    /// set and the first write order in one (one load per write).
+    std::array<u16, NumRegs> slots{};
+    std::array<u64, NumRegs> words{};
+    u32 count{};
+    Tegra::Engines::Maxwell3D* source{};
+    bool keep_cb_data{}; ///< =2: the constant buffer data registers too (VerifyReplica)
 };
 
 /// Applies delta words to a replica's registers (B and C; T2): writes each value, sets the
@@ -75,7 +123,22 @@ public:
 /// change when LightTrackingEnabled). No DrawDeferred, no method runs.
 template <typename NoteLight>
 void ApplyDelta(u32* regs, DirtyFlags& flags, const DirtyTables& tables, const u64* words,
-                u32 count, NoteLight&& note_light) {}
+                u32 count, NoteLight&& note_light) {
+    for (u32 i = 0; i < count; ++i) {
+        const u64 word = words[i];
+        const u32 method = DeltaMethod(word);
+        const u32 value = DeltaValue(word);
+        const bool differs = regs[method] != value;
+        regs[method] = value;
+        if ((word & DeltaDirty) != 0 || differs) {
+            flags[tables[0][method]] = true;
+            flags[tables[1][method]] = true;
+        }
+        if ((word & DeltaChanged) != 0 || differs) {
+            note_light(method);
+        }
+    }
+}
 
 /// Side state (D4): what a draw reads of Maxwell3D outside its registers. A sends the parts that
 /// changed since they were last sent (generation counters, S5/2) before the draw reading them
