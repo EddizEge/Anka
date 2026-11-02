@@ -470,7 +470,24 @@ size_t GraphicsPipelineCacheKey::Hash() const noexcept {
 }
 
 bool GraphicsPipelineCacheKey::operator==(const GraphicsPipelineCacheKey& rhs) const noexcept {
-    return std::memcmp(&rhs, this, Size()) == 0;
+    // EDEN_NX2_KEY_CMP (elBart0 0017): the shader hashes as six words first, then the state's
+    // bytes in use; the same bytes as one memcmp of Size() (no padding between them). =0 one
+    // memcmp as before; =2 both, logging a different answer.
+    static std::atomic<s8> mode{-1};
+    const int compare = VideoCommon::ReadNx2Mode(mode, "EDEN_NX2_KEY_CMP");
+    if (compare == 0) {
+        return std::memcmp(&rhs, this, Size()) == 0;
+    }
+    const bool equal = unique_hashes == rhs.unique_hashes &&
+                       std::memcmp(&state, &rhs.state, state.Size()) == 0;
+    if (compare == 2 && equal != (std::memcmp(&rhs, this, Size()) == 0)) {
+        static u32 reported{};
+        if (reported++ < 16) {
+            LOG_ERROR(Render_Vulkan, "EDEN_NX2_KEY_CMP: the comparisons differ");
+        }
+        return !equal;
+    }
+    return equal;
 }
 
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
