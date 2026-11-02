@@ -259,6 +259,13 @@ private:
         return split_draws && VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B) &&
                !OwnsRecordsB();
     }
+    /// K3 (EDEN_NX2_STAGE_CHECK) where the buffer cache mutex is taken and the caller may be off
+    /// B: C may take it only inside a ParkB `op` (a record C runs never), A only in its join.
+    void CheckBufferLockOffB(const char* where) const {
+        if (split_draws) [[unlikely]] {
+            VideoCommon::Nx2Stages::CheckBufferLock(where);
+        }
+    }
     /// B the record owner, C parked: inside a join's `op` (JoinB, the record owner hook, a
     /// JoinFromB made elsewhere: the proxy's TickFrame, SignalSyncPoint, fences). The old bodies
     /// run there and C's half of B's own work runs at once: nothing goes to ring 3.

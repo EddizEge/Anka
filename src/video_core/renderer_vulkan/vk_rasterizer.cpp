@@ -1892,6 +1892,7 @@ void RasterizerVulkan::DispatchCompute() {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
     }
+    CheckBufferLockOffB("RasterizerVulkan::DispatchCompute");
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
                              texture_cache)) {
@@ -2010,6 +2011,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
         texture_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
+        CheckBufferLockOffB("RasterizerVulkan::FlushRegion");
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.DownloadMemory(addr, size);
     }
@@ -2020,6 +2022,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
 
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
+        CheckBufferLockOffB("RasterizerVulkan::MustFlushRegion");
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.IsRegionGpuModified(addr, size)) {
             return true;
@@ -2051,6 +2054,7 @@ bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
         return true;
     }
     {
+        CheckBufferLockOffB("RasterizerVulkan::HoldsGpuWrittenData");
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.IsRegionGpuModified(begin, span)) {
             Profile::Add(Profile::Counter::HoldsGpuWrittenBuffer, 1);
@@ -2068,6 +2072,7 @@ bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     {
         // Guest CPU reads of buffer memory decide which GPU-written buffer data is copied back.
+        CheckBufferLockOffB("RasterizerVulkan::GetFlushArea");
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.NoteCpuRead(Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
                                  Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) -
@@ -2098,6 +2103,7 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
         texture_cache.WriteMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
+        CheckBufferLockOffB("RasterizerVulkan::InvalidateRegion");
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.WriteMemory(addr, size);
     }
@@ -2151,6 +2157,7 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
         Diagnostics::t_deferred_inline.clear();
     }
     {
+        CheckBufferLockOffB("RasterizerVulkan::InnerInvalidation");
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.WriteMemoryRanges(sequences);
     }
@@ -2368,6 +2375,7 @@ void RasterizerVulkan::TickFrame() {
         texture_cache.TickFrame();
     }
     {
+        CheckBufferLockOffB("RasterizerVulkan::TickFrame");
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();
     }
@@ -2452,6 +2460,7 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     // fencing thread and CPU write traps holding one of them most of the time.
     bool uploaded;
     {
+        CheckBufferLockOffB("RasterizerVulkan::AccelerateInlineToMemory");
         std::scoped_lock lock{buffer_cache.mutex};
         uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory);
         if (!uploaded && !defer) {
@@ -2498,6 +2507,7 @@ void RasterizerVulkan::AccelerateInlineRuns(std::span<const std::pair<GPUVAddr, 
     namespace Profile = VideoCommon::Nx2Profile;
     NoteLightWork();
     const bool defer = InlineDeferEnabled();
+    CheckBufferLockOffB("RasterizerVulkan::AccelerateInlineRuns");
     std::scoped_lock buffer_lock{buffer_cache.mutex};
     BufferCache::InlineBatch batch;
     u64 uploads = 0;
@@ -5052,6 +5062,7 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
     u64 render_passes = 0;
     u64 dynamic_records = 0;
     VideoCommon::Nx2Stages::ParkB([&] {
+        CheckBufferLockOffB("RasterizerVulkan::CheckSplitSetup");
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
         looked_up = pipeline_cache.CurrentGraphicsPipeline();
         const u64 render_pass_begins = scheduler.RenderPassBegins();

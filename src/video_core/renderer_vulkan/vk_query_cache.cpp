@@ -18,6 +18,7 @@
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/query_cache/query_cache.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -1407,6 +1408,8 @@ void QueryCacheRuntime::ResumeHostConditionalRendering() {
 void QueryCacheRuntime::HostConditionalRenderingCompareValueImpl(VideoCommon::LookupData object,
                                                                  bool is_equal) {
     {
+        VideoCommon::Nx2Stages::CheckBufferLock(
+            "QueryCacheRuntime::HostConditionalRenderingCompareValueImpl");
         std::scoped_lock lk(impl->buffer_cache.mutex);
         static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
         const auto post_op = VideoCommon::ObtainBufferOperation::DoNothing;
@@ -1441,6 +1444,8 @@ void QueryCacheRuntime::HostConditionalRenderingCompareBCImpl(DAddr address, boo
     u32 to_resolve_offset;
     const u32 resolve_size = compare_to_zero ? 8 : 24;
     {
+        VideoCommon::Nx2Stages::CheckBufferLock(
+            "QueryCacheRuntime::HostConditionalRenderingCompareBCImpl");
         std::scoped_lock lk(impl->buffer_cache.mutex);
         const auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
         const auto post_op = VideoCommon::ObtainBufferOperation::DoNothing;
@@ -1498,6 +1503,8 @@ bool QueryCacheRuntime::HostConditionalRenderingCompareValues(VideoCommon::Looku
     std::array<bool, 2> is_in_ac{};
     std::array<bool, 2> is_null{};
     {
+        VideoCommon::Nx2Stages::CheckBufferLock(
+            "QueryCacheRuntime::HostConditionalRenderingCompareValues");
         std::scoped_lock lk(impl->buffer_cache.mutex);
         for (size_t i = 0; i < 2; i++) {
             is_in_qc[i] = objects[i]->found_query != nullptr;
@@ -1637,7 +1644,9 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
         }
     }
 
-    // Vulkan part.
+    // Vulkan part. With cut c the buffer cache is B's: query writes sync in B's join (a
+    // WaitForIdle after a query, F3) or C's ParkB, never in a record C runs.
+    VideoCommon::Nx2Stages::CheckBufferLock("QueryCacheRuntime::SyncValues");
     std::scoped_lock lk(impl->buffer_cache.mutex);
     impl->buffer_cache.BufferOperations([&] {
         impl->buffers_to_upload_to.clear();
