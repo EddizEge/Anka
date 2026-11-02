@@ -932,6 +932,74 @@ TEST_CASE("Nx2StagePipeline: a locked join while C asks ParkB, ring 3 full or no
 }
 
 namespace {
+/// On B: C asks to park, B sends counted records (more than ring 3 holds with `payload[0]`).
+void AskParkThenSendOnB(const u64* payload, u32) {
+    g_b_in_record = true;
+    PostCallC(*g_pipe, &AskLockedPark, 0);
+    for (u64 i = 0; i < payload[0]; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, 200);
+        ++g_b_progress;
+    }
+    g_expected_c = g_sent;
+    g_b_in_record = false;
+}
+/// On B, the record after (with a delta): it sends nothing, takes the buffer mutex and joins at
+/// once, as the buffer runtime's hook inside a packet whose draw has not gone to C yet.
+void LockedJoinPendingOnB(const u64*, u32) {
+    g_b_in_record = true;
+    {
+        std::scoped_lock lock{g_buffer_mutex};
+        const size_t wrote = g_handler->wrote[StageIdC];
+        g_pipe->JoinFromBLocked([wrote] {
+            Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
+                   g_handler->wrote[StageIdC], wrote);
+            Expect(g_handler->logs[StageIdC].deltas.size() + 1 ==
+                       g_handler->logs[StageIdB].deltas.size(),
+                   "JoinFromBLocked: the record's delta stays pending",
+                   g_handler->logs[StageIdC].deltas.size(),
+                   g_handler->logs[StageIdB].deltas.size());
+            Order('b');
+        });
+        ++g_b_progress;
+    }
+    g_b_in_record = false;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: a locked join leaves B's pending deltas pending (sinama-1)",
+          "[video_core]") {
+    Watchdog watchdog{"locked join, deltas pending"};
+    std::mt19937 random{1357};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (u32 round = 0; round < 120; ++round) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            // Wide: C's ParkB served before the join's record or waiting through it.
+            g_spin_c = random() % 60000;
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            handler.capture = {u64{round} << 8 | 3};
+            PostCallB(pipe, &AskParkThenSendOnB, round % 2 == 0 ? 0 : 40);
+            handler.capture = {u64{round} << 8 | 4};
+            PostCallB(pipe, &LockedJoinPendingOnB, 0);
+            pipe.PublishB();
+            while (g_park_ops.load() == 0) {
+                std::this_thread::yield();
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_order.size() == 2);
+            REQUIRE(g_park_ops == 1);
+            REQUIRE(handler.hazards[1] == 0);
+            // The pending delta reached C afterwards (ServePark, A's join).
+            REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
+            REQUIRE(handler.logs[StageIdB].deltas.size() == 2);
+        }
+    }
+}
+
+namespace {
 std::atomic<bool> g_b_waits_record{};
 
 /// On C, inside a record: =2 runs the op at once (B waits for this record's end); =1 is a
@@ -1005,11 +1073,14 @@ TEST_CASE("Nx2StagePipeline: ParkB inside a record, =2 lockstep and =1 hazard", 
 
 namespace {
 /// On B: maybe C asks to park, B sends `count` counted records, then joins (locked or not):
-/// the op runs after every record B sent before (R2 F1), with or without a ParkB waiting.
+/// the op runs after every record B sent before (R2 F1), with or without a ParkB waiting. Bare
+/// (locked, nothing sent first): the record's deltas still pending at the join, the buffer
+/// runtime's case (T9b review sinama-1).
 void SendThenJoinB(const u64* payload, u32) {
     const u32 count = static_cast<u32>(payload[0] & 0xff);
     const bool locked = ((payload[0] >> 8) & 1) != 0;
     const bool ask_park = ((payload[0] >> 9) & 1) != 0;
+    const bool bare = ((payload[0] >> 10) & 1) != 0;
     g_b_in_record = true;
     if (ask_park) {
         PostCallC(*g_pipe, &AskCheckedPark, 0);
@@ -1019,12 +1090,20 @@ void SendThenJoinB(const u64* payload, u32) {
     }
     const u64 expected = g_sent;
     const size_t wrote = g_handler->wrote[StageIdC];
-    const auto op = [locked, expected, wrote] {
+    const auto op = [locked, bare, expected, wrote] {
         Expect(g_c_count.load() == expected, "a join from B: C ran everything B sent before",
                g_c_count.load(), expected);
         if (locked) {
             Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
                    g_handler->wrote[StageIdC], wrote);
+            if (bare) {
+                // C parked: its replica behind B's by this record's two deltas at least.
+                Expect(g_handler->logs[StageIdC].deltas.size() + 2 <=
+                           g_handler->logs[StageIdB].deltas.size(),
+                       "JoinFromBLocked: the deltas stay pending",
+                       g_handler->logs[StageIdC].deltas.size(),
+                       g_handler->logs[StageIdB].deltas.size());
+            }
         } else {
             Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
                    "JoinFromB: C's replica took B's deltas",
@@ -1057,11 +1136,13 @@ TEST_CASE("Nx2StagePipeline: a join from B runs after everything B sent before (
         for (u32 round = 0; round < 600; ++round) {
             g_spin_c = random() % 4000;
             const bool locked = round % 2 == 1;
+            const bool bare = locked && round % 6 == 1;
             const bool ask_park = round % 3 == 0;
             parks_asked += ask_park ? 1 : 0;
             handler.capture = {u64{round} << 8 | 1, u64{round} << 8 | 2};
             PostCallB(pipe, &SendThenJoinB,
-                      (round % 40) | (locked ? 0x100u : 0u) | (ask_park ? 0x200u : 0u));
+                      (bare ? 0 : round % 40) | (locked ? 0x100u : 0u) |
+                          (ask_park ? 0x200u : 0u) | (bare ? 0x400u : 0u));
             handler.capture = {u64{round} << 8 | 5};
             PostCallB(pipe, &RanOnB, round);
             if (round % 7 == 0) {
