@@ -14,6 +14,7 @@
 #include "common/settings.h"
 #include "common/cpu_features.h"
 #include "video_core/nx2_busy_clock.h"
+#include "video_core/nx2_mode_pace.h"
 
 namespace VideoCommon::Nx2ModeGov {
 
@@ -213,8 +214,9 @@ inline bool Enabled() {
         if (text == nullptr || text[0] == '0') {
             return false;
         }
-        // Both steer the same mode, one through the GPU time, one through late presents.
-        if (const char* pace = std::getenv("EDEN_NX2_MODE_PACE"); pace != nullptr && pace[0] != '0') {
+        // Both steer the same mode, one through the GPU time, one through late presents. Only
+        // when the pace controller is really on (it turns itself off with some settings).
+        if (Nx2ModePace::Enabled()) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_GOV with EDEN_NX2_MODE_PACE: off (the pace "
                                 "controller steers the mode)");
             return false;

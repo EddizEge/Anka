@@ -35,7 +35,9 @@ namespace VideoCommon::Nx2ModePace {
 // fast_gpu_time's /256. Decisions in nx2_mode_pace_logic.h; this part times the presents, holds
 // them (Hold, after the vblank pacing) and logs "nx2 mode pace:" lines. Off with
 // EDEN_NX2_PRESENT_INTERVAL > 1, EDEN_NX2_GPU_BUSY_CLOCK (both make the game read GPU time and drop
-// its resolution); it turns EDEN_NX2_MODE_GOV off (nx2_mode_gov.h). Holds only at speed limit 100%.
+// its resolution) and EDEN_NX2_VBLANK_GRID (its grid would not move with a hold: the next frame
+// would come early); it turns EDEN_NX2_MODE_GOV off (nx2_mode_gov.h). Holds only at speed limit
+// 100%.
 // The controller's clock is the sum of the present intervals, each at most 1 s: across a pause or
 // a long load its rests run slower than the wall clock.
 //
@@ -68,6 +70,13 @@ inline bool Enabled() {
         if (On(std::getenv("EDEN_NX2_GPU_BUSY_CLOCK"))) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with EDEN_NX2_GPU_BUSY_CLOCK (the game would "
                                 "read GPU time and drop its resolution): off");
+            return false;
+        }
+        // nx2_gsv.h's VblankGridMode reads it the same way (0-2).
+        if (const char* text = std::getenv("EDEN_NX2_VBLANK_GRID");
+            text != nullptr && std::strtol(text, nullptr, 10) > 0) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with EDEN_NX2_VBLANK_GRID (the grid does not "
+                                "move with a hold, the next frame would come early): off");
             return false;
         }
         if (const char* text = std::getenv("EDEN_NX2_GPU_TICK_DIV")) {
@@ -108,8 +117,15 @@ inline u32 SpinUs() {
     return spin;
 }
 
+/// Nanoseconds the pacing sleeps yielded (EDEN_NX2_PACE_SPIN_US), for the 10 s line.
+inline std::atomic<u64> g_spun_ns{};
+
 inline void SleepUntil(std::chrono::steady_clock::time_point target) {
-    SleepUntil(target, SpinUs());
+    const u32 spin = SpinUs();
+    const std::chrono::nanoseconds spun = SleepUntil(target, spin);
+    if (spin != 0) {
+        g_spun_ns.fetch_add(static_cast<u64>(spun.count()), std::memory_order_relaxed);
+    }
 }
 
 inline void SleepFor(std::chrono::nanoseconds duration) {
@@ -383,18 +399,20 @@ inline void Present(u32 mode, std::chrono::steady_clock::time_point entered,
     }
     if (out.started != Push::None) {
         ++s.pushes;
-        LOG_INFO(HW_GPU,
-                 "nx2 mode pace: start {} in mode {} ({}): K {} ms (work {}, busy {}), hold {:.0f} ms",
-                 PushName(out.started), mode, out.by_probe ? "probe" : "auto", Ms(out.k_ms),
-                 Ms(out.work_med_ms), Ms(out.busy_med_ms), out.min_period_ms);
+        LOG_INFO(
+            HW_GPU,
+            "nx2 mode pace: start {} in mode {} ({}): K {} ms (work {}, busy {}), hold {:.0f} ms",
+            PushName(out.started), mode, out.by_probe ? "probe" : "auto", Ms(out.k_ms),
+            Ms(out.work_med_ms), Ms(out.busy_med_ms), out.min_period_ms);
     }
     s.held_ms += held_ms;
     if (paced - s.summary_since >= std::chrono::seconds{10}) {
         LOG_INFO(HW_GPU,
                  "nx2 mode pace 10 s: presents 60/30/20 {}/{}/{}, pushes {}, held {:.0f} ms, gaps "
-                 "of 34 ms or more at 30 {}/{}, K {} ms",
+                 "of 34 ms or more at 30 {}/{}, K {} ms, spun {:.1f} ms",
                  s.presents[0], s.presents[1], s.presents[2], s.pushes, s.held_ms, s.late_gaps30,
-                 s.gaps30, Ms(out.k_ms));
+                 s.gaps30, Ms(out.k_ms),
+                 static_cast<double>(g_spun_ns.exchange(0, std::memory_order_relaxed)) / 1e6);
         s.summary_since = paced;
         s.presents = {};
         s.pushes = 0;

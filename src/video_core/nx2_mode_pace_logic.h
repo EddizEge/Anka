@@ -216,7 +216,8 @@ public:
         const bool first = !have;
         const Measured m{
             .input = {.mode = mode,
-                      .work_ms = (std::max)(paced_ms - last_paced - (paced_ms - composited_ms), 0.0),
+                      .work_ms =
+                          (std::max)(paced_ms - last_paced - (paced_ms - composited_ms), 0.0),
                       .busy_ms = (std::max)(busy_total_ms - last_busy, 0.0),
                       .dt_ms = (std::max)(paced_ms - last_paced, 0.0)},
             .gap_ms = (std::max)(entered_ms - last_entered, 0.0),
@@ -241,18 +242,24 @@ private:
 
 /// Sleeps until `target`; with `spin_us`, wakes that long before it and yields until it (the
 /// Windows timer overshoots a sleep by up to a few ms). 0: std::this_thread::sleep_until alone.
-inline void SleepUntil(std::chrono::steady_clock::time_point target, u32 spin_us) {
+/// Returns how long it yielded.
+inline std::chrono::nanoseconds SleepUntil(std::chrono::steady_clock::time_point target,
+                                           u32 spin_us) {
     if (spin_us == 0) {
         std::this_thread::sleep_until(target);
-        return;
+        return {};
     }
     const auto early = target - std::chrono::microseconds{spin_us};
     if (std::chrono::steady_clock::now() < early) {
         std::this_thread::sleep_until(early);
     }
-    while (std::chrono::steady_clock::now() < target) {
+    const auto spin_from = std::chrono::steady_clock::now();
+    auto now = spin_from;
+    while (now < target) {
         std::this_thread::yield();
+        now = std::chrono::steady_clock::now();
     }
+    return now - spin_from;
 }
 
 struct Output {
@@ -306,7 +313,8 @@ public:
 
     Output Step(const Input& in) {
         Output out{};
-        const double dt = std::clamp(std::isfinite(in.dt_ms) ? in.dt_ms : 0.0, 0.0, 1000.0) / 1000.0;
+        const double dt =
+            std::clamp(std::isfinite(in.dt_ms) ? in.dt_ms : 0.0, 0.0, 1000.0) / 1000.0;
         clock += dt;
         since_stall += dt;
         stint += dt;
@@ -431,7 +439,8 @@ public:
         }
         const double k = Cost(MinSamples);
         const double quiet = mode == 1 ? params.mode_quiet60_s : params.mode_quiet_s;
-        const bool settled = stint >= quiet && since_stall >= params.stall_quiet_s && !std::isnan(k);
+        const bool settled =
+            stint >= quiet && since_stall >= params.stall_quiet_s && !std::isnan(k);
         if (!params.auto_push || !settled || push != Push::None) {
             cond_down = cond_up = cond_up20 = 0.0;
         }
@@ -487,7 +496,10 @@ public:
             since_probe >= probe->every_s) {
             Push kind = Push::None;
             if (probe->cycle) {
-                kind = mode == 1 ? Push::Down : mode == 2 ? Push::Up : mode == 3 ? Push::Up20 : Push::None;
+                kind = mode == 1   ? Push::Down
+                       : mode == 2 ? Push::Up
+                       : mode == 3 ? Push::Up20
+                                   : Push::None;
             } else if ((probe->kind == Push::Down && mode == 1) ||
                        (probe->kind == Push::Up && mode == 2) ||
                        (probe->kind == Push::Up20 && mode == 3) ||

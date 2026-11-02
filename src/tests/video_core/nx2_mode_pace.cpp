@@ -110,7 +110,8 @@ TEST_CASE("Nx2ModePace: stuck at 60, a down push in two stages", "[video_core]")
     REQUIRE(rest.Starts() == 0);
 }
 
-TEST_CASE("Nx2ModePace: failed down pushes back off, then stop until the game moves", "[video_core]") {
+TEST_CASE("Nx2ModePace: failed down pushes back off, then stop until the game moves",
+          "[video_core]") {
     Controller ctl;
     std::vector<double> rests;
     for (int attempt = 0; attempt < 3; ++attempt) {
@@ -509,11 +510,19 @@ TEST_CASE("Nx2ModePace: precise sleep", "[video_core]") {
     // than the whole wait: the yield loop alone. Local only: a loaded machine can miss it.
     for (const u32 spin : {0U, 1500U, 20000U}) {
         const auto target = steady_clock::now() + milliseconds{5};
-        SleepUntil(target, spin);
+        const auto start = steady_clock::now();
+        const nanoseconds spun = SleepUntil(target, spin);
         const auto woke = steady_clock::now();
         REQUIRE(woke >= target);
+        // The time it yielded: none without a spin, never more than the whole wait.
+        REQUIRE(spun >= nanoseconds{0});
+        REQUIRE(spun <= woke - start);
+        if (spin == 0U) {
+            REQUIRE(spun == nanoseconds{0});
+        }
         if (spin == 20000U) {
             REQUIRE(woke < target + milliseconds{2});
+            REQUIRE(spun >= milliseconds{4}); // the spin is longer than the wait: all of it
         }
     }
 }

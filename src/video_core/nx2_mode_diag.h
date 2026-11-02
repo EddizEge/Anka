@@ -38,10 +38,10 @@ namespace VideoCommon::Nx2ModeDiag {
 //    that ask for a timestamp (dropped today), rejected native compute dispatches per program
 //    and the render target / viewport sizes; then a "nx2 mode diag addresses" line: the report
 //    addresses written most this second, with the average time between two writes of each;
-//  - at each of the first 48 mode changes (EDEN_NX2_MODE_DIAG_MAX=<1-100000>): the 16 frames before it (one line each) and the
-//    timestamp writes of the last 3 frames before it (at most 96), then the writes of the 6
-//    frames after it (at most 400 lines); the same 6-frame window at present 300 and every
-//    1800th present after it;
+//  - at each of the first 48 mode changes (EDEN_NX2_MODE_DIAG_MAX=<1-100000>): the 16 frames
+//    before it (one line each) and the timestamp writes of the last 3 frames before it (at most
+//    96), then the writes of the 6 frames after it (at most 400 lines); the same 6-frame window
+//    at present 300 and every 1800th present after it;
 //  - the first time a report semaphore word, QMD release flag word, SEM_EXECUTE timestamp
 //    release or large render target / viewport size is seen.
 // "ticks" are the values written (614.4 MHz GPU ticks over the divisor in effect: fast_gpu_time,
@@ -67,7 +67,8 @@ inline u32 MaxTransitions() {
             return 48U;
         }
         if (value != 48) {
-            LOG_INFO(HW_GPU, "nx2 mode diag: the first {} mode changes dumped (EDEN_NX2_MODE_DIAG_MAX)",
+            LOG_INFO(HW_GPU,
+                     "nx2 mode diag: the first {} mode changes dumped (EDEN_NX2_MODE_DIAG_MAX)",
                      value);
         }
         return static_cast<u32>(value);
