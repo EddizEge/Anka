@@ -384,8 +384,9 @@ private:
     /// B (T8): the pages C may write for work `seq` (or, between packets, the next packet's): the
     /// bound render targets and depth only (every page for a target too large to walk). A caller
     /// whose pipeline writes memory it does not place (storage images, global stores) adds
-    /// GpuPages().PreSetAll(seq) itself.
-    void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
+    /// GpuPages().PreSetAll(seq) itself. `light`: a light draw's packet (no render target
+    /// register changed since the packet before: the ranges found then are kept).
+    void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq, bool light = false);
     /// B: the seq of the next packet (work sent between packets runs before it).
     [[nodiscard]] u64 NextStageSeq() const noexcept;
     /// B, inside a draw packet: every vertex stream the draw reads marked used
@@ -606,6 +607,8 @@ private:
         std::array<std::pair<GPUVAddr, u64>, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets + 1>
             key{};
         bool valid{};
+        /// The last call's registers gave `key` (not a target too large to walk).
+        bool current{};
         std::vector<std::pair<DAddr, u64>> ranges;
     };
     StageTargets stage_targets;

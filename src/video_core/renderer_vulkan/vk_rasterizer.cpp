@@ -4210,11 +4210,35 @@ bool RasterizerVulkan::CbWriteJoinsB(Tegra::Engines::Maxwell3D& replica, GPUVAdd
     return false;
 }
 
-void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
+void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq, bool light) {
     namespace Stages = VideoCommon::Nx2Stages;
     Stages::Nx2GpuPages& pages = Stages::GpuPages();
     if (!pages.Live()) {
         // Off: Holds says every page may hold data.
+        return;
+    }
+    StageTargets& targets = stage_targets;
+    const auto preset_ranges = [&] {
+        for (const auto& [begin, size] : targets.ranges) {
+            pages.PreSet(begin, size, seq);
+        }
+        if (targets.ranges.empty()) {
+            // No target: only B's position (b_next, STAGE_CHECK's) moves; no page is held.
+            pages.PreSet(0, 0, seq);
+        }
+    };
+    // A light draw: its render target registers are the packet before's (they are
+    // LightChange::State, which keeps a draw off the light way; a clear or a texture draw in
+    // between is a Command), whose call found `key` for them (`current`) and its ranges; they
+    // stand while the memory manager and its mappings do. ~30-90 ns a draw of building the key and
+    // comparing it (k2hiz). STAGE_CHECK and =2 build it all the same and compare (below).
+    const bool keep = light && targets.valid && targets.current &&
+                      targets.gpu_memory == gpu_memory &&
+                      targets.memory_id == gpu_memory->GetID() &&
+                      targets.mapping_epoch == gpu_memory->MappingEpoch();
+    if (keep && !pages.Checking()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::PresetsKept, 1);
+        preset_ranges();
         return;
     }
     // The bound targets' GPU ranges, conservatively (D6): a layer's stride (pitch linear: pitch
@@ -4264,10 +4288,13 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
                                               layers, 8)};
     }
     if (oversized) [[unlikely]] {
+        targets.current = false;
         pages.PreSetAll(seq);
         return;
     }
-    StageTargets& targets = stage_targets;
+    if (keep && targets.key != key) [[unlikely]] {
+        Stages::ReportStageHazard("a light draw's render targets differ from the packet before's");
+    }
     // Read before the walk: a mapping changed meanwhile walks again at the next packet.
     const u64 mapping_epoch = gpu_memory->MappingEpoch();
     if (!targets.valid || targets.gpu_memory != gpu_memory ||
@@ -4302,13 +4329,8 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
         targets.mapping_epoch = mapping_epoch;
         targets.valid = true;
     }
-    for (const auto& [begin, size] : targets.ranges) {
-        pages.PreSet(begin, size, seq);
-    }
-    if (targets.ranges.empty()) {
-        // No target: only B's position (b_next, STAGE_CHECK's) moves; no page is held.
-        pages.PreSet(0, 0, seq);
-    }
+    targets.current = true;
+    preset_ranges();
 }
 
 void RasterizerVulkan::StageInvalidateThunk(const u64* payload, u32 words) {
@@ -4734,7 +4756,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             {
                 Profile::FineScope presets_scope{Profile::Zone::StagePresets};
                 NotePoolsB(mb, seq);
-                PreSetTargets(mb, seq);
+                PreSetTargets(mb, seq, true);
                 if (pipeline.WritesMemory()) {
                     VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
                 }
