@@ -436,4 +436,36 @@ struct RecordTarget {
     void RequestOutsideRenderPassOperationContext();
 };
 
+template <typename T>
+    requires std::is_invocable_v<T, vk::CommandBuffer>
+void RecordTarget::Record(T&& command) {
+    if (list == nullptr) {
+        scheduler->Record(std::forward<T>(command));
+        return;
+    }
+    list->Record([command = std::forward<T>(command)](RecordContext& context) {
+        command(context.cmdbuf);
+    });
+}
+
+template <typename T>
+    requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
+void RecordTarget::RecordWithUploadBuffer(T&& command) {
+    if (list == nullptr) {
+        scheduler->RecordWithUploadBuffer(std::forward<T>(command));
+        return;
+    }
+    list->Record([command = std::forward<T>(command)](RecordContext& context) {
+        command(context.cmdbuf, context.upload_cmdbuf);
+    });
+}
+
+inline void RecordTarget::RequestOutsideRenderPassOperationContext() {
+    if (list == nullptr) {
+        scheduler->RequestOutsideRenderPassOperationContext();
+        return;
+    }
+    list->MarkOutsideRenderPass();
+}
+
 } // namespace Vulkan

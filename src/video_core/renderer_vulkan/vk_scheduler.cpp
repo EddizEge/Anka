@@ -18,6 +18,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
@@ -538,6 +539,28 @@ void Scheduler::EndRenderPass()
         num_renderpass_images = 0;
     }
 
+
+void Scheduler::Replay(RecordList& list, u32 seq) {
+    if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
+        VideoCommon::GpuSplit::CheckOwner("Scheduler::Replay");
+    }
+    if (static_cast<u32>(list.Seq()) != seq) [[unlikely]] {
+        LOG_ERROR(Render_Vulkan, "Record list of seq {} replayed for seq {}", list.Seq(), seq);
+    }
+    VideoCommon::Nx2Profile::Scope zone{VideoCommon::Nx2Profile::Zone::ListReplay};
+    list.Replay([this] { RequestOutsideRenderPassOperationContext(); },
+                [this](const RecordList::Group& group) {
+                    RecordWithUploadBuffer([group](vk::CommandBuffer cmdbuf,
+                                                   vk::CommandBuffer upload_cmdbuf) {
+                        RecordContext context{cmdbuf, upload_cmdbuf};
+                        group.Run(context);
+                    });
+                });
+}
+
+void Scheduler::NoteSeqTick(u32 seq) {
+    seq_ticks.Note(Nx2Record::SeqTicks::Widen(seq, seq_ticks.DoneSeq()), CurrentTick());
+}
 
 void Scheduler::AcquireNewChunk() {
     std::scoped_lock rl{reserve_mutex};

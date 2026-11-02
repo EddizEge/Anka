@@ -53,4 +53,10 @@ void UpdateDescriptorQueue::Acquire(Scheduler& scheduler, size_t required_entrie
     upload_start = payload_cursor;
 }
 
+void UpdateDescriptorQueue::Restart(bool use_descriptor_buffer_) {
+    use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
+    payload_cursor = payload_start;
+    upload_start = payload_start;
+}
+
 } // namespace Vulkan
