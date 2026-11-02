@@ -3853,16 +3853,16 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
             DAddr run_end = 0;
             for (GPUVAddr page = address & ~GPUVAddr{0xfff}; size != 0 && page < address + size;
                  page += 0x1000) {
-                const std::optional<DAddr> device = gpu_memory->GpuToCpuAddress(page);
-                if (device && *device == run_end && run_end != run_begin) {
+                const std::optional<DAddr> device_page = gpu_memory->GpuToCpuAddress(page);
+                if (device_page && *device_page == run_end && run_end != run_begin) {
                     run_end += 0x1000;
                     continue;
                 }
                 if (run_end != run_begin) {
                     targets.ranges.emplace_back(run_begin, run_end - run_begin);
                 }
-                run_begin = device ? *device : 0;
-                run_end = device ? *device + 0x1000 : 0;
+                run_begin = device_page ? *device_page : 0;
+                run_end = device_page ? *device_page + 0x1000 : 0;
             }
             if (run_end != run_begin) {
                 targets.ranges.emplace_back(run_begin, run_end - run_begin);
