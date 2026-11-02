@@ -428,7 +428,9 @@ void StageStagingBufferPool::TickFrame() {
 }
 
 StagingBufferRef StageStagingBufferPool::GetStreamBuffer(size_t size) {
-    if (AreRegionsActive(Region(free_iterator) + 1,
+    // Past a wrap that found region 0 in use, nothing is known free: check from region 0.
+    const size_t first_unchecked = recheck_from_start ? 0 : Region(free_iterator) + 1;
+    if (AreRegionsActive(first_unchecked,
                          (std::min)(Region(iterator + size) + 1, NUM_SYNCS))) {
         // Avoid waiting for the previous usages to be free
         return GetStagingBuffer(size, MemoryUsage::Upload);
@@ -448,10 +450,14 @@ StagingBufferRef StageStagingBufferPool::GetStreamBuffer(size_t size) {
         ++stream_epoch;
 
         if (AreRegionsActive(0, Region(size) + 1)) {
-            // Avoid waiting for the previous usages to be free
+            // Avoid waiting for the previous usages to be free. Region 0 was not handed out:
+            // the next request checks it again instead of trusting free_iterator (R2 omur-3).
+            free_iterator = 0;
+            recheck_from_start = true;
             return GetStagingBuffer(size, MemoryUsage::Upload);
         }
     }
+    recheck_from_start = false;
     const size_t offset = iterator;
     iterator = Common::AlignUp(iterator + size, MAX_ALIGNMENT);
     return StagingBufferRef{

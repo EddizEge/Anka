@@ -15,6 +15,7 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_stage_draw.h"
 #include "video_core/nx2_stages.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
@@ -372,6 +373,30 @@ public:
         return *descriptor_scratch;
     }
 
+    /// The geometry mirror (§3.6/6, T7): the vertex, index and transform feedback binds B
+    /// recorded into the packet since BeginRecords, in order, as bound (after the quad / uint8
+    /// passes and the null buffer); valid until the next BeginRecords. GeometrySlot::slot: 0-31
+    /// vertex streams, GEOMETRY_INDEX_SLOT the index buffer, GEOMETRY_TFB_SLOT + n transform
+    /// feedback n; index_format the bound index type (GEOMETRY_INDEX_UINT16 / UINT32 / UINT8);
+    /// size 0 where the bind has none (index buffers, BindVertexBuffer(s) without extended
+    /// dynamic state).
+    static constexpr u8 GEOMETRY_INDEX_SLOT = 32;
+    static constexpr u8 GEOMETRY_TFB_SLOT = 33;
+    static constexpr u8 GEOMETRY_INDEX_UINT16 = 0;
+    static constexpr u8 GEOMETRY_INDEX_UINT32 = 1;
+    static constexpr u8 GEOMETRY_INDEX_UINT8 = 2;
+    [[nodiscard]] std::span<const VideoCommon::Nx2Stages::GeometrySlot> PacketGeometry()
+        const noexcept {
+        return packet_geometry;
+    }
+
+    /// B's staging pool (null before the first BeginStages), for MappedBytes / MappedBytesAt on
+    /// uniform data B streamed (EDEN_NX2_LIGHT_UNIFORM=2, §7/17). Its lookups read B's state:
+    /// only with B parked (ParkB) or in =2's lockstep.
+    [[nodiscard]] const StageStagingBufferPool* StagePool() const noexcept {
+        return stage_pool.get();
+    }
+
     /// Why B's runtime needed the recording stage (stage_joins, by reason).
     enum class StageJoin : u8 { Wait, Finish, MultiRange, Count };
 
@@ -380,14 +405,14 @@ public:
     /// scheduler). The integration (T9) binds it to JoinFromB: `records` (B's list so far, may
     /// be null) is replayed by C first, then `op` runs on this thread with C parked; the runtime
     /// records straight to the scheduler inside `op` and goes on with a new list of the same seq
-    /// after. It runs inside buffer cache operations, whose callers hold BufferCache::mutex; the
-    /// runtime calls it with every cache lock B took through Nx2Record::CacheLock let go
-    /// (Nx2Record::HeldLocks::Unlocked) and takes them again after, so the hook writes ring 3 and
-    /// calls JoinFromB holding none (S13, K3). So B takes its cache locks (the buffer cache's,
-    /// and any other it holds around buffer cache work) through CacheLock only. Meanwhile other
-    /// threads may take the buffer cache mutex (CPU write traps marking pages, UnmapGPUMemory,
-    /// the fencing thread) and the operation in progress goes on after with what it held: only
-    /// B makes and deletes buffers, what the others may change there T9 checks (T3 report).
+    /// after. K3, option (a) (R2): it runs inside buffer cache operations, whose callers hold
+    /// BufferCache::mutex, and the runtime keeps it held through the hook: the operation stays
+    /// atomic for the CPU write traps and the fencing thread, which wait for it as they wait for
+    /// a Finish with the stages off. So the binding's join writes no ring 3 record and serves no
+    /// ParkB while B waits (JoinFromBLocked, T9), and C takes the buffer cache mutex only inside
+    /// ParkB work and the join's op; any other C path taking it is a deadlock (STAGE_CHECK, T9).
+    /// The per-packet joins (Finish from the garbage collector's downloads, Wait with accurate
+    /// fences, multi-range) should go to ~0 (§7/14) to keep the wait short.
     using RecordOwnerHook = void (*)(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     void SetRecordOwnerHook(RecordOwnerHook hook, void* context) noexcept {
@@ -425,7 +450,16 @@ private:
     /// Wait for a tick or a stamp while staged.
     void WaitStaged(u64 tick);
 
+    /// Inside a packet: a deleted buffer's multi-range entries are retired at the packet's next
+    /// join, at the latest in EndRecords (one join a packet, not one a deleted buffer; R2
+    /// eszaman-2). Its VkBuffer lives in the graveyard until then, so no handle is reused.
     void StageDropMultiRangeOwner(VkBuffer owner);
+    /// The record owner (a join's op): retires what StageDropMultiRangeOwner held back.
+    void DropPendingMultiRangeOwners();
+
+    /// Inside a packet: notes a geometry bind for PacketGeometry.
+    void NoteGeometry(u8 slot, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
+                      u32 stride, u8 index_format = 0);
 
     /// EDEN_NX2_UBO_REUSE while staged: a slice of B's stream buffer is reused within the stream
     /// epoch it was handed out in, its regions held until the reuse is done (§3.6/2).
@@ -522,6 +556,8 @@ private:
     };
     Nx2Record::SeqGraveyard<BufferGrave> buffer_graveyard;
     Nx2Record::SeqGraveyard<vk::Buffer> lut_graveyard;
+    std::vector<VideoCommon::Nx2Stages::GeometrySlot> packet_geometry; ///< PacketGeometry
+    std::vector<VkBuffer> pending_owner_drops; ///< StageDropMultiRangeOwner's, for the next join
     bool multi_range_used{}; ///< BindMultiRangeStorageBuffer made an entry once
     RecordOwnerHook record_owner_hook{};
     void* record_owner_context{};

@@ -247,6 +247,7 @@ private:
     size_t iterator = 0;
     size_t used_iterator = 0;
     size_t free_iterator = 0;
+    bool recheck_from_start = false; ///< A wrap found region 0 in use: nothing checked yet
     std::array<u64, NUM_SYNCS> sync_stamps{};
     u64 stream_epoch = 0;
 
