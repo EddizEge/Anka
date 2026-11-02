@@ -18,6 +18,7 @@
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
@@ -26,6 +27,19 @@
 #include "video_core/texture_cache/util.h"
 
 namespace Tegra {
+namespace {
+// EDEN_NX2_STAGE_CHECK: the paths below reach the rasterizer's caches (through the proxy from A,
+// nx2_stage_proxy.h), which belong to the stages below A. From A they must run inside a join
+// (JoinFromA); outside one (Forwarding) they are reported as a call off B's thread and counted
+// (Counter::StageViolations). CPU threads, the front and A inside a join are not reported. Off
+// the stages: one thread-local byte compared (Forwarding is false off A).
+void CheckNotForwarding(const char* where) {
+    if (VideoCommon::Nx2Stages::Forwarding() && VideoCommon::Nx2Stages::Get().check) [[unlikely]] {
+        VideoCommon::Nx2Stages::CheckStage(VideoCommon::Nx2Stages::Stage::B, where);
+    }
+}
+} // Anonymous namespace
+
 bool MemoryManager::IsShuttingDown() const {
     return system.IsShuttingDown();
 }
@@ -520,6 +534,7 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
 }
 
 void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::ReadBlock");
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
 }
 
@@ -600,6 +615,7 @@ bool MemoryManager::WriteSmall(GPUVAddr gpu_dest_addr, const void* src_buffer, s
 }
 
 void MemoryManager::WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which) {
+    CheckNotForwarding("MemoryManager::WriteBlock");
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, which, false);
 }
 
@@ -635,6 +651,7 @@ void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buf
 
 void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
                                 VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::FlushRegion");
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
                           [[maybe_unused]] std::size_t copy_amount) {};
@@ -656,6 +673,8 @@ void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
 
 bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
                                   VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::IsMemoryDirty");
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::MemoryDirtyQueries, 1);
     bool result = false;
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
@@ -730,6 +749,7 @@ size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr, size_t max_size) co
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,
                                      VideoCommon::CacheType which) const {
+    CheckNotForwarding("MemoryManager::InvalidateRegion");
     auto do_nothing = [&]([[maybe_unused]] std::size_t page_index,
                           [[maybe_unused]] std::size_t offset,
                           [[maybe_unused]] std::size_t copy_amount) {};
