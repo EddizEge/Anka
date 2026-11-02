@@ -21,6 +21,10 @@ namespace Tegra::Engines {
 class EngineInterface;
 }
 
+namespace VideoCommon::Nx2Stages {
+enum class JoinReason : u8;
+}
+
 namespace VideoCommon {
 
 /// Where a deferred call runs with the back stages on (EDEN_NX2_BACK_STAGES, nx2_stages.h): bits
@@ -171,6 +175,14 @@ public:
         return consumed.load(std::memory_order_seq_cst) == published.load(std::memory_order_seq_cst);
     }
 
+    /// Back stages (nx2_stages.h), the last stage at a Mark: the back ran ring 1 up to
+    /// `position` (D1; Drain, WaitForSpace and BackCaughtUp read it as from BackLoop).
+    /// `caught_up`: A had run everything published then (the busy clock's BackStored).
+    void StageConsumed(u64 position, bool caught_up);
+    /// Back stages, =3 (ExecA): B runs `words` words of ring 1 from `position` as BackLoop did,
+    /// handing ring space back every 4096 words (B is the last stage).
+    void StageExecute(u64 position, u64 words);
+
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
@@ -262,6 +274,20 @@ private:
     void BackLoop(std::stop_token stop_token);
     /// Runs the entry; `published_left`: words published from it on. Returns its size.
     size_t Execute(const u64* entry, u64 published_left);
+
+    /// Back stages (nx2_stages.h): BackLoop as stage A. Runs the engines' entries against the
+    /// primary registers, sends ring 1's Call entries to their stage (DeferTarget), marks how far
+    /// it ran (PostMark) instead of storing `consumed`; =3: only sends ring 1's ranges (ExecA).
+    void RunStagedBack(std::stop_token stop_token);
+    /// Execute on A: a Call entry runs by its DeferTarget (OnA here; Join in a join; Owner
+    /// forwarded to B); the rest as Execute.
+    size_t ExecuteStagedA(const u64* entry, u64 published_left);
+    /// Whether A runs the entry in a join, and why: an executable method of an engine whose
+    /// methods do not run on A (stage_methods_on_a false), or a Call entry tagged Join.
+    bool StagedJoinStarts(const u64* entry, Nx2Stages::JoinReason& reason);
+    /// In such a join, whether the next entry joins it too: an entry of an engine whose methods do
+    /// not run on A (or a switch to one), a Call entry tagged Join (S9/2).
+    bool StagedJoinContinues(const u64* entry) const;
 
     Core::System* system{};
     bool active{};
