@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <numeric>
 #include <type_traits>
 #include <utility>
@@ -18,6 +19,17 @@
 #include <ranges>
 
 namespace Common {
+
+/// EDEN_NX2_SLOT_SKIP (Selevet d8c95fef47): SlotVector's iterator steps over whole empty 64-slot
+/// words (the slots of a long session are mostly free; the buffer cache walks them every frame).
+/// =0 tests slot by slot, as before.
+inline bool SlotSkipEmptyWords() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SLOT_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
 
 struct SlotId {
     static constexpr u32 TAGGED_MASK = 0x7fffffff;
@@ -51,7 +63,18 @@ public:
         Iterator& operator++() noexcept {
             const u64* const bitset = slot_vector->stored_bitset.data();
             const u32 size = static_cast<u32>(slot_vector->stored_bitset.size()) * 64;
-            if (id.Value() < size) {
+            if (id.Value() < size && SlotSkipEmptyWords()) {
+                u32 index = id.Value() + 1;
+                while (index < size) {
+                    const u64 word = bitset[index / 64] >> (index % 64);
+                    if (word != 0) {
+                        index += static_cast<u32>(std::countr_zero(word));
+                        break;
+                    }
+                    index = (index / 64 + 1) * 64;
+                }
+                id = index < size ? SlotId{index} : SlotId{};
+            } else if (id.Value() < size) {
                 do {
                     ++id.index;
                 } while (id.Value() < size && !IsValid(bitset));

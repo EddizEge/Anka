@@ -29,6 +29,12 @@ public:
     }
 
     void Reset() noexcept {
+        // EDEN_NX2_USAGE_RESET_SKIP (Selevet d8c95fef47): every free buffer is reset each frame
+        // (a word per 4 KiB); one nothing was tracked in since the last reset is already clear.
+        if (ResetSkipEnabled() && !tracked) {
+            return;
+        }
+        tracked = false;
         std::ranges::fill(pages, 0ULL);
         recent.fill({~u64{0}, 0});
         full_begin = 0;
@@ -44,6 +50,7 @@ public:
                 return;
             }
         }
+        tracked = true;
         recent[recent_cursor++ % recent.size()] = {offset, size};
         const size_t page = offset >> BUFFER_PAGE_SHIFT;
         const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
@@ -80,6 +87,15 @@ public:
     }
 
 private:
+    /// EDEN_NX2_USAGE_RESET_SKIP=0 clears the pages at every Reset, as before.
+    static bool ResetSkipEnabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_USAGE_RESET_SKIP");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled;
+    }
+
     /// EDEN_NX2_USAGE_SKIP=0 writes every whole page of a tracked range, as before.
     static bool FullPagesSkipEnabled() {
         static const bool enabled = [] {
@@ -149,6 +165,9 @@ private:
     /// Pages [full_begin, full_end) are all ones (FillPages); empty when equal.
     size_t full_begin{};
     size_t full_end{};
+    /// Whether Track ran since the last Reset (EDEN_NX2_USAGE_RESET_SKIP): else the pages, recent
+    /// and the full run are as Reset leaves them.
+    bool tracked{};
 };
 
 } // namespace VideoCommon

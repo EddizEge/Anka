@@ -8,6 +8,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/range_sets.inc"
+#include "common/slot_vector.h"
+#include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/buffer_cache/nx2_draw_memo.h"
 
 namespace {
@@ -461,4 +463,76 @@ TEST_CASE("Descriptor word runs visit what every word would", "[video_core][nx2]
     REQUIRE((runs[0].first == 0 && runs[0].count == 2 && runs[0].begin_offset == 0 &&
              runs[0].end_offset == 12));
     REQUIRE((runs[2].first == 3 && runs[2].count == 2 && runs[2].end_offset == 0x24));
+}
+
+TEST_CASE("UsageTracker resets as a new one", "[video_core][nx2]") {
+    constexpr size_t SIZE = 0x40000;
+    std::mt19937_64 rng{99};
+    VideoCommon::UsageTracker tracker{SIZE};
+    std::vector<std::pair<u64, u64>> since_reset;
+    for (int step = 0; step < 20000; ++step) {
+        const u64 offset = rng() % SIZE;
+        const u64 size = 1 + rng() % ((rng() & 3) == 0 ? 0x8000 : 0x100);
+        switch (rng() % 6) {
+        case 0:
+            tracker.Reset();
+            since_reset.clear();
+            if (rng() % 2 == 0) {
+                tracker.Reset(); // Nothing tracked since: left as it is
+            }
+            break;
+        case 1:
+        case 2:
+            tracker.Track(offset, size);
+            since_reset.emplace_back(offset, size);
+            break;
+        default: {
+            VideoCommon::UsageTracker fresh{SIZE};
+            for (const auto& [o, s] : since_reset) {
+                fresh.Track(o, s);
+            }
+            REQUIRE(tracker.IsUsed(offset, size) == fresh.IsUsed(offset, size));
+            break;
+        }
+        }
+    }
+}
+
+TEST_CASE("SlotVector iterates the stored slots", "[common][nx2]") {
+    struct Item {
+        u32 value;
+    };
+    std::mt19937_64 rng{5};
+    Common::SlotVector<Item> slots;
+    std::vector<Common::SlotId> live;
+    for (int step = 0; step < 6000; ++step) {
+        if (live.empty() || rng() % 3 != 0) {
+            live.push_back(slots.insert(Item{static_cast<u32>(step)}));
+        } else {
+            const size_t pick = rng() % live.size();
+            slots.erase(live[pick]);
+            live.erase(live.begin() + static_cast<std::ptrdiff_t>(pick));
+        }
+        if (step % 97 == 0) {
+            // Thin it out: long empty stretches between live slots.
+            for (size_t i = 0; i < live.size();) {
+                if (rng() % 8 != 0) {
+                    slots.erase(live[i]);
+                    live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
+                } else {
+                    ++i;
+                }
+            }
+        }
+        std::vector<u32> expected;
+        for (const Common::SlotId id : live) {
+            expected.push_back(id.index);
+        }
+        std::sort(expected.begin(), expected.end());
+        std::vector<u32> seen;
+        for (const auto [id, item] : slots) {
+            seen.push_back(id.index);
+        }
+        REQUIRE(seen == expected);
+    }
 }
