@@ -28,3 +28,5 @@
 # --- experiments (off by default; NX2_NOTES.md) ---
 #EDEN_NX2_PACE_GUEST_SLEEP=1
 #EDEN_NX2_PACE_GUEST_TAIL_US=1000
+# vi2 104 = GetHdrStatus, SDR reply (one line "104: 1 0 0" in a file works too)
+#EDEN_NX2_VI2_REPLY=104:1,0,0

@@ -313,6 +313,14 @@ handheld VRR without slowing down, so these are likely its VRR / HDR display que
    A reply of the wrong length can break the game: the SDK copies as many words as the command's
    reply has and reads the rest from stale memory, or rejects the reply (an abort). Start from
    the size the trace's mangled name implies.
+   104 is GetHdrStatus(u64 display name) (moceure/eden-nx2-android 01226f4e94): result, u64
+   output format (1 = SDR), u32 0; a display name other than "default" gets VI error 7. The
+   table writes that reply as it is, no code needed (same ResponseBuilder size, 5, and the same
+   four words): `104: 1 0 0` (inline `EDEN_NX2_VI2_REPLY=104:1,0,0`). The empty success before
+   left the format to stale reply words, from which a game may set up HDR output (washed-out
+   colours, a white halo: worth a try against H1). Bananza only asks for "default", so the
+   error reply is not missed. The "# VRR experiment" example's `104: 1` above is the wrong
+   size for it (one word of three).
 
 ## Where it stops now
 

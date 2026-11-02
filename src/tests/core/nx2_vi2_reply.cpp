@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/hle/service/nx2_vi2_reply.h"
@@ -83,6 +84,12 @@ TEST_CASE("Nx2Vi2Reply: inline items", "[core]") {
     REQUIRE(!bad.table.has_value());
     REQUIRE(bad.error == "item 2: no ':' after the command");
     REQUIRE(ParseInline("104:1;104:2").error == "item 2: command 104 is listed twice");
+}
+
+TEST_CASE("Nx2Vi2Reply: GetHdrStatus's SDR reply (104: u64 format 1, u32 0)", "[core]") {
+    const std::vector<u32> sdr{1, 0, 0};
+    REQUIRE(ParseInline("104:1,0,0").table->at(104) == sdr);
+    REQUIRE(Parse("104: 1 0 0  # GetHdrStatus, SDR\n").table->at(104) == sdr);
 }
 
 TEST_CASE("Nx2Vi2Reply: versions and the first call after a change", "[core]") {

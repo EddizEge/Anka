@@ -977,7 +977,8 @@ public:
             {32, &INx2Vi2Session::GetVsyncEvent, "GetDisplayVsyncEvent (guessed)"},
             // Title 1 calls these ~75 times a second with the display name "default"; the
             // auto stub's empty success reply works, but logged two lines per call (a 50 MB log
-            // in an 18 minute session).
+            // in an 18 minute session). 104 is GetHdrStatus (moceure/eden-nx2-android 01226f4e94:
+            // result, u64 output format, 1 = SDR, u32 0): EDEN_NX2_VI2_REPLY=104:1,0,0 gives it.
             {104, &INx2Vi2Session::SucceedQuietly, "Unknown104 (display \"default\")"},
             {105, &INx2Vi2Session::SucceedQuietly, "Unknown105 (display \"default\")"},
             // Display/client setup (title 2): nothing to track while presents composite directly.
