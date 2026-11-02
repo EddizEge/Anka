@@ -1977,6 +1977,11 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         // The query cache is C's (F3: the next WaitForIdle joins).
         NoteLightWork();
         stage_query_since_wfi = true;
+        if (const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr)) {
+            // CounterReport's mark, made here before the query leaves B: the page summary B asks
+            // (Nx2GpuPages::Holds) covers the page from this point of the stream on.
+            Tegra::Nx2MarkUntrackedWrite(*cpu_addr, 16);
+        }
         StageToC([this, gpu_addr, type, flags, payload, subreport] {
             Query(gpu_addr, type, flags, payload, subreport);
         });
