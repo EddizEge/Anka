@@ -28,6 +28,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_gpu_pages.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -572,6 +573,11 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
         }
         // Written in place, past the buffer cache.
         gpu_memory.MarkUntracked(gpu_addr + guest_offset, subresource_size);
+        if (VideoCommon::Nx2Stages::GpuPages().Checking()) [[unlikely]] {
+            // Back stages, STAGE_CHECK: B relied on these pages holding nothing later on?
+            VideoCommon::Nx2Stages::NoteUntrackedGpu(gpu_memory, gpu_addr + guest_offset,
+                                                     subresource_size);
+        }
 
         host_offset += host_bytes_per_layer;
         guest_offset += layer_stride;
