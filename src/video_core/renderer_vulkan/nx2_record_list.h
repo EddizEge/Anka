@@ -1,0 +1,224 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <deque>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "common/common_types.h"
+
+// EDEN_NX2_BACK_STAGES, cut c (Kesim-2, nx2_stages.h): C is the only stage recording Vulkan
+// commands. B's buffer runtime writes its commands into a record list instead, which C replays
+// into the scheduler where B's packet sits in the stream (Scheduler::Replay), and stamps what it
+// hands the GPU (stream and staging ranges, buffers) with B's packet seq instead of a scheduler
+// tick: C notes the tick each seq went into (SeqTicks). Free of Vulkan for the unit tests
+// (tests/video_core/nx2_record_list.cpp); vk_scheduler.h instantiates it. Nothing here is made
+// with the stages off. Owner: T3.
+namespace Vulkan::Nx2Record {
+
+/// The tick handover (§3.6/2). C notes, in seq order, the scheduler tick each of B's seqs went
+/// into; B asks whether what it stamped with a seq is done: C recorded it and the GPU passed that
+/// tick. Seqs are 64-bit here, they never wrap; DrawToC carries their low 32 bits (Widen).
+class SeqTicks {
+public:
+    static constexpr u64 WINDOW = u64{1} << 14;
+    /// Set in the stamps made while staged (BufferCacheRuntime::CurrentTick) to tell them from
+    /// scheduler ticks, which never reach it.
+    static constexpr u64 STAMP_BIT = u64{1} << 63;
+
+    [[nodiscard]] static constexpr u64 Stamp(u64 seq) noexcept {
+        return STAMP_BIT | seq;
+    }
+    [[nodiscard]] static constexpr bool IsStamp(u64 value) noexcept {
+        return (value & STAMP_BIT) != 0;
+    }
+    [[nodiscard]] static constexpr u64 SeqOf(u64 stamp) noexcept {
+        return stamp & ~STAMP_BIT;
+    }
+    /// The 64-bit seq whose low 32 bits are `seq`, within 2^31 of `around`.
+    [[nodiscard]] static constexpr u64 Widen(u32 seq, u64 around) noexcept {
+        const s32 delta = static_cast<s32>(seq - static_cast<u32>(around));
+        return around + static_cast<u64>(static_cast<s64>(delta));
+    }
+
+    /// C: `seq` and every seq before it not noted yet went into `tick`. In seq order; noting the
+    /// last seq again (a packet split by a join) keeps the later tick.
+    void Note(u64 seq, u64 tick) noexcept;
+
+    /// The last seq C noted (0: none). Any thread.
+    [[nodiscard]] u64 DoneSeq() const noexcept {
+        return done_seq.load(std::memory_order_acquire);
+    }
+
+    /// The tick `seq` (at most DoneSeq) went into; a later one once it left the window.
+    [[nodiscard]] u64 TickOf(u64 seq) const noexcept;
+
+    /// Whether what was stamped with `seq` is done, the GPU having reached `known_gpu_tick`.
+    [[nodiscard]] bool IsFree(u64 seq, u64 known_gpu_tick) const noexcept;
+
+private:
+    std::atomic<u64> done_seq{};
+    std::array<std::atomic<u64>, WINDOW> ticks{};
+};
+
+/// B's memory for its record lists: 32 KiB chunks in use in allocation order. A chunk is reused
+/// once every list written into it ran on the Vulkan worker (the last command group of a list
+/// releases its id; ids, not seqs: a packet split by a join has two lists of one seq) and is
+/// never freed before the arena.
+class ChunkArena {
+public:
+    static constexpr size_t CHUNK_BYTES = 32 * 1024;
+
+    ChunkArena() = default;
+    ChunkArena(const ChunkArena&) = delete;
+    ChunkArena& operator=(const ChunkArena&) = delete;
+
+    /// B: an id for a new list (ids only grow; lists are replayed in their order).
+    [[nodiscard]] u64 NewList() noexcept {
+        return ++last_list;
+    }
+
+    /// B: `size` bytes aligned to `align` for the list `list`.
+    [[nodiscard]] void* Allocate(size_t size, size_t align, u64 list);
+
+    /// The Vulkan worker: the lists up to `list` ran, their commands are destroyed.
+    void Release(u64 list) noexcept {
+        released_list.store(list, std::memory_order_release);
+    }
+
+    [[nodiscard]] u64 ReleasedList() const noexcept {
+        return released_list.load(std::memory_order_acquire);
+    }
+
+    /// Chunks made so far (in use and free), for the log and the tests.
+    [[nodiscard]] size_t Chunks() const noexcept {
+        return in_use.size() + free_chunks.size();
+    }
+
+private:
+    struct Chunk {
+        u64 last_list{};
+        size_t used{};
+        alignas(std::max_align_t) std::array<std::byte, CHUNK_BYTES> data;
+    };
+
+    std::deque<std::unique_ptr<Chunk>> in_use; ///< Oldest first; the back one is being filled
+    std::vector<std::unique_ptr<Chunk>> free_chunks;
+    u64 last_list{};
+    std::atomic<u64> released_list{};
+};
+
+/// One packet's commands from B, in order, with the outside render pass requests between them
+/// (marks). `Context` is what a command runs with (vk_scheduler.h: the two command buffers).
+template <typename Context>
+class List {
+public:
+    struct Item {
+        Item* next;
+        /// Runs the command with the context and destroys it; null for a mark
+        void (*run)(Item* item, Context& context);
+    };
+
+    /// A run of commands between marks, run by the worker in one scheduler command. The last
+    /// group of a list releases the list in its arena after running.
+    struct Group {
+        Item* first;
+        Item* end; ///< The item after the last (a mark, or null)
+        ChunkArena* release; ///< Set for the list's last group
+        u64 id;    ///< The list's
+
+        void Run(Context& context) const;
+    };
+
+    explicit List(ChunkArena& arena_) noexcept : arena{&arena_} {}
+
+    /// B: empties the list for (a part of) the packet of `seq`.
+    void Begin(u64 seq_) noexcept {
+        first = nullptr;
+        last = nullptr;
+        seq = seq_;
+        id = arena->NewList();
+        commands = 0;
+        marks = 0;
+    }
+
+    /// B: appends a command invocable with `Context&`.
+    template <typename T>
+    void Record(T&& command);
+
+    /// B: appends an outside render pass request; one right after another is dropped.
+    void MarkOutsideRenderPass();
+
+    /// C: in order, `mark()` for each mark and `group(Group)` for each run of commands; after a
+    /// trailing mark an empty group carries the release.
+    template <typename MarkFunc, typename GroupFunc>
+    void Replay(MarkFunc&& mark, GroupFunc&& group) const;
+
+    [[nodiscard]] bool Empty() const noexcept {
+        return first == nullptr;
+    }
+    [[nodiscard]] u64 Seq() const noexcept {
+        return seq;
+    }
+    [[nodiscard]] u32 Commands() const noexcept {
+        return commands;
+    }
+    [[nodiscard]] u32 Marks() const noexcept {
+        return marks;
+    }
+    [[nodiscard]] ChunkArena& Arena() const noexcept {
+        return *arena;
+    }
+
+private:
+    template <typename T>
+    struct TypedItem final : Item {
+        T command;
+    };
+
+    void Append(Item* item) noexcept;
+
+    ChunkArena* arena;
+    Item* first{};
+    Item* last{};
+    u64 seq{};
+    u64 id{};
+    u32 commands{};
+    u32 marks{};
+};
+
+/// Objects B let go of (a deleted buffer, a replaced LUT, an invalidated pipeline: §3.6/7) kept
+/// until what was stamped with the seq they were buried at is done. Single thread (the one owning
+/// the cache, or any with it parked).
+template <typename T>
+class SeqGraveyard {
+public:
+    void Bury(T&& object, u64 seq) {
+        objects.emplace_back(seq, std::move(object));
+    }
+
+    /// Frees, oldest first, those whose seq `is_free(seq)` says is done.
+    template <typename IsFree>
+    void Collect(IsFree&& is_free) {
+        while (!objects.empty() && is_free(objects.front().first)) {
+            objects.pop_front();
+        }
+    }
+
+    [[nodiscard]] size_t Size() const noexcept {
+        return objects.size();
+    }
+
+private:
+    std::deque<std::pair<u64, T>> objects; ///< In seq order
+};
+
+} // namespace Vulkan::Nx2Record
