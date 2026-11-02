@@ -1021,7 +1021,17 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
-    if (maxwell3d->GetNativeMacroEngine().native_turing || !use_asynchronous_shaders) {
+    // EDEN_NX2_ASYNC_SKIP=1 (Selevet 8b076b167f; off by default, as what is skipped pops in
+    // later): native (Switch 2) draws wait for their pipeline, and in Donkey Kong Bananza those
+    // waits reached ~3 s in 10 s of new scenery (255 ms at once), the game running slow and then
+    // catching up. With it, with asynchronous shaders on, the draws CanSkipDraw allows are skipped
+    // while the pipeline builds, as for other titles (PrepareDraw finds no pipeline).
+    static const bool async_skip = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_SKIP");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!use_asynchronous_shaders ||
+        (maxwell3d->GetNativeMacroEngine().native_turing && !async_skip)) {
         return pipeline;
     }
     return CanSkipDraw() ? nullptr : pipeline;
