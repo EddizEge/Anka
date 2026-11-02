@@ -4774,10 +4774,11 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         anchor.followable = !texture_cache.RenderTargetsNeedRepeat() && !pipeline.ViewsNeedRepeat();
         if (!anchor.followable) {
             Profile::Add(Profile::Counter::LightRefusedTargets, 1);
+            // B does not see this part of LightFollowable: its next draw in full. The light
+            // draws it sends meanwhile are repaired with the anchor's payload, so its seq stays
+            // held (esdeger-5 / omur-2): only a new anchor, ReleaseAnchorC or TickFrameC let go.
+            light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
         }
-    }
-    if (!anchor.followable) {
-        anchor.hold_seq = 0;
     }
     auto& light_state = mc.light;
     light_state.changes = 0;
