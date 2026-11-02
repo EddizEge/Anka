@@ -4225,10 +4225,18 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             ++logged;
             LOG_WARNING(HW_GPU, "Draw skipped (no pipeline) on the memory stage");
         }
+        // The barrier taken is recorded all the same, as DrawIndirect records it before
+        // PrepareDraw (esdeger-4).
+        if (indirect_barrier) {
+            StageBufferWork(record_indirect_barrier);
+        }
         FlushStageCWork();
         return;
     }
     if (StageResetProgram(mb, is_indexed)) {
+        if (indirect_barrier) {
+            StageBufferWork(record_indirect_barrier);
+        }
         StageResetStores(mb);
         return;
     }
