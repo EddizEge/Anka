@@ -377,3 +377,88 @@ TEST_CASE("SummarizedRangeSet summary", "[video_core][nx2]") {
     REQUIRE(hull.Intersects(0x9000, 0x10));
     REQUIRE(!hull.Intersects(0x5080, 1));
 }
+
+TEST_CASE("Descriptor word runs visit what every word would", "[video_core][nx2]") {
+    struct Word {
+        u8 stage;
+        u8 slot;
+        u32 offset;
+    };
+    std::mt19937_64 rng{4242};
+    for (int round = 0; round < 3000; ++round) {
+        std::vector<Word> words;
+        const int stages = 1 + static_cast<int>(rng() % 3);
+        for (int stage = 0; stage < stages; ++stage) {
+            const int groups = 1 + static_cast<int>(rng() % 4);
+            for (int group = 0; group < groups; ++group) {
+                const u8 slot = static_cast<u8>(rng() % 4);
+                const u8 secondary = static_cast<u8>(rng() % 4);
+                const bool alternate = rng() % 4 == 0;
+                u32 offset = static_cast<u32>(rng() % 0x100) * 4;
+                const int count = 1 + static_cast<int>(rng() % 12);
+                for (int i = 0; i < count; ++i) {
+                    words.push_back({static_cast<u8>(stage), slot, offset});
+                    if (alternate) {
+                        words.push_back({static_cast<u8>(stage), secondary, offset + 0x40});
+                    }
+                    offset += static_cast<u32>(4 + (rng() % 3) * 4);
+                }
+            }
+        }
+        std::array<std::array<u64, 4>, 3> addresses{};
+        for (auto& stage : addresses) {
+            for (u64& address : stage) {
+                address = 0x10000 + (rng() % 8) * 0x400;
+            }
+        }
+        std::array<u32, 3> rebound{};
+        for (u32& bits : rebound) {
+            bits = rng() % 6 == 0 ? static_cast<u32>(rng() % 16) : 0;
+        }
+        std::vector<std::pair<u64, u32>> written;
+        const int ranges = static_cast<int>(rng() % 4);
+        for (int i = 0; i < ranges; ++i) {
+            written.emplace_back(0x10000 + rng() % 0x2400, static_cast<u32>(1 + rng() % 0x40));
+        }
+        const auto address_of = [&](u8 stage, u8 slot) { return addresses[stage][slot]; };
+        const auto moved = [&](u8 stage, u8 slot) { return ((rebound[stage] >> slot) & 1) != 0; };
+        const auto rewritten = [&](u32 i) {
+            const Word& word = words[i];
+            const u64 address = address_of(word.stage, word.slot) + word.offset;
+            bool result = moved(word.stage, word.slot);
+            for (const auto& [begin, size] : written) {
+                result |= address < begin + size && begin < address + 4;
+            }
+            return result;
+        };
+        const u32 stop_after = static_cast<u32>(rng() % 6);
+        const auto run = [&](bool by_runs) {
+            std::vector<u32> seen;
+            const auto visit = [&](u32 i) {
+                if (!rewritten(i)) {
+                    return false;
+                }
+                seen.push_back(i);
+                return seen.size() > stop_after;
+            };
+            if (by_runs) {
+                const auto runs = VideoCommon::MakeDescriptorWordRuns(std::span<const Word>{words});
+                VideoCommon::ForEachCandidateWord(runs, written, address_of, moved, visit);
+            } else {
+                for (u32 i = 0; i < words.size(); ++i) {
+                    if (visit(i)) {
+                        break;
+                    }
+                }
+            }
+            return seen;
+        };
+        REQUIRE(run(true) == run(false));
+    }
+    const std::vector<Word> words{{0, 1, 8}, {0, 1, 0}, {0, 2, 4}, {1, 2, 4}, {1, 2, 0x20}};
+    const auto runs = VideoCommon::MakeDescriptorWordRuns(std::span<const Word>{words});
+    REQUIRE(runs.size() == 3);
+    REQUIRE((runs[0].first == 0 && runs[0].count == 2 && runs[0].begin_offset == 0 &&
+             runs[0].end_offset == 12));
+    REQUIRE((runs[2].first == 3 && runs[2].count == 2 && runs[2].end_offset == 0x24));
+}

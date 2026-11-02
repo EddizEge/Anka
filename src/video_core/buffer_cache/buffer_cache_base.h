@@ -95,6 +95,22 @@ inline int Nx2GpuWrittenFilter() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_GPU_WRITTEN_FILTER");
 }
+/// EDEN_NX2_UNIFORM_SYNC_SKIP: EDEN_NX2_LIGHT_SYNC_SKIP for the uniform way's light draws too
+/// (GraphicsPipeline::ConfigureUniforms; same anchor chain, frame and epoch guard). =0 as before;
+/// =2 synchronizes the streams it would skip and logs any that uploaded.
+inline int Nx2UniformSyncSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_UNIFORM_SYNC_SKIP");
+}
+/// EDEN_NX2_STORAGE_KEEP: UpdateStorageBuffers leaves a stage whose storage bindings are as it
+/// resolved them last (no bind or unbind since, page_table, the GPU mappings and the address space
+/// unchanged, no binding over several segments): FindBuffer would return the same buffers and
+/// ResolveMultiRangeStorage no segments again. =0 as before; =2 resolves anyway and logs a
+/// binding that resolved differently.
+inline int Nx2StorageKeep() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_STORAGE_KEEP");
+}
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
 inline bool Nx2VertexFast() {
@@ -249,6 +265,15 @@ public:
     u32 uniform_buffer_skip_cache_size = DEFAULT_SKIP_CACHE_SIZE;
 
     bool has_deleted_buffers = false;
+
+    /// EDEN_NX2_STORAGE_KEEP: what each stage's storage bindings were last resolved under.
+    struct StorageResolved {
+        u64 layout_epoch;
+        u64 map_epoch;
+        size_t owner;
+        bool valid;
+    };
+    std::array<StorageResolved, NUM_STAGES> storage_resolved{};
 
     std::array<u32, NUM_STAGES> dirty_uniform_buffers{};
     std::array<u32, NUM_STAGES> fast_bound_uniform_buffers{};
@@ -479,6 +504,8 @@ public:
     /// EDEN_NX2_LIGHT_SYNC_SKIP: set by the rasterizer around a plain light draw's
     /// BindHostGeometryBuffers only.
     bool plain_light_draw = false;
+    /// EDEN_NX2_UNIFORM_SYNC_SKIP: the same, set by GraphicsPipeline::ConfigureUniforms.
+    bool uniform_light_draw = false;
     /// EDEN_NX2_VERTEX_CLEAN=2: streams whose flag UpdateVertexBuffer cleared as disabled.
     u32 vertex_clean_mask = 0;
 

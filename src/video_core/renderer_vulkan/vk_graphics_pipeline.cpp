@@ -814,7 +814,10 @@ bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed, bool rebind_storag
         }
     }
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
+    // EDEN_NX2_UNIFORM_SYNC_SKIP: clean streams are left as a plain light draw leaves them.
+    buffer_cache.uniform_light_draw = VideoCommon::Nx2UniformSyncSkip() != 0;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    buffer_cache.uniform_light_draw = false;
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         buffer_cache.BindHostStageBuffers(stage);
@@ -873,7 +876,8 @@ GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
     const bool values = compare && descriptor_values_valid;
     const auto& stages = maxwell3d->state.shader_stages;
     u32 last_descriptor = ~0U; // First word of the last storage descriptor counted
-    for (size_t i = 0; i < descriptor_words.size(); ++i) {
+    // Whether to stop at word i (its result noted).
+    const auto visit = [&](size_t i) {
         const DescriptorWord& word = descriptor_words[i];
         const GPUVAddr address = stages[word.stage].const_buffers[word.slot].address + word.offset;
         const bool moved = ((rebound[word.stage] >> word.slot) & 1) != 0;
@@ -882,21 +886,21 @@ GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
             rewritten |= address < begin + size && begin < address + 4;
         }
         if (!rewritten) {
-            continue;
+            return false;
         }
         result.rewritten |= word.kind;
         if (values && gpu_memory->Read<u32>(address) == descriptor_values[i]) {
-            continue;
+            return false;
         }
         result.changed |= word.kind;
         if (moved) {
             result.rebound_changed |= word.kind;
         }
         if (!scan_storage || word.kind != StorageWords) {
-            break;
+            return true;
         }
         if (!VideoCommon::Nx2Profile::Enabled()) {
-            continue;
+            return false;
         }
         // A descriptor's words 0-1 are its address, 2-3 its size (StorageBufferBinding).
         const u32 part = static_cast<u32>(i) - storage_word_begin[word.stage];
@@ -910,6 +914,56 @@ GraphicsPipeline::LightWords GraphicsPipeline::CheckDescriptorWords(
             if (result.storage_buffers++ == 0) {
                 result.storage_first = (u32{word.stage} << 24) | (storage_desc.cbuf_index << 16) |
                                        storage_desc.cbuf_offset;
+            }
+        }
+        return false;
+    };
+    const auto scan_all = [&] {
+        for (size_t i = 0; i < descriptor_words.size(); ++i) {
+            if (visit(i)) {
+                break;
+            }
+        }
+    };
+    // EDEN_NX2_DESC_HULL: only the runs of words in one slot that a written range overlaps (by
+    // the hull of their offsets) or whose slot moved; the others' words would all be skipped as
+    // not rewritten. The same words in the same order: the same result. =0 every word as before;
+    // =2 both ways, logging a different result.
+    static std::atomic<s8> hull_mode{-1};
+    const int hull = VideoCommon::ReadNx2Mode(hull_mode, "EDEN_NX2_DESC_HULL");
+    if (hull == 0) {
+        scan_all();
+        return result;
+    }
+    if (descriptor_word_runs.empty() && !descriptor_words.empty()) {
+        descriptor_word_runs =
+            VideoCommon::MakeDescriptorWordRuns(std::span<const DescriptorWord>{descriptor_words});
+    }
+    const auto scan_runs = [&] {
+        VideoCommon::ForEachCandidateWord(
+            descriptor_word_runs, written,
+            [&](u8 stage, u8 slot) { return u64{stages[stage].const_buffers[slot].address}; },
+            [&](u8 stage, u8 slot) { return ((rebound[stage] >> slot) & 1) != 0; },
+            [&](u32 i) { return visit(i); });
+    };
+    scan_runs();
+    if (hull == 2) {
+        const LightWords by_runs = result;
+        result = LightWords{};
+        last_descriptor = ~0U;
+        scan_all();
+        if (by_runs.rewritten != result.rewritten || by_runs.changed != result.changed ||
+            by_runs.rebound_changed != result.rebound_changed ||
+            by_runs.storage_buffers != result.storage_buffers ||
+            by_runs.storage_address != result.storage_address ||
+            by_runs.storage_written != result.storage_written ||
+            by_runs.storage_first != result.storage_first) {
+            static u32 reported{};
+            if (reported++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "EDEN_NX2_DESC_HULL: runs found rewritten {:#x} changed {:#x}, every "
+                          "word {:#x} {:#x}",
+                          by_runs.rewritten, by_runs.changed, result.rewritten, result.changed);
             }
         }
     }

@@ -534,6 +534,7 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
     }
     channel_state->enabled_storage_buffers[stage] = 0;
     channel_state->written_storage_buffers[stage] = 0;
+    channel_state->storage_resolved[stage].valid = false;
 }
 
 template <class P>
@@ -554,6 +555,7 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     }
     channel_state->enabled_storage_buffers[stage] |= 1U << ssbo_index;
     channel_state->written_storage_buffers[stage] |= (is_written ? 1U : 0U) << ssbo_index;
+    channel_state->storage_resolved[stage].valid = false;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_graphics_storage_buffers;
@@ -1057,11 +1059,14 @@ void BufferCache<P>::BindHostVertexBuffers() {
             // write that was made (not skipped) marks its page so at the next flush, untracking
             // it, and CPU writes there then reach neither the tracker nor the light epoch.
             // Otherwise the stream is synchronized as below, as before.
-            if (plain_light_draw && !flags[Dirty::VertexBuffer0 + index]) {
+            // EDEN_NX2_UNIFORM_SYNC_SKIP: a uniform light draw too; it follows the same anchor
+            // chain in the same frame and epoch, and its constant buffer writes mark their pages
+            // at FlushCaching like any other (so UnsetSince fails where they landed).
+            if ((plain_light_draw || uniform_light_draw) && !flags[Dirty::VertexBuffer0 + index]) {
                 const Binding& clean = v_buffer[index];
                 if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
                                               vertex_synced_epoch[index])) {
-                    if (Nx2LightSyncSkip() != 2) {
+                    if ((uniform_light_draw ? Nx2UniformSyncSkip() : Nx2LightSyncSkip()) != 2) {
                         ++sync_skipped;
                     } else {
                         ++sync_would_skip;
@@ -1070,8 +1075,9 @@ void BufferCache<P>::BindHostVertexBuffers() {
                             static u32 reported{};
                             if (reported++ < 16) {
                                 LOG_ERROR(HW_GPU,
-                                          "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain "
-                                          "light draw uploaded",
+                                          "{}: clean stream {} of a light draw uploaded",
+                                          uniform_light_draw ? "EDEN_NX2_UNIFORM_SYNC_SKIP"
+                                                             : "EDEN_NX2_LIGHT_SYNC_SKIP",
                                           index);
                             }
                         }
@@ -2001,6 +2007,29 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
+    // EDEN_NX2_STORAGE_KEEP: a uniform light draw that did not bind storage buffers again
+    // resolves the same bindings as the draw before. page_table is unchanged while
+    // buffer_layout_epoch is (every Register / Unregister bumps it, DeleteBuffer's included), so
+    // FindBuffer would return each binding's buffer again (with the accurate GPU fence it may wait
+    // too: not skipped then); the GPU mappings and address space decide the segments, none then.
+    auto& resolved = channel_state->storage_resolved[stage];
+    const int keep = Nx2StorageKeep();
+    const u64 layout_epoch = buffer_layout_epoch;
+    const u64 map_epoch = gpu_memory->MappingEpoch();
+    const size_t owner = gpu_memory->GetID();
+    const bool unchanged = keep != 0 && resolved.valid && resolved.layout_epoch == layout_epoch &&
+                           resolved.map_epoch == map_epoch && resolved.owner == owner &&
+                           !Settings::IsGPUFenceBehaviorAccurate();
+    if (unchanged && keep != 2) {
+        return;
+    }
+    std::array<BufferId, NUM_STORAGE_BUFFERS> kept_ids{};
+    if (unchanged) {
+        for (u32 index = 0; index < NUM_STORAGE_BUFFERS; ++index) {
+            kept_ids[index] = channel_state->storage_buffers[stage][index].buffer_id;
+        }
+    }
+    bool segmented = false;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
@@ -2008,7 +2037,26 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
         binding.buffer_id = buffer_id;
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
         ResolveMultiRangeStorage(binding, is_written, graphics_segments);
+        segmented |= binding.segment_count != 0;
+        if (unchanged && kept_ids[index] != buffer_id) {
+            static u32 reported{};
+            if (reported++ < 16) {
+                LOG_ERROR(HW_GPU,
+                          "EDEN_NX2_STORAGE_KEEP: stage {} storage buffer {} resolved to {} "
+                          "instead of {}",
+                          stage, index, buffer_id.index, kept_ids[index].index);
+            }
+        }
     });
+    // Kept only when resolving changed no layout (a buffer created on the way) and found no
+    // segments (graphics_segments is cleared for every update).
+    resolved = {
+        .layout_epoch = layout_epoch,
+        .map_epoch = map_epoch,
+        .owner = owner,
+        .valid = keep != 0 && !segmented && buffer_layout_epoch == layout_epoch &&
+                 gpu_memory->MappingEpoch() == map_epoch,
+    };
 }
 
 template <class P>

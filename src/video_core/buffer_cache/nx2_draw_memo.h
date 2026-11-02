@@ -7,8 +7,10 @@
 #include <array>
 #include <bit>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/range_sets.h"
@@ -427,5 +429,70 @@ private:
     [[no_unique_address]] std::conditional_t<PageBits, std::array<u64, REGION_WORDS>, NoPages>
         regions{};
 };
+
+/// EDEN_NX2_DESC_HULL (Vulkan::GraphicsPipeline::CheckDescriptorWords): a run of consecutive
+/// descriptor words read from one constant buffer slot of one stage, with the hull of their
+/// offsets. A run whose slot was not bound elsewhere and whose hull no written range overlaps has
+/// no word the check would read: each of them would be skipped as not rewritten.
+struct DescriptorWordRun {
+    u32 first;
+    u32 count;
+    u32 begin_offset;
+    u32 end_offset; ///< Past the last word's 4 bytes
+    u8 stage;
+    u8 slot;
+};
+
+/// The runs of `words` (each with stage, slot and offset members), in order.
+template <typename Word>
+std::vector<DescriptorWordRun> MakeDescriptorWordRuns(std::span<const Word> words) {
+    std::vector<DescriptorWordRun> runs;
+    for (u32 index = 0; index < static_cast<u32>(words.size()); ++index) {
+        const Word& word = words[index];
+        if (runs.empty() || runs.back().stage != word.stage || runs.back().slot != word.slot) {
+            runs.push_back(DescriptorWordRun{
+                .first = index,
+                .count = 0,
+                .begin_offset = word.offset,
+                .end_offset = word.offset + 4,
+                .stage = static_cast<u8>(word.stage),
+                .slot = static_cast<u8>(word.slot),
+            });
+        }
+        DescriptorWordRun& run = runs.back();
+        ++run.count;
+        run.begin_offset = (std::min)(run.begin_offset, static_cast<u32>(word.offset));
+        run.end_offset = (std::max)(run.end_offset, static_cast<u32>(word.offset) + 4);
+    }
+    return runs;
+}
+
+/// Calls visit(index) in order for the words of each run whose slot moved (moved(stage, slot))
+/// or whose hull at its slot's address (address_of(stage, slot)) a written range (address, size)
+/// overlaps; stops when visit returns true.
+template <typename AddressOf, typename Moved, typename Visit>
+void ForEachCandidateWord(std::span<const DescriptorWordRun> runs,
+                          std::span<const std::pair<u64, u32>> written, AddressOf&& address_of,
+                          Moved&& moved, Visit&& visit) {
+    for (const DescriptorWordRun& run : runs) {
+        if (!moved(run.stage, run.slot)) {
+            const u64 base = address_of(run.stage, run.slot);
+            const u64 begin = base + run.begin_offset;
+            const u64 end = base + run.end_offset;
+            bool overlapped = false;
+            for (const auto& [range_begin, range_size] : written) {
+                overlapped |= begin < range_begin + range_size && range_begin < end;
+            }
+            if (!overlapped) {
+                continue;
+            }
+        }
+        for (u32 index = run.first; index < run.first + run.count; ++index) {
+            if (visit(index)) {
+                return;
+            }
+        }
+    }
+}
 
 } // namespace VideoCommon
