@@ -236,6 +236,10 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 // - Events: the proxy sends each to B, whose rasterizer runs it or its B half there and sends C
 //   the rest; B notes the engine work at its own point (NoteLightWork: B's light draws, S12)
 //   also for an event it sends on to C.
+// - EDEN_NX2_PRESENT_DIAG=1 or EDEN_NX2_MODE_DIAG=1: a "nx2 stages diag" line a second from B
+//   while the stages run with cut c: joins from B (JoinFromB and JoinFromBLocked, as
+//   Counter::JoinsB) a frame, B's wait for C to park, the time C stays parked, and C's ParkBs a
+//   frame with C's wait for B. A frame is a present of the guest's.
 // - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
 //   inside a record at =1; a JoinFromB / JoinFromBLocked still waiting after 50 ms, reported
 //   while it waits (then every second): a slow join while C goes on from record to record, a K3

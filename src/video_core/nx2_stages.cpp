@@ -72,6 +72,16 @@ CbWriteCheck g_cb_write_check{};
 void* g_cb_write_context{};
 bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count);
 void* g_hook_context{};
+/// EDEN_NX2_PRESENT_DIAG=1 or EDEN_NX2_MODE_DIAG=1: with cut c, B's joins and C's ParkBs timed,
+/// and a "nx2 stages diag" line a second from B while the stages run (JoinDiagReport).
+const bool g_join_diag = [] {
+    const auto on = [](const char* name) {
+        const char* text = std::getenv(name);
+        return text != nullptr && text[0] != '0';
+    };
+    return on("EDEN_NX2_PRESENT_DIAG") || on("EDEN_NX2_MODE_DIAG");
+}();
+void JoinDiagReport();
 
 /// What B and C do with the records (StagePipeline's handler).
 struct GpuHandler {
@@ -154,6 +164,9 @@ struct GpuHandler {
     }
     void Report(u8 stage) {
         Nx2Profile::Report(Nx2Profile::stage_report_names[stage]);
+        if (g_join_diag && stage == StageIdB) {
+            JoinDiagReport();
+        }
     }
     void Busy(u8 stage, bool busy) {
         if (stage == g_default_owner) {
@@ -190,6 +203,92 @@ thread_local bool t_locked_join{};
 /// The same for the other threads (CheckRecordOwner): C uses the caches and the scheduler, the
 /// front may not, caught up or not (C holds the mark until the op ran: T9b review protokol-1).
 std::atomic<bool> g_c_park_op{};
+
+/// g_join_diag's counts this second: B's joins (B's thread alone) and C's ParkBs (C adds, B
+/// takes them for the line).
+struct JoinDiag {
+    u64 joins{};
+    u64 locked{};      ///< JoinFromBLocked's of them
+    u64 wait_ns{};     ///< B asked until C parked (the op began)
+    u64 wait_max_ns{};
+    u64 op_ns{}; ///< the ops, C parked
+    std::atomic<u64> parks{};
+    std::atomic<u64> park_wait_ns{}; ///< C asked until B parked (C runs ring 3 on meanwhile)
+    std::atomic<u64> park_wait_max_ns{};
+    u64 second_start_ns{};
+    u64 second_presents{};
+};
+JoinDiag g_join_stats;
+
+u64 DiagNowNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
+
+/// B after a join it asked for at `asked`, its op begun at `entered` (C parked).
+void NoteJoinB(u64 asked, u64 entered, bool locked) {
+    JoinDiag& d = g_join_stats;
+    const u64 wait = entered - asked;
+    ++d.joins;
+    d.locked += locked ? 1 : 0;
+    d.wait_ns += wait;
+    d.wait_max_ns = (std::max)(d.wait_max_ns, wait);
+    d.op_ns += DiagNowNs() - entered;
+}
+
+/// C in a ParkB's op, `wait` after it asked.
+void NoteParkB(u64 wait) {
+    JoinDiag& d = g_join_stats;
+    d.parks.fetch_add(1, std::memory_order_relaxed);
+    d.park_wait_ns.fetch_add(wait, std::memory_order_relaxed);
+    if (wait > d.park_wait_max_ns.load(std::memory_order_relaxed)) {
+        d.park_wait_max_ns.store(wait, std::memory_order_relaxed);
+    }
+}
+
+/// B's loop at each pass (GpuHandler::Report), with cut c: the line once a second. A frame is a
+/// present of the guest's (Core::g_nx2_present_count); "-" when none came.
+void JoinDiagReport() {
+    if (!g_pipeline.Options().cut_c) {
+        return;
+    }
+    JoinDiag& d = g_join_stats;
+    const u64 now = DiagNowNs();
+    const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+    if (d.second_start_ns == 0) {
+        d.second_start_ns = now;
+        d.second_presents = presents;
+        return;
+    }
+    if (now - d.second_start_ns < 1'000'000'000) {
+        return;
+    }
+    const u64 frames = presents - d.second_presents;
+    const u64 parks = d.parks.exchange(0, std::memory_order_relaxed);
+    const u64 park_wait = d.park_wait_ns.exchange(0, std::memory_order_relaxed);
+    const u64 park_max = d.park_wait_max_ns.exchange(0, std::memory_order_relaxed);
+    const auto per_frame = [frames](u64 count) {
+        return frames != 0
+                   ? fmt::format("{:.1f}", static_cast<double>(count) / static_cast<double>(frames))
+                   : std::string{"-"};
+    };
+    const auto avg_us = [](u64 ns, u64 count) {
+        return count != 0 ? static_cast<double>(ns) / 1e3 / static_cast<double>(count) : 0.0;
+    };
+    LOG_INFO(HW_GPU,
+             "nx2 stages diag {:.2f} s: {} presents; joins from B {} ({} a frame, {} locked), "
+             "wait for C {:.0f} us avg {:.0f} us max, C parked {:.0f} us avg, {:.2f} ms in all; "
+             "ParkB {} ({} a frame), wait for B {:.0f} us avg {:.0f} us max",
+             static_cast<double>(now - d.second_start_ns) / 1e9, frames, d.joins,
+             per_frame(d.joins), d.locked, avg_us(d.wait_ns, d.joins),
+             static_cast<double>(d.wait_max_ns) / 1e3, avg_us(d.op_ns, d.joins),
+             static_cast<double>(d.wait_ns + d.op_ns) / 1e6, parks, per_frame(parks),
+             avg_us(park_wait, parks), static_cast<double>(park_max) / 1e3);
+    d.joins = d.locked = d.wait_ns = d.wait_max_ns = d.op_ns = 0;
+    d.second_start_ns = now;
+    d.second_presents = presents;
+}
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
 /// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
@@ -452,11 +551,19 @@ void JoinFromB(FunctionRef op) {
         return;
     }
     Nx2Profile::Add(Counter::JoinsB, 1);
+    const u64 asked = g_join_diag ? DiagNowNs() : 0;
+    u64 entered = 0;
     g_pipeline.JoinFromB([&] {
+        if (g_join_diag) {
+            entered = DiagNowNs();
+        }
         g_owner.store(StageIdB, std::memory_order_release);
         op();
         g_owner.store(g_default_owner, std::memory_order_release);
     });
+    if (g_join_diag) {
+        NoteJoinB(asked, entered, false);
+    }
 }
 
 void JoinFromBLocked(FunctionRef op) {
@@ -469,13 +576,21 @@ void JoinFromBLocked(FunctionRef op) {
     // B holds the buffer cache mutex while it waits: C reaching the join's target must not take
     // it (K3 (a)). STAGE_CHECK reports a wait that lasts while it lasts (GpuHandler::JoinStall).
     t_locked_join = true;
+    const u64 asked = g_join_diag ? DiagNowNs() : 0;
+    u64 entered = 0;
     g_pipeline.JoinFromBLocked([&] {
+        if (g_join_diag) {
+            entered = DiagNowNs();
+        }
         t_locked_join = false;
         g_owner.store(StageIdB, std::memory_order_release);
         op();
         g_owner.store(g_default_owner, std::memory_order_release);
     });
     t_locked_join = false;
+    if (g_join_diag) {
+        NoteJoinB(asked, entered, true);
+    }
 }
 
 void ParkB(FunctionRef op) {
@@ -483,7 +598,11 @@ void ParkB(FunctionRef op) {
         op();
         return;
     }
+    const u64 asked = g_join_diag ? DiagNowNs() : 0;
     g_pipeline.ParkB([&] {
+        if (g_join_diag) {
+            NoteParkB(DiagNowNs() - asked);
+        }
         const bool was_park_op = t_park_op;
         t_park_op = true;
         if (g_check) {
@@ -589,6 +708,12 @@ void Start(Core::System& system) {
     };
     g_default_owner = options.cut_c ? StageIdC : StageIdB;
     g_owner.store(g_default_owner, std::memory_order_relaxed);
+    // B and C stopped: the diag line's second starts over with them.
+    g_join_stats.joins = g_join_stats.locked = g_join_stats.wait_ns = 0;
+    g_join_stats.wait_max_ns = g_join_stats.op_ns = g_join_stats.second_start_ns = 0;
+    g_join_stats.parks.store(0, std::memory_order_relaxed);
+    g_join_stats.park_wait_ns.store(0, std::memory_order_relaxed);
+    g_join_stats.park_wait_max_ns.store(0, std::memory_order_relaxed);
     g_record_busy.store(false, std::memory_order_relaxed);
     g_handler.targets = {};
     Capture().Reset();
