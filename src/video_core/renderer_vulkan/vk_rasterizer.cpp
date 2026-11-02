@@ -393,10 +393,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     if (split_draws) {
         buffer_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
         pipeline_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
+        VideoCommon::Nx2Stages::SetStageHooks(&BeginStagesHook, &EndStagesHook, this);
     }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
+    if (split_draws) {
+        VideoCommon::Nx2Stages::SetStageHooks(nullptr, nullptr, nullptr);
+    }
     scheduler.WaitWorker();
     scheduler.Finish();
 }
@@ -3700,31 +3704,40 @@ void RasterizerVulkan::JoinB(Func&& func) {
     });
 }
 
-void RasterizerVulkan::EnsureSplitStaged() {
-    if (buffer_cache_runtime.Staged()) [[likely]] {
-        return;
-    }
-    // B's first buffer cache work with the stages on (the integration may move it to Start).
-    Nx2Record::CacheLock lock{buffer_cache.mutex};
-    buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, this);
-    buffer_cache_runtime.BeginStages();
+template <typename Func>
+void RasterizerVulkan::JoinBLocked(Func&& func) {
+    VideoCommon::Nx2Stages::JoinFromBLocked([&] {
+        const bool was_in_join = b_in_join;
+        b_in_join = true;
+        func();
+        b_in_join = was_in_join;
+    });
 }
 
-void RasterizerVulkan::NoteStagesStopped() {
-    namespace Stages = VideoCommon::Nx2Stages;
-    // Stop calls NoteEngineWork with the stages drained, from none of them and in no join.
-    if (!Stages::Active() || Stages::OnStage(Stages::Stage::B) ||
-        Stages::OnStage(Stages::Stage::C) || Stages::InJoin() || !buffer_cache_runtime.Staged()) {
-        return;
-    }
-    std::scoped_lock lock{buffer_cache.mutex};
-    buffer_cache_runtime.EndStages();
+void RasterizerVulkan::BeginStagesHook(void* context) {
+    // Start, before B and C start (every stage drained).
+    auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    std::scoped_lock lock{rasterizer->buffer_cache.mutex};
+    rasterizer->buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, rasterizer);
+    rasterizer->buffer_cache_runtime.BeginStages();
+    // B's next draw is set up in full and finds the targets' device ranges again.
+    rasterizer->light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
+    rasterizer->stage_targets.valid = false;
+}
+
+void RasterizerVulkan::EndStagesHook(void* context) {
+    // Stop, after B and C stopped: the anchor's seq is noted, then the runtime's pending one.
+    auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    rasterizer->ReleaseAnchorC();
+    std::scoped_lock lock{rasterizer->buffer_cache.mutex};
+    rasterizer->buffer_cache_runtime.EndStages();
 }
 
 void RasterizerVulkan::StageRecordOwnerHook(void* context, RecordList* records,
                                             VideoCommon::Nx2Stages::FunctionRef op) {
-    // B inside a buffer cache operation, its cache locks let go: C parks having run what B sent
-    // before; B's list so far is recorded first, then `op` records straight to the scheduler.
+    // B inside a buffer cache operation (a packet, the buffer cache mutex held: K3 (a)): C parks
+    // having run what B published before; B's list so far is recorded first, then `op` records
+    // straight to the scheduler. Both use B's state alone (C's replica lags: JoinFromBLocked).
     auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
     const auto run = [&] {
         if (records != nullptr) {
@@ -3737,12 +3750,11 @@ void RasterizerVulkan::StageRecordOwnerHook(void* context, RecordList* records,
         run();
         return;
     }
-    rasterizer->JoinB(run);
+    rasterizer->JoinBLocked(run);
 }
 
 template <typename Func>
 void RasterizerVulkan::StageBufferWork(Func&& work) {
-    EnsureSplitStaged();
     if (buffer_cache_runtime.Target().list != nullptr) {
         // Inside B's packet: its records go with it.
         Nx2Record::CacheLock lock{buffer_cache.mutex};
@@ -4108,7 +4120,6 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     Tegra::Engines::Maxwell3D& mb = EngineB();
     params.rasterizer = this;
     params.topology = static_cast<u8>(mb.draw_manager.draw_state.topology);
-    EnsureSplitStaged();
     bool invalidated;
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
@@ -4706,7 +4717,6 @@ void RasterizerVulkan::ClearB(u32 layer_count) {
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::Clears, 1);
     gpu_memory->FlushCaching();
     // T8: the clear writes the bound targets, before the next packet.
-    EnsureSplitStaged();
     PreSetTargets(EngineB(), NextStageSeq());
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, layer_count] {
@@ -4721,7 +4731,6 @@ void RasterizerVulkan::DrawTextureB() {
     NoteLightWork();
     const auto state = EngineB().draw_manager.draw_texture_state;
     // T8: the blit writes the bound targets, before the next packet.
-    EnsureSplitStaged();
     PreSetTargets(EngineB(), NextStageSeq());
     FlushStageCWork();
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, state] {

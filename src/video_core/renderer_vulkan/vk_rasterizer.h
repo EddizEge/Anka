@@ -116,9 +116,6 @@ public:
     bool HoldsGpuWrittenData(DAddr addr, u64 size) override;
     void NoteEngineWork() override {
         NoteLightWork();
-        if (split_draws) [[unlikely]] {
-            NoteStagesStopped();
-        }
     }
     [[nodiscard]] u64 WorkEpoch() const noexcept override {
         if (split_draws && VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B))
@@ -327,14 +324,18 @@ private:
     /// B: a join of its own: C parked, the old bodies run here (b_in_join).
     template <typename Func>
     void JoinB(Func&& func);
+    /// B inside a packet holding the buffer cache mutex: JoinFromBLocked (b_in_join).
+    template <typename Func>
+    void JoinBLocked(Func&& func);
     /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
     /// of their own (sent when not empty) unless one is open.
     template <typename Func>
     void StageBufferWork(Func&& work);
-    /// B: the runtime staged (BufferCacheRuntime::BeginStages) and bound to JoinFromB, at B's
-    /// first use with the stages on; NoteEngineWork ends it once they stopped.
-    void EnsureSplitStaged();
-    void NoteStagesStopped();
+    /// Nx2Stages::SetStageHooks (constructor): Start stages the buffer runtime (BeginStages, its
+    /// record owner hook bound to JoinFromBLocked) before B and C start, Stop ends it after they
+    /// stopped; nothing runs behind either.
+    static void BeginStagesHook(void* context);
+    static void EndStagesHook(void* context);
     static void StageRecordOwnerHook(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     /// B, no cache lock held: C's half of B's invalidations so far (texture WriteMemory, query
