@@ -28,4 +28,13 @@ namespace VideoCommon::Nx2Stages {
     return QueryGoesToC(type, flags, Settings::IsGPULevelHigh());
 }
 
+/// Whether a query report or counter reset running its old body notes B's "a query since the last
+/// WaitForIdle join" (F3: the next WaitForIdle may sync query writes, which takes the buffer cache
+/// mutex, and joins). With cut c on every thread but C: A in its join (KeplerCompute's report) and
+/// B in a join of its own, the other stages parked. C runs what B sent it, which B noted already;
+/// it must not write B's flag.
+[[nodiscard]] constexpr bool QueryNotesWfi(bool split_draws, bool on_stage_c) noexcept {
+    return split_draws && !on_stage_c;
+}
+
 } // namespace VideoCommon::Nx2Stages

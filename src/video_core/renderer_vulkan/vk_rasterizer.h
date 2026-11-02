@@ -345,6 +345,8 @@ private:
     /// B inside a packet holding the buffer cache mutex: JoinFromBLocked (b_in_join).
     template <typename Func>
     void JoinBLocked(Func&& func);
+    /// A query report or counter reset's old body (A or B in a join): B's next WaitForIdle joins.
+    void NoteQueryForWfi() noexcept;
     /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
     /// of their own (sent when not empty) unless one is open; the record owner records them.
     template <typename Func>

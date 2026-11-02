@@ -1959,6 +1959,9 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
         return;
     }
     NoteLightWork();
+    if (split_draws) [[unlikely]] {
+        NoteQueryForWfi();
+    }
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
     case VideoCommon::QueryType::StreamingByteCount:
@@ -2004,6 +2007,9 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         return;
     }
     NoteLightWork();
+    if (split_draws) [[unlikely]] {
+        NoteQueryForWfi();
+    }
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
@@ -3807,6 +3813,14 @@ void RasterizerVulkan::StageToC(const Func& func) {
         return;
     }
     VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, func);
+}
+
+void RasterizerVulkan::NoteQueryForWfi() noexcept {
+    // T7c review finding 2 (nx2_stage_split.h).
+    if (VideoCommon::Nx2Stages::QueryNotesWfi(
+            split_draws, VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::C))) {
+        stage_query_since_wfi = true;
+    }
 }
 
 void RasterizerVulkan::BeginStagesHook(void* context) {
