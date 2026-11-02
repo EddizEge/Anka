@@ -275,6 +275,29 @@ TEST_CASE("Nx2ModePace21: rel20 done; 20 again within verify30 fails it", "[vide
     REQUIRE(copy.Fails(Push21::Rel20) == 0);
 }
 
+TEST_CASE("Nx2ModePace21: rel20 done when the game goes up to 60", "[video_core]") {
+    const Params21 p{};
+    Controller21 first;
+    const Fed fed = Feed(first, 3, 12.0, 120);
+    REQUIRE(fed.started_at >= 0);
+    Controller21 ctl;
+    Feed(ctl, 3, 12.0, fed.started_at + 1);
+    REQUIRE(ctl.Pushing() == Push21::Rel20);
+    Controller21 copy = ctl;
+    const Output21 up = Step(ctl, 1, 12.0, 30.0);
+    REQUIRE(up.ended == Push21::Rel20);
+    REQUIRE(up.result == Result::Done);
+    REQUIRE(up.fails == 0);
+    REQUIRE(ctl.Fails(Push21::Rel20) == 0);
+    REQUIRE(ctl.Rest(Push21::Rel20) == 0.0);
+    // That 60 drops to 20 within verify30: rel20 failed after all.
+    Step(copy, 1, 12.0, 30.0);
+    Feed(copy, 1, 12.0, 120); // 2 s
+    const Output21 down = Step(copy, 3, 12.0, 50.0);
+    REQUIRE(down.unverified == Push21::Rel20);
+    REQUIRE(down.rest_s == p.rel_rest_s);
+}
+
 TEST_CASE("Nx2ModePace21: 60 stays where 60 fits, down to 30 inside its window", "[video_core]") {
     const Params21 p{};
     {

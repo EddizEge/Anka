@@ -454,7 +454,8 @@ private:
         case Push21::To20:
             return new_mode == 3 ? Result::Done : Result::Other;
         case Push21::Rel20:
-            return new_mode == 2 ? Result::Done : Result::Other;
+            // 20 -> 60 is up as well; Verify still watches that it keeps out of 20.
+            return new_mode == 2 || new_mode == 1 ? Result::Done : Result::Other;
         case Push21::Rel60:
             return new_mode == 1 ? Result::Done : Result::Other;
         default:
