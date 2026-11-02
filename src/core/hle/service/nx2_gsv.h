@@ -1003,6 +1003,8 @@ public:
         });
         if (GetReplies() != nullptr) {
             RegisterReplies();
+        } else {
+            static_cast<void>(ReplyOwnCommands()); // its "needs the table" warning
         }
     }
 
