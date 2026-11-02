@@ -55,6 +55,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_stage_split.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
 #include "video_core/renderer_vulkan/nx2_record_list.h"
@@ -1977,6 +1978,21 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
         // The query cache is C's (F3: the next WaitForIdle joins).
         NoteLightWork();
         stage_query_since_wfi = true;
+        if (!VideoCommon::Nx2Stages::QueryGoesToC(type, flags)) {
+            // A report a fence carries (T7c review finding 1): the old body in a join, C parked;
+            // its fence takes the buffer cache mutex, which a record C runs never may.
+            const auto run = [&] { Query(gpu_addr, type, flags, payload, subreport); };
+            if (Nx2Record::HeldLocks::Count() != 0 ||
+                buffer_cache_runtime.Target().list != nullptr) [[unlikely]] {
+                // Not seen: reports come from records of ring 2 (the proxy, the replicas), no
+                // packet open, no cache lock. Inside a packet the mutex is held: K3 (a)'s join.
+                VideoCommon::Nx2Stages::ReportStageHazard("fence query inside B's packet");
+                JoinBLocked(run);
+                return;
+            }
+            JoinB(run);
+            return;
+        }
         if (const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr)) {
             // CounterReport's mark, made here before the query leaves B: the page summary B asks
             // (Nx2GpuPages::Holds) covers the page from this point of the stream on.

@@ -25,6 +25,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -340,6 +341,8 @@ private:
             }
         }
         {
+            // Back stages, cut c: B's mutex (K3); C may commit only inside a ParkB.
+            Nx2Stages::CheckBufferLock("FenceManager::CommitCacheFlushes");
             std::scoped_lock lock{buffer_cache.mutex};
             if (buffer_cache.HasUncommittedFlushes()) {
                 buffer_cache.CommitAsyncFlushes();
