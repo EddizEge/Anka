@@ -393,6 +393,8 @@ private:
     /// B: the same, or `mb`'s current pools.
     [[nodiscard]] bool WritesAnyPoolB(const Tegra::Engines::Maxwell3D& mb, GPUVAddr address,
                                       u64 size);
+    /// The sampler pool's limit C reads with `mb`'s registers (SamplerPoolLimit).
+    [[nodiscard]] static u32 SamplerPoolLimitB(const Tegra::Engines::Maxwell3D& mb);
     /// Nx2Stages::SetCbWriteCheck (constructor), B: constant buffer data B writes to guest memory
     /// (a CbData record) joins where it meets a pool (omur-1); over a release C has not written
     /// yet, C writes it first (qw-cbdata).

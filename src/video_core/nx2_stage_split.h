@@ -86,6 +86,13 @@ struct CacheHalves {
     return pool + (u64{limit} + 1) * 32;
 }
 
+/// The sampler pool's limit as C reads it (TextureCache::SynchronizeDescriptors): the header
+/// pool's when samplers go by header index (ViaHeaderBinding), else its own.
+[[nodiscard]] constexpr u32 SamplerPoolLimit(bool via_header, u32 header_limit,
+                                             u32 sampler_limit) noexcept {
+    return via_header ? header_limit : sampler_limit;
+}
+
 /// Whether a write of [address, address + size) meets that pool (none at address 0).
 [[nodiscard]] constexpr bool WritesPool(u64 pool, u32 limit, u64 address, u64 size) noexcept {
     return pool != 0 && address < PoolEnd(pool, limit) && pool < address + size;

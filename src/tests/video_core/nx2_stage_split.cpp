@@ -97,6 +97,11 @@ TEST_CASE("Nx2StageSplit: a write into a pool C reads", "[video_core]") {
     REQUIRE(!WritesPool(Pool, 15, Pool - 4, 4));
     // No pool bound.
     REQUIRE(!WritesPool(0, 15, 0, 0x1000));
+    // The sampler pool ends where C reads it: NVN's 4096 samplers beside 2^20 headers do not
+    // stretch it over what follows (T7d review cbhook-1).
+    REQUIRE(SamplerPoolLimit(false, 0xfffff, 0xfff) == 0xfff);
+    REQUIRE(SamplerPoolLimit(true, 0xfffff, 0xfff) == 0xfffff);
+    REQUIRE(!WritesPool(Pool, SamplerPoolLimit(false, 0xfffff, 0xfff), Pool + 0x1000 * 32, 4));
 }
 
 TEST_CASE("Nx2StageSplit: a write over a report C has not run waits for it", "[video_core]") {

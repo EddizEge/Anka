@@ -4119,7 +4119,14 @@ void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) 
     };
     const auto& regs = mb.regs;
     note(regs.tex_header.Address(), regs.tex_header.limit);
-    note(regs.tex_sampler.Address(), (std::max)(regs.tex_sampler.limit, regs.tex_header.limit));
+    note(regs.tex_sampler.Address(), SamplerPoolLimitB(mb));
+}
+
+u32 RasterizerVulkan::SamplerPoolLimitB(const Tegra::Engines::Maxwell3D& mb) {
+    const auto& regs = mb.regs;
+    return VideoCommon::Nx2Stages::SamplerPoolLimit(
+        regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding, regs.tex_header.limit,
+        regs.tex_sampler.limit);
 }
 
 bool RasterizerVulkan::WritesPoolsB(GPUVAddr address, u64 size) {
@@ -4132,8 +4139,7 @@ bool RasterizerVulkan::WritesAnyPoolB(const Tegra::Engines::Maxwell3D& mb, GPUVA
     using VideoCommon::Nx2Stages::WritesPool;
     const auto& regs = mb.regs;
     return WritesPool(regs.tex_header.Address(), regs.tex_header.limit, address, size) ||
-           WritesPool(regs.tex_sampler.Address(),
-                      (std::max)(regs.tex_sampler.limit, regs.tex_header.limit), address, size) ||
+           WritesPool(regs.tex_sampler.Address(), SamplerPoolLimitB(mb), address, size) ||
            WritesPoolsB(address, size);
 }
 
@@ -4148,14 +4154,23 @@ bool RasterizerVulkan::CbWriteJoinsB(Tegra::Engines::Maxwell3D& replica, GPUVAdd
     // guest memory itself (Maxwell3D::StageCbWrite). Into a pool C may still read: the write in a
     // join, as InlineToMemoryB's.
     if (WritesAnyPoolB(replica, address, size)) {
+        // GpuHandler::CbData joins at once (Nx2Stages::JoinFromB, not JoinB): what B has for C
+        // goes first, and what C runs before it parks needs no tracking after (T7d review
+        // cbhook-2: JoinB's bookkeeping).
+        FlushStageCWork();
+        stage_pools.Clear();
+        stage_query_writes.Clear();
         return true;
     }
     // Over a payload release C has not written yet (qw-cbdata, T7c review finding 3): C writes it
     // first. A counter C writes from a later fence is cancelled where the old path cancels it: by
     // the invalidation at the memory manager's next FlushCaching (InnerInvalidationB, in ring 3's
-    // order).
+    // order). A write over more than one device range: any release (cbhook-3).
     if (stage_query_writes.Size() != 0) [[unlikely]] {
-        GuardQueryWritesB(replica.GetMemoryManager().GpuToCpuAddress(address), size, false);
+        Tegra::MemoryManager& memory = replica.GetMemoryManager();
+        GuardQueryWritesB(memory.IsContinuousRange(address, size) ? memory.GpuToCpuAddress(address)
+                                                                  : std::nullopt,
+                          size, false);
     }
     return false;
 }
