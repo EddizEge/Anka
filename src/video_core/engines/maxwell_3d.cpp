@@ -28,6 +28,7 @@
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
+#include "shader_recompiler/ir_opt/nx2_root.h"
 #include "video_core/textures/texture.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
@@ -277,6 +278,10 @@ bool Maxwell3D::IsMethodExecutable(u32 method) {
     if (method >= MacroRegistersStart) {
         return true;
     }
+    if (method == RootTables::SelectMethod || method == RootTables::LoadMethod) {
+        // EDEN_NX2_ROOT_TABLES: each write acts (a load of the same word twice writes two).
+        return Shader::Optimization::Nx2Root::TablesEnabled();
+    }
     switch (method) {
     case MAXWELL3D_REG_INDEX(draw.end):
     case MAXWELL3D_REG_INDEX(draw.begin):
@@ -509,6 +514,12 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     // A state register written with the value it holds changes nothing a draw reads (its dirty
     // flags only make the next full setup redo the same); executable methods act whatever their
     // value. With EDEN_NX2_SKIP_SAME such writes do not get here (CallMethod, ConsumeSinkImpl).
+    if (method - RootTables::SelectMethod <= RootTables::LoadMethod - RootTables::SelectMethod)
+        [[unlikely]] {
+        if (Shader::Optimization::Nx2Root::DiagEnabled()) {
+            NoteRootWrite(method, argument);
+        }
+    }
     const bool changed = regs.reg_array[method] != argument;
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
@@ -518,11 +529,61 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     }
 }
 
+// EDEN_NX2_ROOT_DIAG: the writes to 0x504 / 0x508 that reach the back (without
+// EDEN_NX2_ROOT_TABLES, a word written again with the value it holds may be skipped as a same-value
+// state write): the first 32 with the table and offset they go to, then a count at powers of two.
+void Maxwell3D::NoteRootWrite(u32 method, u32 argument) {
+    static u64 selects{};
+    static u64 loads{};
+    static u32 table{};
+    static u32 offset{};
+    const bool select = method == RootTables::SelectMethod;
+    ++(select ? selects : loads);
+    const u64 total = selects + loads;
+    if (select) {
+        table = argument & 7;
+        offset = (argument >> 8) & 0xff;
+    }
+    if (total <= 32) {
+        if (select) {
+            LOG_INFO(HW_GPU, "nx2 root diag: 3D 0x504 = {:#x} (table {}, byte offset {:#x})",
+                     argument, table, offset);
+        } else {
+            LOG_INFO(HW_GPU, "nx2 root diag: 3D 0x508 = {:#x} (table {}, byte offset {:#x})",
+                     argument, table, offset);
+        }
+    } else if ((total & (total - 1)) == 0) {
+        LOG_INFO(HW_GPU, "nx2 root diag: {} writes to 3D 0x504 and {} to 0x508 so far", selects,
+                 loads);
+    }
+    if (!select) {
+        offset += 4;
+    }
+}
+
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
         LOG_DEBUG(HW_GPU, "Native GPU surface clear: value={:#x}", argument);
     }
     switch (method) {
+    // EDEN_NX2_ROOT_TABLES (executable only then). A write is noted as a State change
+    // (ProcessDirtyRegisters): the next draw takes the full setup, which streams table 0 as an
+    // unbound bank 17 again (BindHostGraphicsUniformBuffer), so no light draw keeps an old copy.
+    case RootTables::SelectMethod:
+        root_tables.selected = argument & 7;
+        root_tables.offset = (argument >> 8) & 0xff;
+        return;
+    case RootTables::LoadMethod:
+        if (root_tables.offset < 256 && root_tables.offset % 4 == 0) {
+            root_tables.tables[root_tables.selected][root_tables.offset / 4] = argument;
+            if (root_tables.selected == 0 && !root_tables.loaded) {
+                root_tables.loaded = true;
+                LOG_INFO(HW_GPU, "nx2 root tables (EDEN_NX2_ROOT_TABLES): the game loads root "
+                                 "table 0 (3D 0x504 / 0x508), bank 17 reads it where unbound");
+            }
+        }
+        root_tables.offset += 4;
+        return;
     case MAXWELL3D_REG_INDEX(wait_for_idle):
         return rasterizer->WaitForIdle();
     case MAXWELL3D_REG_INDEX(shadow_ram_control):
@@ -1234,6 +1295,8 @@ bool FrontHandledOutsideDrawManager(u32 method) {
         return true;
     }
     switch (method) {
+    case Maxwell3D::RootTables::SelectMethod: // executable with EDEN_NX2_ROOT_TABLES only
+    case Maxwell3D::RootTables::LoadMethod:
     case MAXWELL3D_REG_INDEX(wait_for_idle):
     case MAXWELL3D_REG_INDEX(shadow_ram_control):
     case MAXWELL3D_REG_INDEX(load_mme.instruction_ptr):

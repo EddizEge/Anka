@@ -3168,6 +3168,19 @@ public:
     std::array<u32, 0xc00>& GetNativeDataRam() { return native_data_ram; }
     std::span<u32> GetNativeMacroPositions() { return native_macro_context ? std::span<u32>{native_macro_context->positions} : std::span<u32>{macro_positions}; }
 
+    /// Root tables (shader_recompiler/ir_opt/nx2_root.h): eight 256-byte tables written inline,
+    /// 0x504 selecting a table (bits 0-2) and a byte offset (bits 8-15), each 0x508 writing the
+    /// next word; shaders read them as banks 24-31, the Ampere lowering bank 24 as bank 17. Kept
+    /// with EDEN_NX2_ROOT_TABLES (the methods are executable then, else plain registers).
+    struct RootTables {
+        static constexpr u32 SelectMethod = 0x504 / 4;
+        static constexpr u32 LoadMethod = 0x508 / 4;
+        std::array<std::array<u32, 64>, 8> tables{};
+        u32 selected{};
+        u32 offset{};
+        bool loaded{}; ///< table 0 written at least once
+    } root_tables;
+
 
     /// Write the value to the register identified by method.
     void CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) override;
@@ -3303,6 +3316,9 @@ private:
     u32 ProcessShadowRam(u32 method, u32 argument);
 
     void ProcessDirtyRegisters(u32 method, u32 argument);
+
+    /// EDEN_NX2_ROOT_DIAG: logs a write to 0x504 / 0x508 (RootTables).
+    void NoteRootWrite(u32 method, u32 argument);
 
     /// EDEN_NX2_LIGHT_DRAW: notes a change of `kind` (LightChange) made by `method`.
     void NoteLightChange(u32 kind, u32 method) {

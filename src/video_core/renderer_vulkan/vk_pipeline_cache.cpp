@@ -11,9 +11,12 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <bit>
 #include <numeric>
@@ -28,6 +31,7 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "shader_recompiler/ir_opt/nx2_root.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -64,6 +68,53 @@ using Shader::Maxwell::ConvertLegacyToGeneric;
 using Shader::Maxwell::GenerateGeometryPassthrough;
 using Shader::Maxwell::MergeDualVertexPrograms;
 using Shader::Maxwell::TranslateProgram;
+
+// EDEN_NX2_ROOT_DIAG (shader_recompiler/ir_opt/nx2_root.h): after a VertexB or Fragment stage is
+// translated, what BlitConstantsPass found in its bank 17 reads. The first 20 programs reading a
+// root table (past the blit block, or only words the blit leaves zero) or reading bank 17 at a
+// register offset are logged by hash; a count of each kind at powers of two.
+void LogBank17Reads(u64 hash, size_t stage) {
+    namespace Nx2Root = Shader::Optimization::Nx2Root;
+    const Nx2Root::Reads reads = std::exchange(Nx2Root::LastReads(), Nx2Root::Reads{});
+    if (reads.immediate == 0 && reads.indirect == 0) {
+        return;
+    }
+    static std::mutex mutex;
+    static u32 logged{};
+    static u64 blit{};
+    static u64 table{};
+    static u64 indirect{};
+    std::scoped_lock lock{mutex};
+    const bool reads_table = reads.ReadsTable();
+    ++(reads_table ? table : (reads.immediate != 0 ? blit : indirect));
+    if ((reads_table || reads.indirect != 0) && logged < 20) {
+        ++logged;
+        std::string offsets;
+        for (u32 i = 0; i < reads.offset_count; ++i) {
+            offsets += fmt::format("{}{:#x}", offsets.empty() ? " (" : " ", reads.offsets[i]);
+        }
+        if (!offsets.empty()) {
+            offsets += ")";
+        }
+        const char* const kind = reads.outside != 0 ? "past the blit block"
+                                 : reads_table      ? "only where the blit block is zero"
+                                                    : "at a register offset";
+        LOG_INFO(Render_Vulkan,
+                 "nx2 root diag: shader {:016x} (stage {}) reads bank 17 {}: {} reads, {} past the "
+                 "blit block{}, {} of words the blit makes nonzero, {} at a register offset{}",
+                 hash, stage, kind, reads.immediate, reads.outside, offsets, reads.nonzero,
+                 reads.indirect,
+                 Nx2Root::TablesEnabled() && reads_table ? "; kept (EDEN_NX2_ROOT_TABLES)" : "");
+    }
+    const u64 total = blit + table + indirect;
+    if ((total & (total - 1)) == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "nx2 root diag: {} programs read bank 17: {} the blit block, {} a root table, {} "
+                 "only at a register offset",
+                 total, blit, table, indirect);
+    }
+}
+
 using VideoCommon::ComputeEnvironment;
 using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
@@ -1129,6 +1180,9 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
         translate_timer.reset();
+        if (Shader::Optimization::Nx2Root::DiagEnabled()) [[unlikely]] {
+            LogBank17Reads(key.unique_hashes[index], index);
+        }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
             LOG_WARNING(Render_Vulkan, "0x{:016x}: Skipping shader with known issues", key.unique_hashes[index]);

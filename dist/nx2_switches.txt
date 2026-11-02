@@ -34,3 +34,6 @@
 #EDEN_NX2_PRESENT_RATE=1
 # MEM_OP_D MEMBAR and WaitForIdle record a real memory barrier (H1 experiment)
 #EDEN_NX2_MEMBAR=1
+# root table 0 (3D 0x504/0x508) and bank 17: log only / keep the game's tables (H1 experiment)
+#EDEN_NX2_ROOT_DIAG=1
+#EDEN_NX2_ROOT_TABLES=1
