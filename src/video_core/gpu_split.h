@@ -23,6 +23,14 @@ class EngineInterface;
 
 namespace VideoCommon {
 
+/// Where a deferred call runs with the back stages on (EDEN_NX2_BACK_STAGES, nx2_stages.h): bits
+/// 4-5 of its Call entry, which the unstaged back (GpuSplit::Execute) ignores.
+enum class DeferTarget : u8 {
+    Owner = 0, ///< The stage owning the caches (K1: BC), forwarded in the stream's order
+    OnA = 1,   ///< A: register and draw manager work (FinishFrontMacro, IndirectDrawCall)
+    Join = 2,  ///< A, the stages below parked (RunCommand, a channel to stage, ...)
+};
+
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
 // CPU's commands, parses command lists and runs the puller; engine method calls and everything
 // behind them (register state, macros, draws, the rasterizer and its caches) run in order on a
@@ -93,18 +101,33 @@ public:
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     template <typename Func>
     void Defer(const Func& func) {
+        DeferTo<DeferTarget::Owner>(func);
+    }
+    /// Defer, on `Target`'s stage when the back stages run.
+    template <DeferTarget Target, typename Func>
+    void DeferTo(const Func& func) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = ReserveEntry(2 + payload);
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] = static_cast<u64>(Kind::Call) | TargetBits(Target) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
     }
     void DeferFunction(std::function<void()>&& func);
+    /// DeferFunction on `Target`'s stage.
+    template <DeferTarget Target>
+    void DeferFunctionTo(std::function<void()>&& func) {
+        auto* const heap = new std::function<void()>(std::move(func));
+        DeferTo<Target>([heap] {
+            (*heap)();
+            delete heap;
+        });
+    }
 
     /// Defer, returning where the copy of `func` went. Until Published(start) the back cannot
-    /// see it: the front may still change the copy, e.g. merge a following draw into it.
+    /// see it: the front may still change the copy, e.g. merge a following draw into it. Runs on
+    /// A with the back stages (its users are register and draw manager work).
     template <typename Func>
     u64* DeferEditable(const Func& func, u64& start) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
@@ -112,7 +135,8 @@ public:
         u64* const entry = ReserveEntry(2 + payload);
         // After a skip to the ring's start (ReserveSlow) too, the entry is at write_position.
         start = write_position;
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] =
+            static_cast<u64>(Kind::Call) | TargetBits(DeferTarget::OnA) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
@@ -160,6 +184,13 @@ private:
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
+    /// Call: bits 4-5 the DeferTarget.
+    static constexpr u64 TargetBits(DeferTarget target) {
+        return static_cast<u64>(target) << 4;
+    }
+    static constexpr DeferTarget CallTarget(u64 head) {
+        return static_cast<DeferTarget>((head >> 4) & 3);
+    }
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;

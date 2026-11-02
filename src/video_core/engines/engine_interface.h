@@ -70,6 +70,10 @@ public:
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
+    /// Back stages (nx2_stages.h): the engine's executable methods run on A as they come
+    /// (Maxwell3D, which sends what they do to the stages); otherwise A runs them with the
+    /// stages parked (a join).
+    bool stage_methods_on_a{};
     /// Methods whose consecutive macro writes go to CallMethodRun together (none by default).
     static constexpr u32 MaxMethodRun = 32;
     u32 method_run_begin{};
