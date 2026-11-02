@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/logging.h"
+#include "core/core.h"
 #include "core/hle/result.h"
 #include "core/hle/service/am/am_results.h"
 #include "core/hle/service/am/frontend/applets.h"
@@ -237,6 +238,7 @@ Result ISelfController::SetOutOfFocusSuspendingEnabled(bool enabled) {
 Result ISelfController::SetAlbumImageOrientation(
     Capture::AlbumImageOrientation album_image_orientation) {
     LOG_WARNING(Service_AM, "(STUBBED) called, orientation={}", album_image_orientation);
+    Core::g_nx2_album_count.fetch_add(1, std::memory_order_relaxed);
 
     std::scoped_lock lk{m_applet->lock};
     m_applet->album_image_orientation = album_image_orientation;

@@ -13,11 +13,13 @@ namespace Nx2AutoScript {
 // One item per line, '#' starts a comment:
 //   <seconds> <key> <held seconds>                 key: A B X Y L R ZL ZR Plus Minus Up Down Left Right
 //   <seconds> stick <L|R> <x> <y> <held seconds>   x and y in [-1, 1]
-//   anchor boot | anchor present                   seconds count from start-up or from the first
-//                                                  present (default); one anchor per file
+//   anchor boot | present | album                  seconds count from start-up, from the first
+//                                                  present (default), or from the game's first
+//                                                  SetAlbumImageOrientation call (Donkey Kong
+//                                                  Bananza: its title menu); one anchor per file
 // Names are case-insensitive. Bad lines are reported and skipped.
 
-enum class Anchor { Boot, Present };
+enum class Anchor { Boot, Present, Album };
 
 struct Event {
     double start;    // seconds after the anchor
@@ -47,8 +49,9 @@ struct Action {
 
 std::vector<Action> Schedule(const Script& script);
 
-// EDEN_NX2_AUTO_EXIT=<seconds>[@boot|@present]: close the window that many seconds after start-up
-// (or the first present), the same way as closing it by hand. "0" or empty is off.
+// EDEN_NX2_AUTO_EXIT=<seconds>[@boot|@present|@album]: close the window that many seconds after
+// start-up (or the first present, or the first album orientation call), the same way as closing it
+// by hand. "0" or empty is off.
 struct ExitSpec {
     bool enabled = false;
     double seconds = 0.0;

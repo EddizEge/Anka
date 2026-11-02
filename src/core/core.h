@@ -118,6 +118,9 @@ namespace Core {
 
 /// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
 extern std::atomic<u64> g_nx2_present_count;
+/// Calls of the guest's ISelfController::SetAlbumImageOrientation. Donkey Kong Bananza makes one as
+/// its title menu comes up; unattended runs time their menu input from the first one.
+extern std::atomic<u64> g_nx2_album_count;
 /// Emulation sessions started in this process (nvdrv's Module counts them).
 extern std::atomic<u32> g_nx2_session;
 

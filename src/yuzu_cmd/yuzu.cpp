@@ -506,6 +506,7 @@ struct AutoRun {
     size_t port = 0;
     std::chrono::steady_clock::time_point boot;
     std::optional<std::chrono::steady_clock::time_point> first_present;
+    std::optional<std::chrono::steady_clock::time_point> first_album;
 };
 AutoRun g_auto;
 } // Anonymous namespace
@@ -592,15 +593,16 @@ static void BindAutoInput(SdlState& state) {
     g_auto.port = 0;
 }
 
-// Seconds since the anchor; nothing before the first present for the present anchor.
+// Seconds since the anchor; nothing before the first present (or album call) for those anchors.
 static std::optional<double> AutoSeconds(Anchor anchor, std::chrono::steady_clock::time_point now) {
     if (anchor == Anchor::Boot) {
         return std::chrono::duration<double>(now - g_auto.boot).count();
     }
-    if (!g_auto.first_present) {
+    const auto& start = anchor == Anchor::Album ? g_auto.first_album : g_auto.first_present;
+    if (!start) {
         return std::nullopt;
     }
-    return std::chrono::duration<double>(now - *g_auto.first_present).count();
+    return std::chrono::duration<double>(now - *start).count();
 }
 
 // Returns true once the automatic exit is due.
@@ -614,6 +616,11 @@ static bool RunAutoInput(SdlState& state) {
         g_auto.first_present = now;
         LOG_INFO(Frontend, "nx2 auto: first present {:.2f} s after start-up",
                  std::chrono::duration<double>(now - g_auto.boot).count());
+    }
+    if (!g_auto.first_album && Core::g_nx2_album_count.load(std::memory_order_relaxed) > 0) {
+        g_auto.first_album = now;
+        LOG_INFO(Frontend, "nx2 auto: first album orientation call {:.2f} s after start-up (present #{})",
+                 std::chrono::duration<double>(now - g_auto.boot).count(), presents);
     }
     if (g_auto.exit.enabled && !g_auto.exiting) {
         const auto elapsed = AutoSeconds(g_auto.exit.anchor, now);

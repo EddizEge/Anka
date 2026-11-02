@@ -3,6 +3,7 @@
 
 #include <iterator>
 #include <string>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -78,6 +79,10 @@ TEST_CASE("Nx2AutoScript: anchors", "[yuzu_cmd]") {
     REQUIRE(ParseScript("anchor boot\n1 A 1\n").anchor == Anchor::Boot);
     REQUIRE(ParseScript("1 A 1\nANCHOR Present # late is fine\n").anchor == Anchor::Present);
     REQUIRE(ParseScript("1 A 1\nanchor boot\n").anchor == Anchor::Boot);
+    REQUIRE(ParseScript("anchor Album\n2 A 0.3\n").anchor == Anchor::Album);
+    REQUIRE(std::string_view{AnchorName(Anchor::Album)} == "album");
+    REQUIRE(std::string_view{AnchorName(Anchor::Present)} == "present");
+    REQUIRE(std::string_view{AnchorName(Anchor::Boot)} == "boot");
 
     const Script twice = ParseScript("anchor boot\nanchor present\n");
     REQUIRE(twice.anchor == Anchor::Boot);
@@ -115,6 +120,8 @@ TEST_CASE("Nx2AutoScript: exit switch", "[yuzu_cmd]") {
     REQUIRE((present.enabled && present.seconds == 1560.5 && present.anchor == Anchor::Present));
     const ExitSpec boot = ParseExit("90@BOOT");
     REQUIRE((boot.enabled && boot.anchor == Anchor::Boot));
+    const ExitSpec album = ParseExit("150@album");
+    REQUIRE((album.enabled && album.seconds == 150.0 && album.anchor == Anchor::Album));
 
     REQUIRE((!ParseExit("").enabled && ParseExit("").error.empty()));
     REQUIRE((!ParseExit("0").enabled && ParseExit("0").error.empty()));

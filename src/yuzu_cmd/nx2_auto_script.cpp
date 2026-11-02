@@ -74,15 +74,17 @@ std::string ParseLine(const std::vector<std::string_view>& words, Script& script
                       bool& anchor_set) {
     if (SameText(words[0], "anchor")) {
         if (words.size() != 2) {
-            return "expected 'anchor boot' or 'anchor present'";
+            return "expected 'anchor boot', 'anchor present' or 'anchor album'";
         }
         Anchor anchor;
         if (SameText(words[1], "boot")) {
             anchor = Anchor::Boot;
         } else if (SameText(words[1], "present")) {
             anchor = Anchor::Present;
+        } else if (SameText(words[1], "album")) {
+            anchor = Anchor::Album;
         } else {
-            return "unknown anchor (boot or present)";
+            return "unknown anchor (boot, present or album)";
         }
         if (anchor_set) {
             return "a second anchor line";
@@ -198,7 +200,7 @@ ExitSpec ParseExit(std::string_view text) {
         return spec;
     }
     if (words.size() != 1) {
-        spec.error = "expected '<seconds>[@boot|@present]'";
+        spec.error = "expected '<seconds>[@boot|@present|@album]'";
         return spec;
     }
     std::string_view seconds = words[0];
@@ -208,8 +210,10 @@ ExitSpec ParseExit(std::string_view text) {
             spec.anchor = Anchor::Boot;
         } else if (SameText(anchor, "present")) {
             spec.anchor = Anchor::Present;
+        } else if (SameText(anchor, "album")) {
+            spec.anchor = Anchor::Album;
         } else {
-            spec.error = "unknown anchor after '@' (boot or present)";
+            spec.error = "unknown anchor after '@' (boot, present or album)";
             return spec;
         }
         seconds = seconds.substr(0, at);
@@ -225,7 +229,15 @@ ExitSpec ParseExit(std::string_view text) {
 }
 
 const char* AnchorName(Anchor anchor) {
-    return anchor == Anchor::Boot ? "boot" : "present";
+    switch (anchor) {
+    case Anchor::Boot:
+        return "boot";
+    case Anchor::Album:
+        return "album";
+    case Anchor::Present:
+        break;
+    }
+    return "present";
 }
 
 } // namespace Nx2AutoScript
