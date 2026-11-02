@@ -271,13 +271,17 @@ void Nx2StageProxy::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
     });
 }
 
+// The fences (R2 F3, T9c): with cut c their bodies (the fence manager: the caches' async flushes,
+// the query cache's, the scheduler's flush) run in a join from B, C parked, B the record owner;
+// as SignalSyncPoint. K1 (BC): at once, as before.
+
 void Nx2StageProxy::SignalFence(std::function<void()>&& func) {
     if (!Forwarding()) {
         return real.SignalFence(std::move(func));
     }
     auto* const heap = new std::function<void()>(std::move(func));
     Post(Ring::ToB, [heap] {
-        OnBc("Nx2StageProxy::SignalFence").SignalFence(std::move(*heap));
+        JoinFromB([heap] { OnBc("Nx2StageProxy::SignalFence").SignalFence(std::move(*heap)); });
         delete heap;
     });
 }
@@ -288,7 +292,8 @@ void Nx2StageProxy::SyncOperation(std::function<void()>&& func) {
     }
     auto* const heap = new std::function<void()>(std::move(func));
     Post(Ring::ToB, [heap] {
-        OnBc("Nx2StageProxy::SyncOperation").SyncOperation(std::move(*heap));
+        JoinFromB(
+            [heap] { OnBc("Nx2StageProxy::SyncOperation").SyncOperation(std::move(*heap)); });
         delete heap;
     });
 }
@@ -309,14 +314,18 @@ void Nx2StageProxy::SignalReference() {
     if (!Forwarding()) {
         return real.SignalReference();
     }
-    Post(Ring::ToB, [] { OnBc("Nx2StageProxy::SignalReference").SignalReference(); });
+    Post(Ring::ToB, [] {
+        JoinFromB([] { OnBc("Nx2StageProxy::SignalReference").SignalReference(); });
+    });
 }
 
 void Nx2StageProxy::ReleaseFences(bool force) {
     if (!Forwarding()) {
         return real.ReleaseFences(force);
     }
-    Post(Ring::ToB, [force] { OnBc("Nx2StageProxy::ReleaseFences").ReleaseFences(force); });
+    Post(Ring::ToB, [force] {
+        JoinFromB([force] { OnBc("Nx2StageProxy::ReleaseFences").ReleaseFences(force); });
+    });
 }
 
 void Nx2StageProxy::FlushAll() {
