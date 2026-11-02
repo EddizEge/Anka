@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <cmath>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -50,11 +51,15 @@ Fed Feed(Controller21& ctl, u32 mode, double cost, int n, double dt = 0.0) {
 /// Bananza as runs 73 and 79 showed it, from the frame the controller gives it (request to request
 /// is the present's period here): at 60, three frames of 34-41.7 ms take it to 30 and three of 42 or
 /// more to 20; at 30, three of 42 or more to 20; at 20, one of 36.6 or less to 30 at the next
-/// present. Never up by itself.
+/// present. Never up by itself, unless at 30 `escape30` frames of 34 ms or more in a row take it to
+/// 60; `drop30` of them take it to 20 (0: off).
 struct ToyGame {
     u32 mode{3};
+    u32 drop30{};
+    u32 escape30{};
     u32 late30{};
     u32 late20{};
+    u32 slow30{};
     bool up_next{};
 
     void See(double frame) {
@@ -70,18 +75,27 @@ struct ToyGame {
         }
         late20 = frame >= 42.0 ? late20 + 1 : 0;
         late30 = mode == 1 && frame >= 34.0 && frame < 42.0 ? late30 + 1 : 0;
+        slow30 = mode == 2 && frame >= 34.0 ? slow30 + 1 : 0;
         if (late20 >= 3) {
             mode = 3;
-            late20 = late30 = 0;
+            late20 = late30 = slow30 = 0;
         } else if (late30 >= 3) {
             mode = 2;
-            late20 = late30 = 0;
+            late20 = late30 = slow30 = 0;
+        } else if (escape30 != 0 && slow30 >= escape30) {
+            mode = 1;
+            late20 = late30 = slow30 = 0;
+        } else if (drop30 != 0 && slow30 >= drop30) {
+            mode = 3;
+            late20 = late30 = slow30 = 0;
         }
     }
 };
 
 struct Run {
     std::vector<u32> modes; ///< the game's mode at each present
+    std::vector<double> at; ///< the present's time (s)
+    std::vector<Output21> outs;
     int pushes{};
     int holds_over_41{}; ///< presents held 41.7 ms or more
     double seconds_at(u32 mode) const {
@@ -91,15 +105,27 @@ struct Run {
         }
         return s;
     }
+    /// The game's mode changes from `from_s` on.
+    int changes_from(double from_s) const {
+        int n = 0;
+        for (std::size_t i = 1; i < modes.size(); ++i) {
+            n += at[i] >= from_s && modes[i] != modes[i - 1] ? 1 : 0;
+        }
+        return n;
+    }
 };
 
-/// The controller driving the toy game for n presents of frame cost `cost` (ms, busy and work).
-Run Drive(Controller21& ctl, ToyGame& game, double cost, int n) {
+/// The controller driving the toy game for n presents of frame cost costs[mode - 1] (ms, busy and
+/// work), or for `seconds` when n is 0.
+Run Drive(Controller21& ctl, ToyGame& game, const std::array<double, 3>& costs, int n,
+          double seconds = 0.0) {
     Run run;
     double release = 0.0;
-    for (int i = 0; i < n; ++i) {
+    double clock = 0.0;
+    for (int i = 0; n > 0 ? i < n : clock < seconds; ++i) {
         // As nx2_gsv.h: the hold for the present's mode, the release from the previous present.
         const u32 mode = game.mode;
+        const double cost = costs[mode - 1];
         const double hold = ctl.HoldMs(mode);
         double frame = (std::max)(Period(mode), cost);
         if (hold > 0.0) {
@@ -110,12 +136,19 @@ Run Drive(Controller21& ctl, ToyGame& game, double cost, int n) {
             frame = (std::max)((std::min)(frame, release), cost);
         }
         const Output21 out = Step(ctl, mode, cost, frame);
+        clock += frame / 1000.0;
         run.pushes += out.started != Push21::None ? 1 : 0;
         release = ctl.ReleaseMs(mode);
         run.modes.push_back(mode);
+        run.at.push_back(clock);
+        run.outs.push_back(out);
         game.See(frame);
     }
     return run;
+}
+
+Run Drive(Controller21& ctl, ToyGame& game, double cost, int n) {
+    return Drive(ctl, game, {cost, cost, cost}, n);
 }
 } // Anonymous namespace
 
@@ -489,6 +522,31 @@ TEST_CASE("Nx2ModePace21: rel60 whose 60 does not last fails", "[video_core]") {
     REQUIRE(ctl.Rest(Push21::Rel60) == p.up_rest_s);
 }
 
+TEST_CASE("Nx2ModePace21: rel60's failures stay until its 60 lasts", "[video_core]") {
+    Params21 p{};
+    p.up_rel = true;
+    Controller21 ctl{p};
+    // A 30 that never goes up: the first rel60 gives up.
+    Output21 end{};
+    for (int i = 0; i < 30 * 60 && end.ended == Push21::None; ++i) {
+        end = Step(ctl, 2, 8.0, Period(2));
+    }
+    REQUIRE(end.ended == Push21::Rel60);
+    REQUIRE(end.result == Result::GaveUp);
+    REQUIRE(ctl.Fails(Push21::Rel60) == 1);
+    // The next one is done: its failure stays until its 60 lasted verify60.
+    while (ctl.Pushing() != Push21::Rel60) {
+        Step(ctl, 2, 8.0, Period(2));
+    }
+    REQUIRE(Step(ctl, 1, 8.0, p.up_rel_ms).result == Result::Done);
+    REQUIRE(ctl.Fails(Push21::Rel60) == 1);
+    REQUIRE(ctl.Rest(Push21::Rel60) == 0.0);
+    Feed(ctl, 1, 8.0, 540); // 9 s
+    REQUIRE(ctl.Fails(Push21::Rel60) == 1);
+    Feed(ctl, 1, 8.0, 120); // 11 s
+    REQUIRE(ctl.Fails(Push21::Rel60) == 0);
+}
+
 TEST_CASE("Nx2ModePace21: no push of a kind while it rests", "[video_core]") {
     const Params21 p{};
     Controller21 ctl;
@@ -562,4 +620,78 @@ TEST_CASE("Nx2ModePace21: the window: 8 frames, emptied at a mode change", "[vid
     Feed(c2, 2, 25.0, 300);
     const Fed at60 = Feed(c2, 1, 10.0, 600);
     REQUIRE(at60.Starts() == 0);
+}
+
+TEST_CASE("Nx2ModePace21: toy game: a 30 that does not last slows the 20 <-> 30 round",
+          "[video_core]") {
+    const Params21 p{};
+    // 20 fits (C 20), 30 does not (C 36): the game leaves rel20's 30 for 20 by itself, by to20, or
+    // by an escape to a 60 that does not fit (C 45) either.
+    struct Case {
+        const char* name;
+        u32 drop30;
+        u32 escape30;
+    };
+    for (const Case& c : {Case{"by itself", 60, 0}, Case{"to20", 0, 0}, Case{"via 60", 0, 45}}) {
+        Controller21 ctl;
+        ToyGame game{.mode = 3, .drop30 = c.drop30, .escape30 = c.escape30};
+        const Run run = Drive(ctl, game, {45.0, 36.0, 20.0}, 0, 600.0); // 10 minutes
+        std::vector<double> rests;
+        for (const Output21& o : run.outs) {
+            if (o.unverified == Push21::Rel20) {
+                rests.push_back(o.rest_s);
+            }
+            REQUIRE(o.result != Result::GaveUp); // every rel20 takes 20 up
+        }
+        REQUIRE(rests.size() >= 6);
+        REQUIRE(rests[0] == p.rel_rest_s);
+        REQUIRE(rests[1] == 2 * p.rel_rest_s);
+        REQUIRE(rests[2] == 4 * p.rel_rest_s);
+        REQUIRE(rests.back() == p.rel_rest_max_s);
+        // Once the rests are long, at most 2 rounds (2 or 3 changes each) a minute.
+        REQUIRE(run.changes_from(300.0) <= 3 * 2 * 5);
+        REQUIRE(run.seconds_at(3) > 400.0);
+    }
+}
+
+TEST_CASE("Nx2ModePace21: rel20's failures stay until its 30 lasts", "[video_core]") {
+    const Params21 p{};
+    Controller21 ctl;
+    ToyGame game{.mode = 3, .drop30 = 60};
+    // Two rounds where 30 does not fit: two failures.
+    Drive(ctl, game, {45.0, 36.0, 20.0}, 0, 14.0);
+    REQUIRE(ctl.Fails(Push21::Rel20) == 2);
+    REQUIRE(game.mode == 3);
+    // Now 30 fits: the next rel20 is done, its rest goes, its failures stay ...
+    Run run = Drive(ctl, game, {45.0, 20.0, 20.0}, 0, 7.5);
+    REQUIRE(game.mode == 2);
+    REQUIRE(run.pushes == 1);
+    double done_at = -1.0;
+    for (std::size_t i = 0; i < run.outs.size(); ++i) {
+        if (run.outs[i].ended == Push21::Rel20) {
+            REQUIRE(run.outs[i].result == Result::Done);
+            done_at = run.at[i];
+        }
+    }
+    REQUIRE(done_at >= 0.0);
+    REQUIRE(ctl.Fails(Push21::Rel20) == 2);
+    REQUIRE(ctl.Rest(Push21::Rel20) == 0.0);
+    // ... until that 30 lasted verify30.
+    run = Drive(ctl, game, {45.0, 20.0, 20.0}, 0, 12.5);
+    REQUIRE(7.5 + run.at.back() - done_at > p.verify30_s);
+    REQUIRE(game.mode == 2);
+    REQUIRE(ctl.Fails(Push21::Rel20) == 0);
+    // 30 is too heavy again: the game's own drop is no rel20 failure, and the next round's first
+    // failure rests rel_rest_s, not 4 times that.
+    run = Drive(ctl, game, {45.0, 36.0, 20.0}, 0, 12.0);
+    REQUIRE(game.mode == 3);
+    int failed = 0;
+    for (const Output21& o : run.outs) {
+        if (o.unverified == Push21::Rel20) {
+            REQUIRE(o.fails == 1);
+            REQUIRE(o.rest_s == p.rel_rest_s);
+            ++failed;
+        }
+    }
+    REQUIRE(failed == 1);
 }
