@@ -115,12 +115,19 @@ void Post(Ring ring, const F& func) {
 /// A: a ring 1 Call entry tagged DeferTarget::Owner, copied as it is (thunk and payload, D2).
 void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words);
 /// A: constant buffer data ProcessCBMultiData sends while staged (T2), for the consumer's replica
-/// of the current target (StageCbWrite). Joins the CbData record just before when that is the
-/// last one written, not published yet and ends at `address` (S5/3).
-void PostCbData(Ring ring, GPUVAddr address, const u32* data, u32 count);
+/// of `primary` (StageCbWrite). First Capture().SelectTarget(primary): CallMultiMethod's cb data
+/// passes no ProcessDirtyRegisters, so after a channel change no Note may have sent its Target
+/// (K6). Joins the CbData record just before (S5/3) only when that is the last one written, not
+/// published yet, ends at `address`, the sum fits one record and no delta is pending
+/// (Capture().PendingWords() == 0: a register written between the two writes applies before the
+/// second, K6); else a new record. const_buffer.offset: A advances the primary's without noting
+/// it, StageCbWrite the replica's (a noted offset would leave a delta pending after every write
+/// and nothing would ever join, K6).
+void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address, const u32* data,
+                u32 count);
 /// A: the primary Maxwell3D the deltas after this record are for (the consumer takes its own
-/// replica, ReplicaOf). RegCapture::Note sends it when the engine written to changes; the deltas
-/// pending until then go in this record, for the previous target.
+/// replica, ReplicaOf). RegCapture::SelectTarget sends it when the engine A writes for changes
+/// (Note, PostCbData); the deltas pending until then go in this record, for the previous target.
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// A ran ring 1 up to `ring1_position` (the end of each batch, every 4096 words). The last stage
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,

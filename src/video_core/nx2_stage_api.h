@@ -74,7 +74,9 @@ Nx2RegReplica::RegCapture& Capture();
 /// light change notes.
 void ApplyDelta(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count);
 /// Consumer of a CbData record: ProcessCBMultiData's write on the replica (IsLightSameWrite,
-/// SAME_SKIP, NoteLightWrite, WriteBlockCached; Maxwell3D::StageCbWrite).
+/// SAME_SKIP, NoteLightWrite, WriteBlockCached; Maxwell3D::StageCbWrite), which advances the
+/// replica's const_buffer.offset by the bytes as ProcessCBMultiData does (A does not note its own
+/// advance, K6). A record of joined writes is one call (the writes were adjacent).
 void StageCbWrite(Tegra::Engines::Maxwell3D& replica, GPUVAddr address, const u32* data,
                   u32 count);
 
