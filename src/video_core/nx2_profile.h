@@ -290,6 +290,11 @@ enum class Counter : u32 {
     SyncMemoMissPartial,  ///< The slot held one overlapping or touching it, not covering it
     SyncMemoMissStamped,  ///< The slot covered it, but a 4 MiB region of it was stamped since
     SyncMemoMissUploaded, ///< Of the misses: the walk uploaded something
+    // DmaPusher (front): macro / compute parameter blocks continued in their own GP entry whose
+    // current_dirty went to the back as an IsMemoryDirty thunk, and those of a macro the front
+    // runs that skipped it (EDEN_NX2_DIRTY_THUNK_SKIP):
+    MemoryDirtyThunks,
+    MemoryDirtyThunksSkipped,
     Count,
 };
 
@@ -465,6 +470,9 @@ inline void Report(const char* thread_name = "GPU thread") {
     const auto rate = [&](size_t i) { return static_cast<double>(data.counters[i]) * 1e9 / window; };
     line += fmt::format(" | parameter blocks {:.0f} ({:.0f} on written pages, {:.0f} waited, {:.0f} flushed)",
                         rate(8), rate(9), rate(11), rate(10));
+    line += fmt::format(" | memory dirty thunks {:.0f} ({:.0f} skipped)",
+                        rate(static_cast<size_t>(Counter::MemoryDirtyThunks)),
+                        rate(static_cast<size_t>(Counter::MemoryDirtyThunksSkipped)));
     line += fmt::format(" | written command lists {:.0f} ({:.0f} waited, {:.0f} flushed)", rate(12),
                         rate(14), rate(13));
     line += fmt::format(" | indirect draws from GPU records {:.0f} ({:.0f} merged, {:.0f} barriers) | empty draws {:.0f}",
