@@ -23,7 +23,8 @@ enum class RecordKind : u8 {
     Join = 3,    ///< No words: run everything before it, park until released (seq: handshake)
     ExecA = 4,   ///< =3: word 0 the ring 1 position, word 1 the words to run with GpuSplit::Execute
     Forward = 5, ///< A ring 1 Call entry as it is: word 0 its Ring1Thunk, then its payload (S18)
-    Target = 6,  ///< Word 0 the primary Maxwell3D the deltas from here on are for (ReplicaOf)
+    Target = 6,  ///< Word 0 the primary Maxwell3D the deltas from here on are for (ReplicaOf);
+                 ///< B passes it on to ring 3 (K11)
     CbData = 7,  ///< Word 0 the GPU address, word 1 the bytes, then the data (StageCbWrite, S5/3)
 };
 

@@ -89,7 +89,12 @@ using Ring1Thunk = void (*)(const u64* payload);
 
 /// Producer (A for ToB, B for ToC): room for a Call record running `thunk` with `payload_words`
 /// words; returns where the payload goes. From A, the deltas A's capture holds go in the same
-/// record, before it (S5/1). The consumer sees it from Commit on (published as GpuSplit does).
+/// record, before it (S5/1). From B (K2, K11; T9): the delta words of ring 2 records B applied to
+/// its replica and has not passed on yet go in it the same way, in their order, so C's replica
+/// follows the same stream; B passes a Target record on to ring 3 as it consumes it (the deltas
+/// pending for the old target in it), and a record B consumes alone (CbData, a B event) leaves
+/// its deltas for B's next ring 3 record. The consumer sees it from Commit on (published as
+/// GpuSplit does).
 /// Only while Active(). A inside a join writes no record (K4): Reserve, Post, Forward,
 /// PostCbData, PostTarget and PostMark assert !InJoin(). 1 + `payload_words` is at most
 /// MaxBodyWords (asserted; K9, nx2_stage_ring.h).
