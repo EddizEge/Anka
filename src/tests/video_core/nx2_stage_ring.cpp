@@ -85,6 +85,8 @@ struct FakeHandler {
     std::atomic<u32> threads{};
     std::atomic<u32> bad_sequences{};
     std::atomic<u32> parks{};
+    /// Bytes written to each stage's ring (by its one producer).
+    std::array<size_t, 3> wrote{};
     /// Called by Mark (the last stage), if set.
     void (*on_mark)(u64 position){};
     /// Called by Verify, if set.
@@ -134,7 +136,9 @@ struct FakeHandler {
     }
     void Report(u8) {}
     void Busy(u8, bool) {}
-    void Wrote(u8, size_t) {}
+    void Wrote(u8 stage, size_t bytes) {
+        wrote[stage] += bytes;
+    }
     void Parked() {
         ++parks;
     }
@@ -385,23 +389,22 @@ TEST_CASE("Nx2StagePipeline: CbData joins the record before it only while it may
     for (u32 i = 0; i < data.size(); ++i) {
         data[i] = 0x1000 + i;
     }
-    // 3 words, then 2, then 1 after them (odd sizes): one record. A notes const_buffer.offset
-    // after each write (one pending delta): still joined.
+    // 3 words, then 2, then 1 after them (odd sizes): one record.
     pipe.PostCbData(0x1000, &data[0], 3);
-    handler.capture = {0x111};
     pipe.PostCbData(0x100C, &data[3], 2);
     pipe.PostCbData(0x1014, &data[5], 1);
-    // Elsewhere: a new record (taking the pending delta).
-    pipe.PostCbData(0x2000, &data[6], 1);
-    // Two pending deltas (another register written in between): a new record.
-    handler.capture = {0x222, 0x333};
-    pipe.PostCbData(0x2004, &data[7], 2);
+    // A delta pending (a register written between the writes, K6): a new record, taking it.
+    handler.capture = {0x111};
+    pipe.PostCbData(0x1018, &data[6], 1);
+    // Elsewhere: a new record.
+    pipe.PostCbData(0x2000, &data[7], 1);
     // Published: a new record.
     pipe.PublishB();
-    pipe.PostCbData(0x200C, &data[9], 4);
+    pipe.PostCbData(0x2004, &data[8], 4);
     // Anything else in between: a new record.
     PostCallB(pipe, &RanOnB, 7);
-    pipe.PostCbData(0x201C, &data[13], 1);
+    pipe.PostCbData(0x2014, &data[12], 1);
+    pipe.PostCbData(0x2018, &data[13], 2);
     Drain(pipe);
     pipe.Stop();
     REQUIRE(g_failures == 0);
@@ -409,15 +412,53 @@ TEST_CASE("Nx2StagePipeline: CbData joins the record before it only while it may
     REQUIRE(cb.size() == 5);
     REQUIRE(cb[0].address == 0x1000);
     REQUIRE(cb[0].data == std::vector<u32>(&data[0], &data[6]));
-    REQUIRE(cb[1].address == 0x2000);
+    REQUIRE(cb[1].address == 0x1018);
     REQUIRE(cb[1].data == std::vector<u32>(&data[6], &data[7]));
-    REQUIRE(cb[2].address == 0x2004);
-    REQUIRE(cb[2].data == std::vector<u32>(&data[7], &data[9]));
-    REQUIRE(cb[3].address == 0x200C);
-    REQUIRE(cb[3].data == std::vector<u32>(&data[9], &data[13]));
-    REQUIRE(cb[4].address == 0x201C);
-    REQUIRE(handler.logs[StageIdB].deltas == std::vector<u64>({0x111, 0x222, 0x333}));
+    REQUIRE(cb[2].address == 0x2000);
+    REQUIRE(cb[2].data == std::vector<u32>(&data[7], &data[8]));
+    REQUIRE(cb[3].address == 0x2004);
+    REQUIRE(cb[3].data == std::vector<u32>(&data[8], &data[12]));
+    REQUIRE(cb[4].address == 0x2014);
+    REQUIRE(cb[4].data == std::vector<u32>(&data[12], &data[15]));
+    REQUIRE(handler.logs[StageIdB].deltas == std::vector<u64>({0x111}));
     REQUIRE(g_ran_b == std::vector<u64>({7}));
+}
+
+TEST_CASE("Nx2StagePipeline: CbData longer than a record goes in several, in order (K9)",
+          "[video_core]") {
+    Watchdog watchdog{"cb data split"};
+    FakeHandler handler;
+    // Rings of the real size: a record of MaxBodyWords fits.
+    StagePipeline<FakeHandler> pipe{handler};
+    g_failures = 0;
+    REQUIRE(pipe.Start(StageOptions{.mode = 1, .check = true}));
+    constexpr u32 Max = StagePipeline<FakeHandler>::MaxCbDataCount;
+    static_assert(2 + Max / 2 == MaxBodyWords);
+    std::vector<u32> data(2 * Max + 5);
+    for (u32 i = 0; i < data.size(); ++i) {
+        data[i] = i * 2654435761U;
+    }
+    // One write of 2 records and a bit: three records.
+    pipe.PostCbData(0x10000, data.data(), static_cast<u32>(data.size()));
+    // Just after it: joins the last one (5 words) while the sum fits...
+    pipe.PostCbData(0x10000 + data.size() * 4, data.data(), 7);
+    // ...but not past MaxBodyWords: a new record.
+    pipe.PostCbData(0x10000 + (data.size() + 7) * 4, data.data(), Max - 11);
+    pipe.JoinAEnd(pipe.JoinABegin());
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+    REQUIRE(handler.bad_sequences == 0);
+    const auto& cb = handler.logs[StageIdB].cb;
+    REQUIRE(cb.size() == 4);
+    REQUIRE(cb[0].address == 0x10000);
+    REQUIRE(cb[0].data == std::vector<u32>(data.begin(), data.begin() + Max));
+    REQUIRE(cb[1].address == 0x10000 + u64{Max} * 4);
+    REQUIRE(cb[1].data == std::vector<u32>(data.begin() + Max, data.begin() + 2 * Max));
+    REQUIRE(cb[2].address == 0x10000 + u64{Max} * 8);
+    std::vector<u32> joined(data.begin() + 2 * Max, data.end());
+    joined.insert(joined.end(), data.begin(), data.begin() + 7);
+    REQUIRE(cb[2].data == joined);
+    REQUIRE(cb[3].data.size() == Max - 11);
 }
 
 namespace {
@@ -452,12 +493,11 @@ TEST_CASE("Nx2StagePipeline: a join from A parks B (and C) after everything befo
                 REQUIRE(g_ran_c.size() == round + 1);
             }
             if (round % 500 == 0) {
-                // Records sent during the join wait for its end.
-                PostCallB(pipe, &CountOnB, round + 1000);
-                pipe.PublishB();
+                // A sends nothing inside a join (K4); B, parked, runs nothing; after it, B goes on.
                 std::this_thread::sleep_for(std::chrono::milliseconds{2});
                 REQUIRE(g_b_ran_count.load(std::memory_order_relaxed) == round + 1);
                 pipe.JoinAEnd(join);
+                PostCallB(pipe, &CountOnB, round + 1000);
                 Drain(pipe);
                 REQUIRE(g_b_ran_count.load(std::memory_order_relaxed) == round + 1001);
                 continue;
@@ -513,8 +553,8 @@ TEST_CASE("Nx2StagePipeline: =2 runs each record before A goes on, a join too (S
         pipe.Stop();
         REQUIRE(g_failures == 0);
         REQUIRE(handler.bad_sequences == 0);
-        // Every third record but the joins: calls and the joins' own are counted apart.
-        REQUIRE(handler.logs[StageIdB].verifies == Calls / 3);
+        // Every third record, the joins too (K8): 3000 calls, 300 joins and the drain's.
+        REQUIRE(handler.logs[StageIdB].verifies == (Calls + Calls / 10 + 1) / 3);
     }
 }
 
@@ -578,12 +618,12 @@ void TickOnC(const u64*, u32) {
 }
 
 void MarkAfterTick(u64) {
-    // A mark C met inside the tick (running up to B's join) is stored once the tick ended.
-    Expect(g_tick_done.load(std::memory_order_seq_cst), "a mark met inside a record waits for it");
+    // C runs nothing inside the tick (it parks where it stands): the mark after it comes after.
+    Expect(g_tick_done.load(std::memory_order_seq_cst), "the mark runs after the tick");
 }
 
 /// On B: C gets a tick (which asks B to park), a mark, maybe more than ring 3 holds; then B joins
-/// C (a JoinFromB) while C waits for B to park.
+/// C (a JoinFromB) while C waits for B to park, or before.
 void TickAndJoinOnB(const u64* payload, u32) {
     PostCallC(*g_pipe, &TickOnC, payload[0]);
     u64* const body = g_pipe->BeginC(RecordKind::Mark, 1);
@@ -598,17 +638,17 @@ void TickAndJoinOnB(const u64* payload, u32) {
         return;
     }
     Spin(g_spin_b.load(std::memory_order_relaxed));
-    const u32 join = g_pipe->JoinBBegin();
-    if (g_mode == 1) {
-        // C parked at the join: inside its tick, which waits for B.
-        Expect(g_c_in_tick.load() && !g_tick_done.load(), "JoinFromB: C parked inside its tick");
-    }
-    Order('b');
-    g_pipe->JoinBEnd(join);
+    g_pipe->JoinFromB([] {
+        if (g_mode == 1) {
+            // C answered in its ParkB wait, where it stood: inside its tick (S13, K3).
+            Expect(g_c_in_tick.load() && !g_tick_done.load(), "JoinFromB: C parked in its tick");
+        }
+        Order('b');
+    });
 }
 } // Anonymous namespace
 
-TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13)", "[video_core]") {
+TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13, K3)", "[video_core]") {
     Watchdog watchdog{"JoinFromB and ParkB"};
     std::mt19937 random{1234};
     for (const u8 mode : {u8{1}, u8{2}}) {
@@ -634,7 +674,7 @@ TEST_CASE("Nx2StagePipeline: JoinFromB and ParkB asked at once (S13)", "[video_c
             REQUIRE(g_failures == 0);
             REQUIRE(g_tick_done);
             if (g_extra_records == 0 && mode == 1) {
-                // B's join first (C ran up to it inside its tick), then C's park.
+                // B's join first (C answers it in its ParkB wait), then C's park.
                 REQUIRE(g_order == std::vector<char>({'b', 'c'}));
             } else if (g_extra_records == 0) {
                 // =2: B waits for C to run the tick, parking for it meanwhile; then it joins.
@@ -716,4 +756,275 @@ TEST_CASE("Nx2StagePipeline: Stop ends at a record boundary without what is held
     stopper.join();
     REQUIRE(!pipe.Running());
     REQUIRE(g_ran_b.size() == 1);
+}
+
+namespace {
+// The park points of K3, one by one.
+std::atomic<u32> g_b_progress{};
+std::atomic<bool> g_b_in_record{};
+std::atomic<bool> g_a_join_acked{};
+std::atomic<u32> g_park_ops{};
+u32 g_fill_records{};
+
+/// On C: asks B to park (after `payload[0]` ms), checks B stays parked while `op` runs.
+void ParkFromC(const u64* payload, u32) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{payload[0]});
+    g_pipe->ParkB([] {
+        const u32 before = g_b_progress.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        Expect(g_b_progress.load() == before, "ParkB: B runs nothing while parked",
+               g_b_progress.load(), before);
+        Expect(!g_a_join_acked.load(), "ParkB: before A's join was acked");
+        ++g_park_ops;
+        Order('c');
+    });
+}
+
+/// On B: C parks for B from inside the first record; then more than ring 3 holds (K3 a).
+void ParkThenFill(const u64* payload, u32) {
+    PostCallC(*g_pipe, &ParkFromC, payload[0]);
+    g_pipe->PublishC();
+    for (u32 i = 0; i < g_fill_records; ++i) {
+        PostCallC(*g_pipe, &RanOnC, i, 100);
+        ++g_b_progress;
+    }
+}
+
+/// On B, =2: the record for C asks B to park while B waits for its end (K3 b).
+void ParkInLockstep(const u64*, u32) {
+    g_b_in_record = true;
+    PostCallC(*g_pipe, &ParkFromC, 0);
+    // EndC returned: C ran the record, its ParkB served from inside EndC's wait.
+    Expect(g_park_ops.load() == 1, "=2: ParkB served while B waited for the record's end");
+    g_b_in_record = false;
+    ++g_b_progress;
+}
+
+/// On B: a record for C that parks B after a while: B is at A's join by then (K3 c).
+void SlowParkForC(const u64* payload, u32) {
+    PostCallC(*g_pipe, &ParkFromC, payload[0]);
+    g_pipe->PublishC();
+    ++g_b_progress;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: K3 a, B parks for C while ring 3 is full", "[video_core]") {
+    Watchdog watchdog{"K3 a"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetGlobals(handler, pipe);
+        g_order.clear();
+        g_b_progress = 0;
+        g_park_ops = 0;
+        g_a_join_acked = false;
+        // 60 records of 103 words: three times ring 3; C holds the first while in ParkB.
+        g_fill_records = 60;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        PostCallB(pipe, &ParkThenFill, 20);
+        pipe.PublishB();
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_park_ops == 1);
+        REQUIRE(handler.parks == 1);
+        REQUIRE(g_ran_c.size() == 60);
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: K3 b, =2 ParkB inside the record B waits for", "[video_core]") {
+    Watchdog watchdog{"K3 b"};
+    FakeHandler handler;
+    TestPipeline pipe{handler};
+    ResetGlobals(handler, pipe);
+    g_order.clear();
+    g_b_progress = 0;
+    g_park_ops = 0;
+    g_a_join_acked = false;
+    REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = true}));
+    for (u32 n = 0; n < 50; ++n) {
+        g_park_ops = 0;
+        PostCallB(pipe, &ParkInLockstep, 0);
+        REQUIRE(g_park_ops == 1);
+    }
+    Drain(pipe);
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+    REQUIRE(handler.parks == 50);
+}
+
+TEST_CASE("Nx2StagePipeline: K3 c, B parks for C while it waits for C's ack of A's join",
+          "[video_core]") {
+    Watchdog watchdog{"K3 c"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (const u64 delay : {u64{0}, u64{1}, u64{20}}) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetGlobals(handler, pipe);
+            g_order.clear();
+            g_b_progress = 0;
+            g_park_ops = 0;
+            g_a_join_acked = false;
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            PostCallB(pipe, &SlowParkForC, delay);
+            // B passes the join on to C and waits for C, which is in ParkB first.
+            const u32 join = pipe.JoinABegin();
+            g_a_join_acked = true;
+            Order('a');
+            REQUIRE(g_park_ops == 1);
+            pipe.JoinAEnd(join);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_order == std::vector<char>({'c', 'a'}));
+            REQUIRE(handler.parks == 1);
+        }
+    }
+}
+
+namespace {
+std::atomic<u32> g_c_count{};
+void CountOnC(const u64* payload, u32) {
+    g_c_count.store(static_cast<u32>(payload[0]) + 1, std::memory_order_relaxed);
+}
+/// On B: records for C, then a JoinFromB: C ran them, its replica took B's deltas (K3, K11).
+void SendThenJoinB(const u64* payload, u32) {
+    const u32 count = static_cast<u32>(payload[0]);
+    // C ran everything before the last JoinFromB: nothing of its runs now.
+    g_c_count = 0;
+    for (u32 i = 0; i < count; ++i) {
+        PostCallC(*g_pipe, &CountOnC, i);
+    }
+    g_pipe->JoinFromB([count] {
+        Expect(g_c_count.load() == count, "JoinFromB: C ran everything before", g_c_count.load(),
+               count);
+        Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
+               "JoinFromB: C's replica took B's deltas", g_handler->logs[StageIdC].deltas.size(),
+               g_handler->logs[StageIdB].deltas.size());
+        Order('b');
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: JoinFromB parks C after everything B sent before", "[video_core]") {
+    Watchdog watchdog{"JoinFromB"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetGlobals(handler, pipe);
+        g_order.clear();
+        g_c_count = 0;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true, .check = true}));
+        for (u32 round = 0; round < 500; ++round) {
+            handler.capture = {u64{round} << 8 | 1, u64{round} << 8 | 2};
+            PostCallB(pipe, &SendThenJoinB, round % 40);
+            if (round % 7 == 0) {
+                Drain(pipe);
+            }
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(handler.bad_sequences == 0);
+        REQUIRE(g_order.size() == 500);
+        REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
+        REQUIRE(handler.logs[StageIdB].deltas.size() == 1000);
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: a join inside a join sends nothing (K4)", "[video_core]") {
+    Watchdog watchdog{"nested join"};
+    for (const bool cut_c : {false, true}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetGlobals(handler, pipe);
+        g_b_ran_count = 0;
+        REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = cut_c, .check = true}));
+        PostCallB(pipe, &CountOnB, 0);
+        const u32 outer = pipe.JoinABegin();
+        REQUIRE(outer != 0);
+        const size_t wrote = handler.wrote[StageIdB];
+        // Nested: no record, no wait (the stages are parked already), and its end ends nothing.
+        const u32 inner = pipe.JoinABegin();
+        REQUIRE(inner == 0);
+        pipe.JoinAEnd(inner);
+        REQUIRE(handler.wrote[StageIdB] == wrote);
+        REQUIRE(g_b_ran_count == 1);
+        pipe.JoinAEnd(outer);
+        PostCallB(pipe, &CountOnB, 1);
+        Drain(pipe);
+        REQUIRE(g_b_ran_count == 2);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(handler.bad_sequences == 0);
+    }
+}
+
+namespace {
+std::atomic<bool> g_join_pending_ack{};
+std::atomic<u32> g_join_verifies{};
+std::vector<u64> g_expected_deltas;
+/// =2: the Join's check runs after its deltas, while A still waits for the park ack (K8).
+void VerifyAtJoin(u8 stage) {
+    if (!g_join_pending_ack.load()) {
+        return;
+    }
+    Expect(g_handler->logs[stage].deltas == g_expected_deltas,
+           "K8: a join verifies after its deltas", g_handler->logs[stage].deltas.size(),
+           g_expected_deltas.size());
+    ++g_join_verifies;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: =2 verifies a join before its park ack (K8)", "[video_core]") {
+    Watchdog watchdog{"K8"};
+    for (const bool cut_c : {false, true}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetGlobals(handler, pipe);
+        handler.on_verify = &VerifyAtJoin;
+        g_join_verifies = 0;
+        g_expected_deltas.clear();
+        REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = cut_c}));
+        for (u32 n = 0; n < 200; ++n) {
+            PostCallB(pipe, &RanOnB, n);
+            const u64 delta = u64{n} << 16 | 0x7;
+            handler.capture = {delta};
+            g_expected_deltas.push_back(delta);
+            g_join_pending_ack = true;
+            const u32 join = pipe.JoinABegin();
+            g_join_pending_ack = false;
+            pipe.JoinAEnd(join);
+        }
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        // B's check of each join, and C's (the deltas passed on in its Join record).
+        REQUIRE(g_join_verifies == (cut_c ? 400U : 200U));
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: B passes deltas on in records that hold them (K9, K11)",
+          "[video_core]") {
+    Watchdog watchdog{"passed deltas"};
+    FakeHandler handler;
+    // Rings of the real size: a record of MaxDeltaWords deltas fits ring 3.
+    StagePipeline<FakeHandler> pipe{handler};
+    g_failures = 0;
+    REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true, .check = true}));
+    std::vector<u64> sent;
+    for (u32 n = 0; n < 20; ++n) {
+        // Records B consumes alone, each with most of a header's deltas: more than one ring 3
+        // record holds pile up on B.
+        const u32 count = MaxDeltaWords - n * 37;
+        for (u32 i = 0; i < count; ++i) {
+            handler.capture.push_back(u64{n} << 32 | i);
+            sent.push_back(u64{n} << 32 | i);
+        }
+        pipe.PostCbData(0x1000 + n * 0x100, reinterpret_cast<const u32*>(&n), 1);
+    }
+    pipe.JoinAEnd(pipe.JoinABegin());
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+    REQUIRE(handler.bad_sequences == 0);
+    REQUIRE(handler.logs[StageIdB].deltas == sent);
+    REQUIRE(handler.logs[StageIdC].deltas == sent);
 }
