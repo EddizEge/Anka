@@ -56,6 +56,8 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stage_api.h"
+#include "video_core/renderer_vulkan/nx2_record_list.h"
 
 namespace Vulkan {
 
@@ -384,6 +386,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
+    // Back stages, cut c (T7): the buffer cache and the pipeline lookup are B's (its replica),
+    // the rest C's (Role::Record, the default).
+    const VideoCommon::Nx2Stages::Config& stages = VideoCommon::Nx2Stages::Get();
+    split_draws = stages.mode != 0 && stages.mode != 3 && stages.cut_c;
+    if (split_draws) {
+        buffer_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
+        pipeline_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
+    }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -1374,6 +1384,10 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    if (SplitOnB()) [[unlikely]] {
+        DrawB(is_indexed, instance_count);
+        return;
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // Light draws are plain: one instance, no instancing loop, no inline indices.
@@ -1526,6 +1540,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    if (SplitOnB()) [[unlikely]] {
+        DrawIndirectB();
+        return;
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     const auto& params = maxwell3d->draw_manager.indirect_state;
     // Light indirect draws take indexed records from memory (no count buffer, no byte count).
@@ -1604,6 +1622,10 @@ void RasterizerVulkan::DrawIndirect() {
 }
 
 void RasterizerVulkan::DrawTexture() {
+    if (SplitOnB()) [[unlikely]] {
+        DrawTextureB();
+        return;
+    }
     NoteLightWork();
 
     SCOPE_EXIT {
@@ -1652,6 +1674,10 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    if (SplitOnB()) [[unlikely]] {
+        ClearB(layer_count);
+        return;
+    }
     NoteLightWork();
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::Clears, 1);
@@ -1665,7 +1691,10 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     TraceWindowTarget(*maxwell3d, *gpu_memory, "clear", layer_count);
     FlushWork();
     gpu_memory->FlushCaching();
+    ClearRecord(layer_count);
+}
 
+void RasterizerVulkan::ClearRecord(u32 layer_count) {
     auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
                            regs.clear_surface.A;
@@ -1991,6 +2020,9 @@ bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
     // pages the area touches.
     const DAddr begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
     const size_t span = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - begin;
+    if (SplitOnB()) [[unlikely]] {
+        return HoldsGpuWrittenDataB(begin, span);
+    }
     // A query result cached there: the invalidation marks it so its value is never written
     // (QueryCacheBase::InvalidateRegion), which a skipped write (EDEN_NX2_SAME_SKIP) would not.
     namespace Profile = VideoCommon::Nx2Profile;
@@ -2058,6 +2090,10 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
 }
 
 void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    if (SplitOnB()) [[unlikely]] {
+        InnerInvalidationB(sequences);
+        return;
+    }
     namespace Profile = VideoCommon::Nx2Profile;
     // Stage diagnostics: the ranges are the cached writes since the last FlushCaching, merged:
     // constant buffer data, and inline writes left for here (Diagnostics::t_deferred_inline).
@@ -2235,7 +2271,16 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    if (SplitOnB()) [[unlikely]] {
+        WaitForIdleB();
+        return;
+    }
     NoteLightWork();
+    WaitForIdleRecord();
+    fence_manager.SignalOrdering();
+}
+
+void RasterizerVulkan::WaitForIdleRecord() {
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -2255,7 +2300,6 @@ void RasterizerVulkan::WaitForIdle() {
         cmdbuf.SetEvent(event, flags);
         cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
     });
-    fence_manager.SignalOrdering();
 }
 
 void RasterizerVulkan::FragmentBarrier() {
@@ -2278,6 +2322,10 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    if (SplitOnB()) [[unlikely]] {
+        TickFrameB();
+        return;
+    }
     NoteLightWork();
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();
@@ -2351,6 +2399,10 @@ bool InlineDeferEnabled() {
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    if (SplitOnB()) [[unlikely]] {
+        InlineToMemoryB(address, copy_size, memory);
+        return;
+    }
     namespace Profile = VideoCommon::Nx2Profile;
     NoteLightWork();
     const bool diagnose = Profile::Enabled();
@@ -3547,6 +3599,1273 @@ void RasterizerVulkan::ReleaseChannel(s32 channel_id) {
     }
     pipeline_cache.EraseChannel(channel_id);
     query_cache.EraseChannel(channel_id);
+}
+
+// Back stages, cut c (Kesim-2; PLAN.md §4.3 T7) ----------------------------------------------
+//
+// B (the memory stage) runs the engines' rasterizer calls; the draws and the events with a part
+// for each stage split themselves there (SplitOnB). B's half: FlushCaching, the buffer cache
+// (its Vulkan commands into a record list, BufferCacheRuntime::BeginRecords), the pipeline lookup
+// and the light decision. C's half, in ring 3's order: B's list replayed, the texture cache, the
+// query cache, dynamic state and the recording. B takes the buffer cache's lock through
+// Nx2Record::CacheLock and writes ring 3 or joins holding none (K3).
+//
+// The light chain split (tasarim §3.7). B decides from what it sees (TryLightDraw's checks on
+// its replica, its copy of the light epoch, the cached and same writes, the shader hits) and
+// sends LightPlain (geometry binds only) or LightUniform (B's uniform buffer entries). C checks
+// what only it sees before recording: (a) the command state, nothing recorded since its anchor
+// (C's own work, a submission, a join) and the render pass active; (b) textures, no image written
+// since. Either failing, C repairs with what it keeps of its anchor: ConfigureTextures with the
+// anchor's descriptor entries and handles (plain) or with the packet's entries and the anchor's
+// handles (uniform), then dynamic state. A repair needs nothing of B. The anchor's uniform data
+// lives in B's staging pool under the anchor's seq: C holds that seq back (NoteStageSeq) while a
+// light draw may still repair with it. B forces every vertex stream to bind again for each packet
+// (the geometry mirror, §3.6/6: B's dirty flags do not see C's command buffer state).
+
+namespace {
+
+// EDEN_NX2_BACK_STAGES_LIGHT=0: with cut c every draw is set up in full (no light decision on B).
+bool StageLightEnabled() {
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_BACK_STAGES_LIGHT");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
+}
+
+// What C does for a range of B's invalidations (stage_c_ranges, the size word's top bits).
+constexpr u64 StageRangeTexture = u64{1} << 62;
+constexpr u64 StageRangeQuery = u64{1} << 63;
+constexpr u64 StageRangeSize = StageRangeTexture - 1;
+constexpr size_t StageRangesPerRecord = 1024;
+
+u64 HandleBits(VkBuffer buffer) {
+    u64 bits{};
+    std::memcpy(&bits, &buffer, sizeof(buffer));
+    return bits;
+}
+
+VkBuffer BufferOf(u64 bits) {
+    VkBuffer buffer{};
+    std::memcpy(&buffer, &bits, sizeof(buffer));
+    return buffer;
+}
+
+// PrepareDraw's NX2_INDIRECT_RESET_PROGRAM (RESETFIX), for B.
+constexpr std::array<u32, 44> StageResetCode{
+    0xff007321, 0x0002fcff, 0x00000000, 0x000e2400, 0x00007a11, 0x00004400, 0x078018ff,
+    0x001fca00, 0xff017624, 0x00004500, 0x000e06ff, 0x000fcc00, 0x00007381, 0x00000000,
+    0x001eab00, 0x000ea200, 0x00037802, 0x00000001, 0x00000f00, 0x000fca00, 0x00007386,
+    0x00000403, 0x0010a900, 0x004fe800, 0x00007386, 0x000000ff, 0x0010a900, 0x000fe800,
+    0x00007386, 0x000008ff, 0x0010a900, 0x000fe800, 0x00007386, 0x00000cff, 0x0010a900,
+    0x000fe800, 0x00007386, 0x000010ff, 0x0010a900, 0x000fe200, 0x0000794d, 0x00000000,
+    0x03800000, 0x000fea00,
+};
+
+// The geometry mirror's conservative form: every vertex stream binds again (B's dirty flags do
+// not see C's submissions and InvalidateState, which clear what the command buffer holds).
+void ForceVertexBinds(Tegra::Engines::Maxwell3D& mb) {
+    auto& flags = mb.dirty.flags;
+    flags[VideoCommon::Dirty::VertexBuffers] = true;
+    for (u32 index = 0; index < Maxwell::NumVertexArrays; ++index) {
+        flags[VideoCommon::Dirty::VertexBuffer0 + index] = true;
+    }
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::GeometryReplays, 1);
+}
+
+} // Anonymous namespace
+
+Tegra::Engines::Maxwell3D& RasterizerVulkan::EngineB() {
+    return VideoCommon::Nx2Stages::EngineFor(channel_state->channel,
+                                             VideoCommon::Nx2Stages::Role::Memory);
+}
+
+template <typename Func>
+void RasterizerVulkan::JoinB(Func&& func) {
+    VideoCommon::Nx2Stages::JoinFromB([&] {
+        const bool was_in_join = b_in_join;
+        b_in_join = true;
+        func();
+        b_in_join = was_in_join;
+    });
+}
+
+void RasterizerVulkan::EnsureSplitStaged() {
+    if (buffer_cache_runtime.Staged()) [[likely]] {
+        return;
+    }
+    // B's first buffer cache work with the stages on (the integration may move it to Start).
+    Nx2Record::CacheLock lock{buffer_cache.mutex};
+    buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, this);
+    buffer_cache_runtime.BeginStages();
+}
+
+void RasterizerVulkan::NoteStagesStopped() {
+    namespace Stages = VideoCommon::Nx2Stages;
+    // Stop calls NoteEngineWork with the stages drained, from none of them and in no join.
+    if (!Stages::Active() || Stages::OnStage(Stages::Stage::B) ||
+        Stages::OnStage(Stages::Stage::C) || Stages::InJoin() || !buffer_cache_runtime.Staged()) {
+        return;
+    }
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache_runtime.EndStages();
+}
+
+void RasterizerVulkan::StageRecordOwnerHook(void* context, RecordList* records,
+                                            VideoCommon::Nx2Stages::FunctionRef op) {
+    // B inside a buffer cache operation, its cache locks let go: C parks having run what B sent
+    // before; B's list so far is recorded first, then `op` records straight to the scheduler.
+    auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    const auto run = [&] {
+        if (records != nullptr) {
+            rasterizer->scheduler.Replay(*records, records->Seq());
+        }
+        op();
+    };
+    if (rasterizer->b_in_join) {
+        // Already C parked (a retirement outside a packet inside B's join).
+        run();
+        return;
+    }
+    rasterizer->JoinB(run);
+}
+
+template <typename Func>
+void RasterizerVulkan::StageBufferWork(Func&& work) {
+    EnsureSplitStaged();
+    if (buffer_cache_runtime.Target().list != nullptr) {
+        // Inside B's packet: its records go with it.
+        Nx2Record::CacheLock lock{buffer_cache.mutex};
+        work();
+        return;
+    }
+    u64 seq;
+    RecordList* records;
+    {
+        Nx2Record::CacheLock lock{buffer_cache.mutex};
+        seq = buffer_cache_runtime.BeginRecords();
+        work();
+        records = buffer_cache_runtime.EndRecords();
+    }
+    SendStageRecords(seq, records);
+}
+
+void RasterizerVulkan::FlushStageCWork() {
+    namespace Stages = VideoCommon::Nx2Stages;
+    if (stage_c_ranges.empty() || Nx2Record::HeldLocks::Count() != 0) {
+        // With a cache lock held: at the next send (K3).
+        return;
+    }
+    const size_t ranges = stage_c_ranges.size() / 2;
+    for (size_t first = 0; first < ranges; first += StageRangesPerRecord) {
+        const size_t count = (std::min)(StageRangesPerRecord, ranges - first);
+        u64* const out = Stages::Reserve(Stages::Ring::ToC, &StageInvalidateThunk,
+                                         static_cast<u32>(1 + 2 * count));
+        out[0] = reinterpret_cast<u64>(this);
+        std::memcpy(out + 1, stage_c_ranges.data() + first * 2, count * 2 * sizeof(u64));
+        Stages::Commit(Stages::Ring::ToC);
+    }
+    stage_c_ranges.clear();
+}
+
+void RasterizerVulkan::SendStageRecords(u64 seq, RecordList* records) {
+    FlushStageCWork();
+    if (records == nullptr) {
+        // C notes the seq with a later one.
+        return;
+    }
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC,
+                                 [this, records, seq] { RunStageRecords(records, seq); });
+}
+
+void RasterizerVulkan::SendStageDraw() {
+    namespace Stages = VideoCommon::Nx2Stages;
+    FlushStageCWork();
+    u64* const out = Stages::Reserve(Stages::Ring::ToC, &StageDrawThunk, stage_writer.Words());
+    stage_writer.WriteTo(out);
+    Stages::Commit(Stages::Ring::ToC);
+}
+
+void RasterizerVulkan::StageInvalidateThunk(const u64* payload, u32 words) {
+    auto* const rasterizer = reinterpret_cast<RasterizerVulkan*>(payload[0]);
+    rasterizer->RunStageInvalidations(payload + 1, (words - 1) / 2);
+}
+
+void RasterizerVulkan::RunStageInvalidations(const u64* ranges, u32 count) {
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        for (u32 i = 0; i < count; ++i) {
+            if ((ranges[i * 2 + 1] & StageRangeTexture) != 0) {
+                texture_cache.WriteMemory(ranges[i * 2], ranges[i * 2 + 1] & StageRangeSize);
+            }
+        }
+    }
+    for (u32 i = 0; i < count; ++i) {
+        if ((ranges[i * 2 + 1] & StageRangeQuery) != 0) {
+            query_cache.InvalidateRegion(ranges[i * 2], ranges[i * 2 + 1] & StageRangeSize);
+        }
+    }
+}
+
+void RasterizerVulkan::RunStageRecords(RecordList* records, u64 seq) {
+    scheduler.Replay(*records, seq);
+    NoteStageSeq(seq);
+}
+
+void RasterizerVulkan::NoteStageSeq(u64 seq) {
+    LightAnchorC& anchor = light_anchor_c;
+    anchor.last_seq = (std::max)(anchor.last_seq, seq);
+    const u64 noted = anchor.hold_seq != 0 ? (std::min)(seq, anchor.hold_seq - 1) : seq;
+    if (noted != 0) {
+        scheduler.NoteSeqTick(noted);
+    }
+}
+
+void RasterizerVulkan::ReleaseAnchorC() {
+    LightAnchorC& anchor = light_anchor_c;
+    anchor.pipeline = nullptr;
+    anchor.followable = false;
+    anchor.payload.clear();
+    if (anchor.hold_seq != 0) {
+        anchor.hold_seq = 0;
+        if (anchor.last_seq != 0) {
+            scheduler.NoteSeqTick(anchor.last_seq);
+        }
+    }
+}
+
+void RasterizerVulkan::SaveAnchorC(const StageDrawReader& in, std::span<const u32> handles) {
+    namespace Stages = VideoCommon::Nx2Stages;
+    // A payload StageDrawReader reads: the head (no records, geometry or draw words), the
+    // descriptor entries, the handles. Not from itself (a plain light draw keeps its anchor's).
+    std::vector<u64>& payload = light_anchor_c.payload;
+    const u64* const begin = payload.data();
+    if (begin != nullptr && in.StageEntries(0) >= begin && in.StageEntries(0) < begin + payload.size())
+        [[unlikely]] {
+        return;
+    }
+    const u32 entry_words = in.EntryCount() * Stages::DrawEntryWords;
+    const u32 handle_words = static_cast<u32>((handles.size() + 1) / 2);
+    std::vector<u32> handle_copy(handles.begin(), handles.end());
+    payload.assign(Stages::DrawHeadWords + entry_words + handle_words, 0);
+    Stages::DrawToC head = in.Head();
+    head.records = nullptr;
+    head.handles = static_cast<u16>(handle_copy.size());
+    head.geometry_slots = 0;
+    head.draw_words = 0;
+    std::memcpy(payload.data(), &head, sizeof(head));
+    if (entry_words != 0) {
+        std::memcpy(payload.data() + Stages::DrawHeadWords, in.StageEntries(0),
+                    size_t{entry_words} * sizeof(u64));
+    }
+    if (!handle_copy.empty()) {
+        std::memcpy(payload.data() + Stages::DrawHeadWords + entry_words, handle_copy.data(),
+                    handle_copy.size() * sizeof(u32));
+    }
+}
+
+void RasterizerVulkan::DrawB(bool is_indexed, u32 instance_count) {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    Tegra::Engines::Maxwell3D& mb = EngineB();
+    // B's replica holds the draw's side state (the proxy's event record).
+    const auto& draw_state = mb.draw_manager.draw_state;
+    const bool shape_ok =
+        instance_count == 1 &&
+        draw_state.draw_mode == Tegra::Engines::Maxwell3D::DrawManager::DrawMode::General &&
+        draw_state.inline_index_draw_indexes.empty() && LightDrawShape(draw_state, is_indexed);
+    const DrawParams draw_params{MakeDrawParams(draw_state, instance_count, is_indexed)};
+    StageDrawParams params{};
+    params.command = StageCommand::Direct;
+    params.base_instance = draw_params.base_instance;
+    params.num_instances = draw_params.num_instances;
+    params.base_vertex = draw_params.base_vertex;
+    params.num_vertices = draw_params.num_vertices;
+    params.first_index = draw_params.first_index;
+    params.is_indexed = draw_params.is_indexed;
+    PrepareDrawB(is_indexed, false, shape_ok, instance_count, params);
+}
+
+void RasterizerVulkan::DrawIndirectB() {
+    VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    Tegra::Engines::Maxwell3D& mb = EngineB();
+    const auto& indirect = mb.draw_manager.indirect_state;
+    const bool shape_ok = indirect.is_indexed && !indirect.include_count &&
+                          !indirect.is_byte_count &&
+                          LightDrawShape(mb.draw_manager.draw_state, true);
+    StageDrawParams params{};
+    params.command = indirect.is_byte_count   ? StageCommand::ByteCount
+                     : indirect.include_count ? StageCommand::IndirectCount
+                                              : StageCommand::Indirect;
+    params.is_indexed = indirect.is_indexed;
+    params.max_draw_counts = static_cast<u32>(indirect.max_draw_counts);
+    params.stride = static_cast<u32>(indirect.stride);
+    buffer_cache.SetDrawIndirect(&indirect);
+    PrepareDrawB(indirect.is_indexed, true, shape_ok, 1, params);
+    buffer_cache.SetDrawIndirect(nullptr);
+}
+
+RasterizerVulkan::LightLevel RasterizerVulkan::FollowableB(const GraphicsPipeline& pipeline,
+                                                           const Tegra::Engines::Maxwell3D& mb,
+                                                           bool shape_ok) const {
+    // LightFollowable without its C part (render targets and views to repeat: C's anchor).
+    namespace Profile = VideoCommon::Nx2Profile;
+    if (!shape_ok) {
+        Profile::Add(Profile::Counter::LightRefusedShape, 1);
+        return LightLevel::None;
+    }
+    if (mb.regs.transform_feedback_enabled != 0) {
+        Profile::Add(Profile::Counter::LightRefusedFeedback, 1);
+        return LightLevel::None;
+    }
+    if (pipeline.WritesMemory()) {
+        Profile::Add(Profile::Counter::LightRefusedWrites, 1);
+        return LightUniformMode() != 0 ? LightLevel::Uniform : LightLevel::None;
+    }
+    return LightLevel::Full;
+}
+
+bool RasterizerVulkan::LightUniformOkB(GraphicsPipeline& pipeline, Tegra::Engines::Maxwell3D& mb,
+                                       bool invalidated, bool& rebind_storage) {
+    // LightUniformOk on B's replica and anchor. The images written since (texture_cache's write
+    // hits) are C's to check (b).
+    namespace Profile = VideoCommon::Nx2Profile;
+    const LightAnchorB& last = light_anchor_b;
+    const auto& light = mb.light;
+    const u64 cached_writes = gpu_memory->CachedWrites() - last.cached_writes;
+    const u32 ranges = light.written_count;
+    if (cached_writes != light.cb_writes - last.cb_writes || ranges > light.written.size() ||
+        (invalidated && cached_writes == 0)) {
+        Profile::Add(Profile::Counter::LightUniformMemory, 1);
+        return false;
+    }
+    const std::span<const std::pair<GPUVAddr, u32>> written{light.written.data(), ranges};
+    const u64 sparse_low = Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed);
+    const u64 sparse_high = Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed);
+    for (const auto& [address, size] : written) {
+        if (address + size > sparse_low && address < sparse_high) {
+            Profile::Add(Profile::Counter::LightUniformMemory, 1);
+            return false;
+        }
+    }
+    if (pipeline_cache.InvalidationHits() != last.shader_hits) {
+        Profile::Add(Profile::Counter::LightUniformCaches, 1);
+        return false;
+    }
+    const u32 storage_mode = LightStorageMode();
+    const GraphicsPipeline::LightWords words = pipeline.CheckDescriptorWords(
+        written, light.rebound, LightUniformValues(), storage_mode != 0 || Profile::Enabled());
+    const bool storage_changed = (words.changed & GraphicsPipeline::StorageWords) != 0;
+    if (storage_changed && Profile::Enabled()) {
+        Profile::Add(Profile::Counter::LightStorageChanged, 1);
+    }
+    const u32 refusing =
+        storage_mode != 0 ? words.changed & GraphicsPipeline::HandleWords : words.changed;
+    if (refusing != 0) {
+        Profile::Add((words.rebound_changed & refusing) != 0 ? Profile::Counter::LightUniformBinds
+                     : (refusing & GraphicsPipeline::HandleWords) != 0
+                         ? Profile::Counter::LightUniformHandles
+                         : Profile::Counter::LightUniformStorage,
+                     1);
+        return false;
+    }
+    const auto& regs = mb.regs;
+    const auto overlaps = [&](GPUVAddr begin, GPUVAddr end) {
+        for (const auto& [address, size] : written) {
+            if (address < end && begin < address + size) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto entries_written = [&](GPUVAddr pool, u32 limit, std::span<const u32> used) {
+        if (!overlaps(pool, pool + (u64{limit} + 1) * 32)) {
+            return false;
+        }
+        for (const u32 index : used) {
+            const GPUVAddr entry = pool + u64{index} * 32;
+            if (overlaps(entry, entry + 32)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (entries_written(regs.tex_header.Address(), regs.tex_header.limit,
+                        pipeline.UsedTextureHeaders())) {
+        Profile::Add(Profile::Counter::LightUniformTic, 1);
+        return false;
+    }
+    const u32 tsc_limit = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding
+                              ? regs.tex_header.limit
+                              : regs.tex_sampler.limit;
+    if (entries_written(regs.tex_sampler.Address(), tsc_limit, pipeline.UsedSamplers())) {
+        Profile::Add(Profile::Counter::LightUniformTsc, 1);
+        return false;
+    }
+    rebind_storage = storage_changed;
+    return true;
+}
+
+void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_ok,
+                                    u32 instance_count, StageDrawParams& params) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    namespace Stages = VideoCommon::Nx2Stages;
+    using LightChange = Tegra::Engines::Maxwell3D::LightChange;
+    Tegra::Engines::Maxwell3D& mb = EngineB();
+    params.rasterizer = this;
+    params.topology = static_cast<u8>(mb.draw_manager.draw_state.topology);
+    EnsureSplitStaged();
+    bool invalidated;
+    {
+        Profile::Scope scope{Profile::Zone::FlushWork};
+        invalidated = gpu_memory->FlushCaching();
+    }
+    // As PrepareDraw's anchor, taken before this draw binds anything (B's fields).
+    LightAnchorB anchor{
+        .maxwell3d = &mb,
+        .gpu_memory = gpu_memory,
+        .epoch = light_epoch_b.load(std::memory_order_seq_cst),
+        .cached_writes = gpu_memory->CachedWrites(),
+        .same_writes = mb.light.same_writes,
+        .cb_writes = mb.light.cb_writes,
+        .shader_hits = pipeline_cache.InvalidationHits(),
+        .topology = mb.draw_manager.draw_state.topology,
+        .index_format = mb.draw_manager.draw_state.index_buffer.format,
+        .is_indexed = is_indexed,
+        .indirect = indirect,
+    };
+    LightLevel follows = LightLevel::None;
+    SCOPE_EXIT {
+        anchor.level = follows;
+        light_anchor_b = anchor;
+        auto& light = mb.light;
+        light.changes = 0;
+        light.first_blocking = 0;
+        light.first_blocking_uniform = 0;
+        light.written_count = 0;
+        light.rebound.fill(0);
+        light.armed = follows == LightLevel::Full;
+    };
+    // The arguments may be what a dispatch or draw just wrote: recorded in the packet before
+    // the draw (DrawIndirect's barrier). A light draw follows no recorded command (TryLightDraw).
+    const bool indirect_barrier = indirect && buffer_cache.TakeIndirectBarrier();
+    const auto record_indirect_barrier = [&] {
+        if (!indirect_barrier) {
+            return;
+        }
+        Profile::Add(Profile::Counter::IndirectBarriers, 1);
+        RecordTarget& target = buffer_cache_runtime.Target();
+        target.RequestOutsideRenderPassOperationContext();
+        target.Record([](vk::CommandBuffer cmdbuf) {
+            static constexpr VkMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, barrier);
+        });
+    };
+    // DrawIndirect's draw_func reads these after the setup.
+    const auto take_indirect = [&] {
+        if (!indirect) {
+            return;
+        }
+        const auto [buffer, offset] = buffer_cache.GetDrawIndirectBuffer();
+        params.indirect_buffer = HandleBits(buffer->Handle());
+        params.indirect_offset = offset;
+        if (params.command == StageCommand::IndirectCount) {
+            const auto [count_buffer, count_offset] = buffer_cache.GetDrawIndirectCount();
+            params.count_buffer = HandleBits(count_buffer->Handle());
+            params.count_offset = count_offset;
+        }
+    };
+    Stages::StageDrawWriter& out = stage_writer;
+    const auto finish_head = [&](u64 seq, RecordList* records, LightLevel level) {
+        Stages::DrawToC& head = out.Head();
+        head.seq = seq;
+        head.records = records;
+        head.instance_count = instance_count;
+        head.indirect = indirect;
+        head.light = {
+            .anchor_records = 0,
+            .epoch = anchor.epoch,
+            .reasons = 0,
+            .armed = level == LightLevel::Full,
+        };
+        out.AddDrawWords(reinterpret_cast<const u64*>(&params),
+                         static_cast<u32>(sizeof(params) / sizeof(u64)));
+    };
+
+    // The light decision: TryLightDraw's checks on what B sees.
+    const LightAnchorB& last = light_anchor_b;
+    bool try_plain = false;
+    bool try_uniform = false;
+    bool rebind_storage = false;
+    if (LightDrawEnabled() && StageLightEnabled()) {
+        const auto& light = mb.light;
+        const auto& draw_state = mb.draw_manager.draw_state;
+        const u32 uniform_mode = LightUniformMode();
+        const u32 allowed = uniform_mode != 0 ? LightChange::Uniform : LightChange::Light;
+        if (last.level == LightLevel::None) {
+            Profile::Add(Profile::Counter::LightNotArmed, 1);
+        } else if ((light.changes & ~allowed) != 0) {
+            Profile::Add((light.changes & LightChange::Command) != 0
+                             ? Profile::Counter::LightOtherWork
+                             : Profile::Counter::LightStateChanged,
+                         1);
+        } else if (last.maxwell3d != &mb || last.gpu_memory != gpu_memory ||
+                   last.epoch != anchor.epoch || indirect_barrier) {
+            Profile::Add(Profile::Counter::LightOtherWork, 1);
+        } else if (!shape_ok || indirect != last.indirect || is_indexed != last.is_indexed ||
+                   draw_state.topology != last.topology ||
+                   (is_indexed && draw_state.index_buffer.format != last.index_format) ||
+                   mb.regs.transform_feedback_enabled != 0) {
+            Profile::Add(Profile::Counter::LightShape, 1);
+        } else {
+            const u64 cached_writes = anchor.cached_writes - last.cached_writes;
+            const u64 same_writes = light.same_writes - last.same_writes;
+            try_plain = last.level == LightLevel::Full &&
+                        (light.changes & ~LightChange::Light) == 0 &&
+                        cached_writes == same_writes && !(invalidated && cached_writes == 0);
+            if (!try_plain) {
+                if (uniform_mode == 0) {
+                    Profile::Add(Profile::Counter::LightOtherWork, 1);
+                } else {
+                    try_uniform = LightUniformOkB(*last.pipeline, mb, invalidated, rebind_storage);
+                }
+            }
+        }
+    }
+    if (try_plain || try_uniform) {
+        GraphicsPipeline& pipeline = *last.pipeline;
+        bool light_ok = false;
+        u64 seq;
+        RecordList* records;
+        out.Begin();
+        {
+            Profile::Scope scope{Profile::Zone::LightDraw};
+            Nx2Record::CacheLock lock{buffer_cache.mutex};
+            seq = buffer_cache_runtime.BeginRecords();
+            ForceVertexBinds(mb);
+            if (try_plain) {
+                // ConfigureImpl's geometry buffers (TryLightDraw); an upload needs the full
+                // setup's barrier.
+                if (buffer_cache.UpdateGeometryBuffers(is_indexed)) {
+                    buffer_cache.BindHostGeometryBuffers(is_indexed);
+                    light_ok = !buffer_cache.any_buffer_uploaded;
+                }
+                if (light_ok) {
+                    Stages::DrawToC& head = out.Head();
+                    head.kind = Stages::DrawKind::LightPlain;
+                    head.pipeline = &pipeline;
+                    head.is_indexed = is_indexed;
+                } else {
+                    Profile::Add(Profile::Counter::LightFellBack, 1);
+                }
+            } else {
+                // The anchor's SetEngine holds (same replica and memory manager).
+                light_ok = pipeline.ConfigureUniformsBuffers(is_indexed, rebind_storage, out);
+                if (!light_ok) {
+                    Profile::Add(Profile::Counter::LightUniformFellBack, 1);
+                    if (rebind_storage) {
+                        Profile::Add(Profile::Counter::LightStorageFellBack, 1);
+                    }
+                }
+            }
+            if (light_ok) {
+                take_indirect();
+            }
+            records = buffer_cache_runtime.EndRecords();
+        }
+        if (light_ok) {
+            finish_head(seq, records, last.level);
+            SendStageDraw();
+            if (try_plain) {
+                Profile::Add(Profile::Counter::LightDraws, 1);
+                if (indirect) {
+                    Profile::Add(Profile::Counter::LightIndirectDraws, 1);
+                }
+            } else {
+                Profile::Add(Profile::Counter::LightUniformDraws, 1);
+                if (indirect) {
+                    Profile::Add(Profile::Counter::LightUniformIndirectDraws, 1);
+                }
+                if (rebind_storage) {
+                    Profile::Add(Profile::Counter::LightStorageDraws, 1);
+                }
+            }
+            // A light draw leaves the setup it followed.
+            anchor.pipeline = last.pipeline;
+            follows = last.level;
+            return;
+        }
+        // The full setup follows; what was bound and uploaded so far stays valid (C replays it
+        // first) and any_buffer_uploaded stays for its barrier.
+        SendStageRecords(seq, records);
+    }
+
+    GraphicsPipeline* const pipeline{[&] {
+        Profile::Scope scope{Profile::Zone::PipelineLookup};
+        return pipeline_cache.CurrentGraphicsPipeline();
+    }()};
+    if (!pipeline) {
+        thread_local u32 logged{};
+        if (logged < 16) {
+            ++logged;
+            LOG_WARNING(HW_GPU, "Draw skipped (no pipeline) on the memory stage");
+        }
+        FlushStageCWork();
+        return;
+    }
+    if (StageResetProgram(mb, is_indexed)) {
+        StageResetStores(mb);
+        return;
+    }
+    // Update the engine: B's replica (the channel may be different).
+    pipeline->SetEngine(&mb, gpu_memory);
+    if (pipeline->SplitJoins()) {
+        // Texture / image buffers or transform feedback: the old setup, C parked (DrawKind::
+        // Joined, done here: no packet). Whatever B sent before C ran first.
+        if (indirect_barrier) {
+            StageBufferWork(record_indirect_barrier);
+        }
+        FlushStageCWork();
+        JoinB([&] {
+            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+            FlushWork();
+            maxwell3d->draw_manager.draw_state.topology = mb.draw_manager.draw_state.topology;
+            if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
+                return;
+            }
+            {
+                Profile::Scope scope{Profile::Zone::DynamicState};
+                UpdateDynamicStates();
+            }
+            query_cache.NotifySegment(true);
+            HandleTransformFeedback();
+            query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                      maxwell3d->regs.zpass_pixel_count_enable);
+            take_indirect();
+            Profile::Scope scope{Profile::Zone::DrawRecord};
+            RecordStageDraw(params);
+        });
+        return;
+    }
+    u64 seq;
+    RecordList* records;
+    out.Begin();
+    {
+        Nx2Record::CacheLock lock{buffer_cache.mutex};
+        seq = buffer_cache_runtime.BeginRecords();
+        record_indirect_barrier();
+        ForceVertexBinds(mb);
+        GraphicsPipeline::BufferHalf half;
+        {
+            Profile::Scope scope{Profile::Zone::Configure};
+            half = pipeline->ConfigureBuffers(is_indexed, out);
+        }
+        if (half == GraphicsPipeline::BufferHalf::Ready) {
+            take_indirect();
+        } else {
+            // SplitJoins said no: nothing was done.
+            LOG_ERROR(HW_GPU, "ConfigureBuffers joined a draw SplitJoins kept split");
+            out.Begin();
+            params.command = StageCommand::None;
+        }
+        records = buffer_cache_runtime.EndRecords();
+    }
+    if (params.command != StageCommand::None) {
+        anchor.pipeline = pipeline;
+        follows = LightDrawEnabled() && StageLightEnabled() ? FollowableB(*pipeline, mb, shape_ok)
+                                                            : LightLevel::None;
+    }
+    finish_head(seq, records, follows);
+    SendStageDraw();
+}
+
+bool RasterizerVulkan::StageResetProgram(Tegra::Engines::Maxwell3D& mb, bool is_indexed) {
+    // PrepareDraw's RESETFIX detection, its answers kept here (B's thread).
+    static const bool reset_fix = [] {
+        const char* value = std::getenv("EDEN_NX2_RESETFIX");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!reset_fix || is_indexed || !mb.GetNativeMacroEngine().native_turing) {
+        return false;
+    }
+    static const bool reset_last = [] {
+        const char* value = std::getenv("EDEN_NX2_RESET_LAST");
+        return value == nullptr || value[0] != '0';
+    }();
+    const auto& regs = mb.regs;
+    const GPUVAddr program =
+        (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
+    thread_local std::unordered_map<GPUVAddr, bool> reset_programs;
+    thread_local GPUVAddr last_program{};
+    thread_local bool last_known{};
+    thread_local bool last_is_reset{};
+    if (reset_last && last_known && program == last_program) {
+        return last_is_reset;
+    }
+    auto [entry, inserted] = reset_programs.try_emplace(program, false);
+    if (inserted) {
+        std::array<u32, 44> code{};
+        const GPUVAddr code_address = program + 128;
+        if (gpu_memory->IsFullyMappedRange(code_address, sizeof(code))) {
+            gpu_memory->ReadBlockUnsafe(code_address, code.data(), sizeof(code));
+            entry->second = code == StageResetCode;
+        }
+        if (entry->second) {
+            LOG_INFO(HW_GPU, "Indirect draw reset program at {:#x}: its stores are done here (B)",
+                     program);
+        }
+    }
+    last_program = program;
+    last_known = true;
+    last_is_reset = entry->second;
+    return entry->second;
+}
+
+void RasterizerVulkan::StageResetStores(Tegra::Engines::Maxwell3D& mb) {
+    // PrepareDraw's RESETFIX stores (its runs, sorted when the records share no byte), B's half:
+    // the list flushed in a join, the inline writes in a packet (InlineRunsB).
+    namespace Profile = VideoCommon::Nx2Profile;
+    const auto& reset_draw = mb.draw_manager.draw_state;
+    const auto& cbuf0 = mb.state.shader_stages[0].const_buffers[0];
+    const GPUVAddr list = gpu_memory->Read<u64>(cbuf0.address + 0x110);
+    const u32 count = (std::min)(reset_draw.vertex_buffer.count, 1u << 20);
+    const GPUVAddr list_begin = list + u64{reset_draw.vertex_buffer.first} * sizeof(u64);
+    const size_t list_bytes = size_t{count} * sizeof(u64);
+    if (count == 0 || !gpu_memory->IsFullyMappedRange(list_begin, list_bytes)) {
+        FlushStageCWork();
+        return;
+    }
+    Profile::Add(Profile::Counter::ResetFixLists, 1);
+    if (gpu_memory->IsMemoryDirty(list_begin, list_bytes, VideoCommon::CacheType::BufferCache)) {
+        Profile::Add(Profile::Counter::ResetFixFlushes, 1);
+        // A download records and waits: C parked, no cache lock held (K3).
+        FlushStageCWork();
+        JoinB([&] {
+            gpu_memory->FlushRegion(list_begin, list_bytes, VideoCommon::CacheType::BufferCache);
+        });
+    }
+    std::vector<u64> pointers(count);
+    gpu_memory->ReadBlockUnsafe(list_begin, pointers.data(), list_bytes);
+    static const bool runs_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_RESET_RUNS");
+        return value == nullptr || value[0] != '0';
+    }();
+    static const bool sort_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_RESET_SORT");
+        return value == nullptr || value[0] != '0';
+    }();
+    static constexpr u32 RecordSize = 5 * sizeof(u32);
+    static constexpr u32 MaxRun = 4096 / RecordSize;
+    static const auto run_words = [] {
+        std::array<u32, 5 * MaxRun> words{};
+        for (u32 i = 0; i < MaxRun; ++i) {
+            words[i * 5 + 1] = 1;
+        }
+        return words;
+    }();
+    std::vector<u64> records;
+    records.reserve(pointers.size());
+    for (const u64 pointer : pointers) {
+        if (pointer != 0 && gpu_memory->IsFullyMappedRange(pointer, RecordSize)) {
+            records.push_back(pointer);
+        }
+    }
+    if (runs_enabled && sort_enabled && !std::is_sorted(records.begin(), records.end())) {
+        std::vector<u64> ordered(records);
+        std::sort(ordered.begin(), ordered.end());
+        const bool disjoint =
+            std::adjacent_find(ordered.begin(), ordered.end(), [](u64 lower, u64 upper) {
+                return upper - lower < RecordSize;
+            }) == ordered.end();
+        if (disjoint) {
+            records = std::move(ordered);
+        }
+    }
+    std::vector<std::pair<GPUVAddr, u32>> runs;
+    runs.reserve(records.size());
+    GPUVAddr run_start = 0;
+    u32 run_records = 0;
+    for (const u64 pointer : records) {
+        if (runs_enabled && run_records != 0 && run_records < MaxRun &&
+            pointer == run_start + u64{run_records} * RecordSize &&
+            (run_start >> 12) == ((pointer + RecordSize - 1) >> 12)) {
+            ++run_records;
+            continue;
+        }
+        if (run_records != 0) {
+            runs.emplace_back(run_start, run_records * RecordSize);
+        }
+        run_start = pointer;
+        run_records = 1;
+    }
+    if (run_records != 0) {
+        runs.emplace_back(run_start, run_records * RecordSize);
+    }
+    NoteLightWork();
+    StageBufferWork([&] {
+        InlineRunsB(runs, {reinterpret_cast<const u8*>(run_words.data()), sizeof(run_words)});
+    });
+    FlushStageCWork();
+    thread_local u32 reset_logs{};
+    if (reset_logs < 5) {
+        ++reset_logs;
+        LOG_INFO(HW_GPU, "Indirect draw reset (B): list {:#x}, {} records ({} written in {} runs)",
+                 list_begin, count, records.size(), runs.size());
+    }
+}
+
+void RasterizerVulkan::InlineRunsB(std::span<const std::pair<GPUVAddr, u32>> runs,
+                                   std::span<const u8> data) {
+    // AccelerateInlineRuns' steps with the buffer cache locked inside a packet: guest memory,
+    // the buffer cache (its copies into B's list) and the shaders here, the query and texture
+    // invalidations to C (stage_c_ranges, sent before the packet's records).
+    namespace Profile = VideoCommon::Nx2Profile;
+    const bool defer = InlineDeferEnabled();
+    static const bool batch_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_RESET_BATCH");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool batched = batch_enabled && !Settings::IsGPUFenceBehaviorAccurate();
+    BufferCache::InlineBatch batch;
+    u64 uploads = 0;
+    u64 commands = 0;
+    SCOPE_EXIT {
+        buffer_cache.FlushInlineBatch(batch);
+    };
+    for (const auto& [address, size] : runs) {
+        const std::span<const u8> bytes = data.first(size);
+        const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
+        if (!cpu_addr) [[unlikely]] {
+            // Not one device range: written now, every cache told at the next FlushCaching.
+            commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
+            gpu_memory->WriteBlockUnsafe(address, bytes.data(), size, true);
+            gpu_memory->AccumulateInvalidation(address, size);
+            continue;
+        }
+        gpu_memory->WriteBlockUnsafe(address, bytes.data(), size, true);
+        bool uploaded;
+        if (batched) {
+            const size_t before = batch.copies.size();
+            uploaded = buffer_cache.InlineMemoryBatched(*cpu_addr, size, bytes, batch);
+            commands += uploaded && batch.copies.size() <= before ? 1 : 0;
+        } else {
+            uploaded = buffer_cache.InlineMemory(*cpu_addr, size, bytes);
+            commands += uploaded ? 1 : 0;
+        }
+        uploads += uploaded ? 1 : 0;
+        if (!uploaded && !defer) {
+            commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
+            buffer_cache.WriteMemory(*cpu_addr, size);
+        }
+        const bool deferred = !uploaded && defer;
+        stage_c_ranges.push_back(*cpu_addr);
+        stage_c_ranges.push_back(u64{size} | StageRangeQuery | (deferred ? 0 : StageRangeTexture));
+        if (deferred) {
+            gpu_memory->AccumulateInvalidation(address, size);
+            continue;
+        }
+        pipeline_cache.InvalidateRegion(*cpu_addr, size);
+    }
+    commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
+    Profile::Add(Profile::Counter::ResetUploads, uploads);
+    Profile::Add(Profile::Counter::ResetCopyCommands, commands);
+}
+
+void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
+                                       std::span<const u8> memory) {
+    // AccelerateInlineToMemory's halves: guest memory, the buffer cache and the shaders here,
+    // the query and texture invalidations C's (in ring 3's order, before anything after).
+    NoteLightWork();
+    const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
+    if (!cpu_addr) [[unlikely]] {
+        // WriteBlock would invalidate C's caches from here: written now, every cache told at
+        // the next FlushCaching (which runs before anything of theirs is used).
+        gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size, true);
+        gpu_memory->AccumulateInvalidation(address, copy_size);
+        return;
+    }
+    gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size, true);
+    const bool defer = InlineDeferEnabled();
+    bool deferred = false;
+    StageBufferWork([&] {
+        const bool uploaded = buffer_cache.InlineMemory(*cpu_addr, copy_size, memory);
+        if (!uploaded && !defer) {
+            buffer_cache.WriteMemory(*cpu_addr, copy_size);
+        }
+        deferred = !uploaded && defer;
+        stage_c_ranges.push_back(*cpu_addr);
+        stage_c_ranges.push_back(u64{copy_size} | StageRangeQuery |
+                                 (deferred ? 0 : StageRangeTexture));
+        if (deferred) {
+            gpu_memory->AccumulateInvalidation(address, copy_size);
+        }
+    });
+    FlushStageCWork();
+    if (!deferred) {
+        pipeline_cache.InvalidateRegion(*cpu_addr, copy_size);
+    }
+}
+
+void RasterizerVulkan::InnerInvalidationB(
+    std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    // InnerInvalidation's halves: the buffer cache and the shaders here, the texture and query
+    // caches C's.
+    for (const auto& [addr, size] : sequences) {
+        stage_c_ranges.push_back(addr);
+        stage_c_ranges.push_back(u64{size} | StageRangeTexture | StageRangeQuery);
+    }
+    StageBufferWork([&] { buffer_cache.WriteMemoryRanges(sequences); });
+    FlushStageCWork();
+    for (const auto& [addr, size] : sequences) {
+        pipeline_cache.InvalidateRegion(addr, size);
+    }
+}
+
+bool RasterizerVulkan::HoldsGpuWrittenDataB(DAddr begin, size_t span) {
+    // C's caches (images, pending query results, writes around them) through the page summary,
+    // lock-free (T8; the skeleton says every page may); the buffer cache is B's.
+    if (stage_gpu_pages.Holds(begin, span)) {
+        return true;
+    }
+    Nx2Record::CacheLock lock{buffer_cache.mutex};
+    if (buffer_cache.IsRegionGpuModified(begin, span)) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::HoldsGpuWrittenBuffer, 1);
+        return true;
+    }
+    return false;
+}
+
+void RasterizerVulkan::ClearB(u32 layer_count) {
+    // B: Clear's FlushCaching (C's half of its invalidations before the clear); C the rest.
+    NoteLightWork();
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::Clears, 1);
+    gpu_memory->FlushCaching();
+    FlushStageCWork();
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, layer_count] {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Clear};
+        FlushWork();
+        ClearRecord(layer_count);
+    });
+}
+
+void RasterizerVulkan::DrawTextureB() {
+    // All C's: the texture cache and the recording, with the side state of B's replica.
+    NoteLightWork();
+    const auto state = EngineB().draw_manager.draw_texture_state;
+    FlushStageCWork();
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, state] {
+        maxwell3d->draw_manager.draw_texture_state = state;
+        DrawTexture();
+    });
+}
+
+void RasterizerVulkan::WaitForIdleB() {
+    // B: the ordering signal (the Vulkan fence manager: the buffer cache's flushes to gather);
+    // C: the query cache and the wait recorded.
+    NoteLightWork();
+    fence_manager.SignalOrdering();
+    FlushStageCWork();
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this] {
+        WaitForIdleRecord();
+    });
+}
+
+void RasterizerVulkan::TickFrameB() {
+    NoteLightWork();
+    StageBufferWork([&] { buffer_cache.TickFrame(); });
+    FlushStageCWork();
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this] { TickFrameC(); });
+}
+
+void RasterizerVulkan::TickFrameC() {
+    draw_counter = 0;
+    guest_descriptor_queue.TickFrame();
+    compute_pass_descriptor_queue.TickFrame();
+    descriptor_buffer_ring.TickFrame();
+    fence_manager.TickFrame();
+    staging_pool.TickFrame();
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.TickFrame();
+    }
+    // B's next draw is set up in full (its epoch moved): nothing repairs with the anchor.
+    ReleaseAnchorC();
+}
+
+void RasterizerVulkan::StageDrawThunk(const u64* payload, u32 words) {
+    const StageDrawReader in{payload, words};
+    StageDrawParams params;
+    const std::span<const u64> draw_words = in.DrawWords();
+    if (draw_words.size() * sizeof(u64) != sizeof(params)) [[unlikely]] {
+        std::abort();
+    }
+    std::memcpy(&params, draw_words.data(), sizeof(params));
+    params.rasterizer->PrepareDrawC(in, params);
+}
+
+void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawParams& params) {
+    // PrepareDraw's recording half: B's list replayed, the texture half (ConfigureTextures), or
+    // a light draw checked and, failing, repaired; dynamic state, queries and the draw.
+    namespace Profile = VideoCommon::Nx2Profile;
+    namespace Stages = VideoCommon::Nx2Stages;
+    using Stages::DrawKind;
+    const Stages::DrawToC& head = in.Head();
+    SCOPE_EXIT {
+        gpu.TickWork();
+    };
+    {
+        Profile::Scope scope{Profile::Zone::FlushWork};
+        FlushWork();
+    }
+    LightAnchorC& anchor = light_anchor_c;
+    auto& mc = *maxwell3d;
+    if (params.command == StageCommand::None) {
+        // A draw cut short on B: only its records.
+        if (head.records != nullptr) {
+            scheduler.Replay(*head.records, head.seq);
+        }
+        ReleaseAnchorC();
+        NoteStageSeq(head.seq);
+        return;
+    }
+    const bool light = head.kind == DrawKind::LightPlain || head.kind == DrawKind::LightUniform;
+    // (a) the command state the anchor left and (b) its images, before B's list adds to them.
+    const u64 image_hits = texture_cache.WriteHits();
+    const bool state_ok = !light || (anchor.followable && anchor.pipeline == head.pipeline &&
+                                     scheduler.RecordCount() == anchor.record_count);
+    const bool textures_ok = !light || image_hits == anchor.image_hits;
+    mc.draw_manager.draw_state.topology =
+        static_cast<Maxwell::PrimitiveTopology>(params.topology);
+    std::unique_lock lock{texture_cache.mutex};
+    if (head.records != nullptr) {
+        scheduler.Replay(*head.records, head.seq);
+    }
+    GraphicsPipeline& pipeline = *head.pipeline;
+    const auto repair = [&](bool plain) {
+        Profile::Scope scope{Profile::Zone::LightRepair};
+        Profile::Add(state_ok ? Profile::Counter::LightRepairsTexture
+                              : Profile::Counter::LightRepairsState,
+                     1);
+        if (anchor.pipeline != &pipeline || (plain && anchor.payload.empty())) {
+            // No anchor here to repair with (its setup failed, or the stages just began).
+            return false;
+        }
+        if (plain) {
+            const StageDrawReader anchor_in{anchor.payload.data(),
+                                            static_cast<u32>(anchor.payload.size())};
+            return pipeline.ConfigureTextures(anchor_in, mc);
+        }
+        // B's light decision says the handles are the anchor's.
+        return pipeline.ConfigureTextures(in.WithHandles(pipeline.LastHandles()), mc);
+    };
+    bool set_up = true;
+    bool configured = false;
+    switch (head.kind) {
+    case DrawKind::Full: {
+        Profile::Scope scope{Profile::Zone::Configure};
+        configured = pipeline.ConfigureTextures(in, mc);
+        break;
+    }
+    case DrawKind::LightPlain:
+        if (state_ok && textures_ok && scheduler.IsRenderPassActive()) {
+            set_up = false;
+            configured = true;
+        } else {
+            configured = repair(true);
+        }
+        break;
+    case DrawKind::LightUniform:
+        if (state_ok && textures_ok && pipeline.RecordUniformsFrom(in)) {
+            set_up = false;
+            configured = true;
+        } else {
+            configured = repair(false);
+        }
+        break;
+    case DrawKind::Joined:
+        LOG_ERROR(HW_GPU, "Joined draw packet on the recording stage");
+        break;
+    }
+    if (!configured) {
+        thread_local u32 logged{};
+        if (logged < 16) {
+            ++logged;
+            LOG_WARNING(HW_GPU, "Draw skipped (configure failed) on the recording stage{}",
+                        light ? ", a light draw without its anchor" : "");
+        }
+        // B's chain would go on from an anchor C does not have: its next draw in full.
+        light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
+        ReleaseAnchorC();
+        NoteStageSeq(head.seq);
+        return;
+    }
+    if (set_up) {
+        Profile::Scope scope{Profile::Zone::DynamicState};
+        UpdateDynamicStates();
+    }
+    query_cache.NotifySegment(true);
+    HandleTransformFeedback();
+    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                              mc.regs.zpass_pixel_count_enable);
+    if (Stages::Get().mode == 2) [[unlikely]] {
+        // The double setup parks B: not with the texture cache held (B's joins take it).
+        lock.unlock();
+        CheckSplitSetup(pipeline, head.kind == DrawKind::Full ? in.Handles() : pipeline.LastHandles(),
+                        head.is_indexed, light);
+        lock.lock();
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DrawRecord};
+        RecordStageDraw(params);
+    }
+    // The anchor: what the next light draw is checked against and repaired with. A plain light
+    // draw keeps the descriptor entries (and the seq holding their uniform data) it followed.
+    if (head.kind == DrawKind::Full || head.kind == DrawKind::LightUniform) {
+        SaveAnchorC(in, head.kind == DrawKind::Full ? in.Handles() : pipeline.LastHandles());
+        anchor.hold_seq = head.seq;
+    }
+    anchor.pipeline = &pipeline;
+    anchor.image_hits = image_hits;
+    anchor.record_count = scheduler.RecordCount();
+    if (set_up) {
+        anchor.followable = !texture_cache.RenderTargetsNeedRepeat() && !pipeline.ViewsNeedRepeat();
+        if (!anchor.followable) {
+            Profile::Add(Profile::Counter::LightRefusedTargets, 1);
+        }
+    }
+    if (!anchor.followable) {
+        anchor.hold_seq = 0;
+    }
+    auto& light_state = mc.light;
+    light_state.changes = 0;
+    light_state.written_count = 0;
+    NoteStageSeq(head.seq);
+}
+
+void RasterizerVulkan::RecordStageDraw(const StageDrawParams& params) {
+    switch (params.command) {
+    case StageCommand::None:
+        return;
+    case StageCommand::Direct: {
+        const DrawParams draw_params{
+            .base_instance = params.base_instance,
+            .num_instances = params.num_instances,
+            .base_vertex = params.base_vertex,
+            .num_vertices = params.num_vertices,
+            .first_index = params.first_index,
+            .is_indexed = params.is_indexed,
+        };
+        scheduler.Record([draw_params](vk::CommandBuffer cmdbuf) {
+            if (draw_params.is_indexed) {
+                cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
+                                   draw_params.first_index, draw_params.base_vertex,
+                                   draw_params.base_instance);
+            } else {
+                cmdbuf.Draw(draw_params.num_vertices, draw_params.num_instances,
+                            draw_params.base_vertex, draw_params.base_instance);
+            }
+        });
+        return;
+    }
+    case StageCommand::Indirect:
+        scheduler.Record([buffer = BufferOf(params.indirect_buffer), offset = params.indirect_offset,
+                          count = params.max_draw_counts, stride = params.stride,
+                          indexed = params.is_indexed](vk::CommandBuffer cmdbuf) {
+            if (indexed) {
+                cmdbuf.DrawIndexedIndirect(buffer, offset, count, stride);
+            } else {
+                cmdbuf.DrawIndirect(buffer, offset, count, stride);
+            }
+        });
+        return;
+    case StageCommand::IndirectCount:
+        scheduler.Record([buffer = BufferOf(params.indirect_buffer), offset = params.indirect_offset,
+                          count_buffer = BufferOf(params.count_buffer),
+                          count_offset = params.count_offset, count = params.max_draw_counts,
+                          stride = params.stride,
+                          indexed = params.is_indexed](vk::CommandBuffer cmdbuf) {
+            if (indexed) {
+                cmdbuf.DrawIndexedIndirectCount(buffer, offset, count_buffer, count_offset, count,
+                                                stride);
+            } else {
+                cmdbuf.DrawIndirectCount(buffer, offset, count_buffer, count_offset, count, stride);
+            }
+        });
+        return;
+    case StageCommand::ByteCount:
+        scheduler.Record([buffer = BufferOf(params.indirect_buffer), offset = params.indirect_offset,
+                          stride = params.stride](vk::CommandBuffer cmdbuf) {
+            cmdbuf.DrawIndirectByteCountEXT(1, 0, buffer, offset, 0, stride);
+        });
+        return;
+    }
+}
+
+void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<const u32> handles,
+                                       bool is_indexed, bool light) {
+    // EDEN_NX2_BACK_STAGES=2: the split setup's snapshot, then the old one (Configure, no
+    // SetEngine: =2's lockstep keeps B at the end of this packet, its replica this draw's) with B
+    // parked, compared. The draw records with the old setup. A light draw that differs is an
+    // error (the split chain took a light way the full setup would not match); the reverse (the
+    // old chain light where the split one set up in full) is not seen here.
+    GraphicsPipeline::SetupSnapshot split;
+    pipeline.TakeSetupSnapshot(split, handles);
+    GraphicsPipeline::SetupSnapshot full;
+    bool configured = false;
+    VideoCommon::Nx2Stages::ParkB([&] {
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        configured = pipeline.Configure(is_indexed);
+        if (configured) {
+            pipeline.TakeSetupSnapshot(full, {});
+        }
+    });
+    if (!configured) {
+        return;
+    }
+    // Uniform data streamed by B lives in B's staging pool, which this does not reach (T3): such
+    // an entry at another slice compares as different.
+    const auto bytes = [&](const DescriptorUpdateEntry& entry, VkDeviceSize& range) {
+        if (pipeline.UsesDescriptorBuffer()) {
+            range = entry.address.range;
+            return staging_pool.MappedBytesAt(entry.address.address, range);
+        }
+        range = entry.buffer.range;
+        return staging_pool.MappedBytes(entry.buffer.buffer, entry.buffer.offset, range);
+    };
+    // Counted here, not with the replica checks (VerifyChecks): no counter of its own yet (T0).
+    thread_local u64 checks{};
+    thread_local u64 mismatches{};
+    thread_local u64 light_errors{};
+    ++checks;
+    const std::string differences = pipeline.CompareSetups(split, full, bytes);
+    if (!differences.empty()) {
+        ++mismatches;
+        light_errors += light ? 1 : 0;
+    }
+    if ((checks & (checks - 1)) == 0 && checks >= 1024) {
+        LOG_INFO(HW_GPU, "Split setups checked: {}, differing {} (light draws {})", checks,
+                 mismatches, light_errors);
+    }
+    if (differences.empty()) {
+        return;
+    }
+    thread_local u32 logged{};
+    if (logged < 16) {
+        ++logged;
+        if (light) {
+            LOG_ERROR(HW_GPU, "Split light draw differs from the full setup: {}", differences);
+        } else {
+            LOG_WARNING(HW_GPU, "Split setup differs from the old one: {}", differences);
+        }
+    }
 }
 
 } // namespace Vulkan
