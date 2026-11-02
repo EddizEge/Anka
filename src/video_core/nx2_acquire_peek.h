@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -19,10 +20,13 @@
 // release ran before it; queued writes of other channels are not ordered before this acquire on
 // the console either. What would change the answer is a write of this channel's own, sent before
 // the acquire and not run yet, that takes a met value back: a counter that only goes up never
-// does. So only the words that behaved like such counters skip (Decide): no mask acquires (flag
-// bits are cleared again), no word seen going down or seen only a few times yet (a drained
-// acquire reads it twice, so a reset that lands in its drain shows), no queued release of the
-// puller's on this channel that would not meet the acquire.
+// does. The puller's releases are noted, the engines' (3D report semaphores, compute and DMA
+// releases) are not seen on the front. So only acquires that behave like waits on such a counter
+// skip (Decide): no mask acquires (flag bits are cleared again); no word seen going down; and
+// each skip waits for more than the channel's last met acquire on the word did. A flag or a
+// counter reset between rounds waits for the same or a lower value again, and keeps the drain,
+// whose read then sees the reset. No queued release of the puller's on this channel that would
+// not meet the acquire either.
 namespace VideoCommon::Nx2AcquirePeek {
 
 /// Puller GpuSemaphoreOperation values (Nx2SemaphoreWaiters' too).
@@ -71,7 +75,8 @@ enum class Verdict : u8 {
     Wrapped,       ///< Greater-or-equal met by 2^31 or more (a wrapped counter or another value)
     QueuedRelease, ///< A release this channel's puller queued to the word would not meet it
     NotMonotonic,  ///< The word was seen going down (a flag, a counter reset or reused)
-    New,           ///< The word was read fewer than MinSightings times
+    New,           ///< No acquire of this channel on the word was met yet (Met)
+    NotAdvanced,   ///< It waits for no more than the channel's last met acquire on the word
     Untracked,     ///< No device address, or too many words or releases to track
     Count,
 };
@@ -82,7 +87,7 @@ class Tracker {
 public:
     static constexpr size_t MaxWords = 4096;
     static constexpr size_t MaxReleases = 256;
-    static constexpr u32 MinSightings = 4;
+    static constexpr size_t MaxChannels = 4; ///< Channels whose last met acquire a word keeps
 
     /// A release the puller queued for the back: `payload` to the u32 at `address` on `channel`,
     /// or a value it cannot tell (`known` false: the timestamp of a 16-byte release).
@@ -106,7 +111,7 @@ public:
         const auto it = words.find(address);
         if (it == words.end()) {
             if (words.size() < MaxWords) {
-                words.emplace(address, Word{value, 1, false});
+                words.emplace(address, Word{.last = value});
             }
             return;
         }
@@ -114,8 +119,23 @@ public:
             it->second.decreased = true;
         }
         it->second.last = value;
-        if (it->second.seen < MinSightings) {
-            ++it->second.seen;
+    }
+
+    /// An acquire of `value` on `channel` was met (at once, after the drain or resumed later).
+    void Met(u64 address, s32 channel, u32 value) {
+        const auto it = words.find(address);
+        if (it == words.end()) {
+            return;
+        }
+        Word& word = it->second;
+        for (u32 i = 0; i < word.channels; ++i) {
+            if (word.met[i].channel == channel) {
+                word.met[i].value = value;
+                return;
+            }
+        }
+        if (word.channels < MaxChannels) {
+            word.met[word.channels++] = {channel, value};
         }
     }
 
@@ -139,8 +159,18 @@ public:
         if (it->second.decreased) {
             return Verdict::NotMonotonic;
         }
-        if (it->second.seen < MinSightings) {
+        const Word& word = it->second;
+        const MetAcquire* last = nullptr;
+        for (u32 i = 0; i < word.channels; ++i) {
+            if (word.met[i].channel == channel) {
+                last = &word.met[i];
+            }
+        }
+        if (last == nullptr) {
             return Verdict::New;
+        }
+        if (value - last->value - 1 >= 0x7fffffffU) {
+            return Verdict::NotAdvanced;
         }
         for (const Release& release : releases) {
             if (release.address == address && release.channel == channel &&
@@ -166,10 +196,15 @@ public:
     }
 
 private:
+    struct MetAcquire {
+        s32 channel;
+        u32 value;
+    };
     struct Word {
-        u32 last;       ///< The value last seen
-        u32 seen;       ///< Times read, up to MinSightings
-        bool decreased; ///< Seen going down once: never skips again
+        u32 last{};        ///< The value last seen
+        bool decreased{};  ///< Seen going down once: never skips again
+        u32 channels{};    ///< Of met
+        std::array<MetAcquire, MaxChannels> met{}; ///< Each channel's last met acquire
     };
     struct Release {
         u64 address;
