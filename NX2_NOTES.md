@@ -443,3 +443,10 @@ Each switch below is on by default (ASYNC_SKIP off); `=0` restores the previous 
 Log lines: "Buffer sync memo: X of Y synchronizations skipped" (hit rate), "GPU-written ranges: ..."
 (range count, share answered by the summary), "Uniform buffer binds: X of Y to the binding already
 resolved".
+
+With the back stages (perf/tam): every switch above runs on stage B as with the stages off (K1:
+BC runs the same code; K2: B owns the buffer cache under its lock, C and guest threads reach it
+only under `buffer_cache.mutex`, A and C only in joins or a ParkB), none is turned off there.
+UNIFORM_SYNC_SKIP also covers cut c's B uniform light draws (ConfigureUniformsBuffersImpl), and
+USAGE_RESET_SKIP keeps a skipped tracker's generation, which no stream mark memo can hold
+(src/tests/video_core/nx2_stage_costs.cpp).
