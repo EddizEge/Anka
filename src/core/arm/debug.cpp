@@ -312,6 +312,14 @@ Loader::AppLoader::Modules FindModules(Kernel::KProcess* process) {
         cur_addr = next_address;
     }
 
+    // Modules without a path after .text (Switch 2): the names the loader registered.
+    for (const auto& loaded : process->GetLoadedModules()) {
+        const auto found = modules.lower_bound(loaded.base);
+        if (found == modules.end() || found->first >= loaded.end) {
+            modules.emplace(loaded.base, loaded.name);
+        }
+    }
+
     return modules;
 }
 

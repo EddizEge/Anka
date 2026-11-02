@@ -248,6 +248,16 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Load codeset for current process
     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
+    const VAddr rodata = load_base + GetInteger(codeset.RODataSegment().addr);
+    process.RegisterLoadedModule({
+        .base = load_base,
+        .end = load_base + image_size,
+        .name = nso_file.GetName(),
+        .dynsym = rodata + nso_header.dynsyn_extent.data_offset,
+        .dynsym_size = nso_header.dynsyn_extent.size,
+        .dynstr = rodata + nso_header.dynstr_extent.data_offset,
+        .dynstr_size = nso_header.dynstr_extent.size,
+    });
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
     return load_base + image_size;
 }

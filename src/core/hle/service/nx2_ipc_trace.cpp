@@ -65,6 +65,7 @@ struct State {
     // Symbols of the modules last seen, by base address; refilled when the module list changes.
     u64 process_id{~0ULL};
     Loader::AppLoader::Modules modules;
+    std::map<VAddr, VAddr> ends; // module base -> one past its last byte
     std::map<VAddr, Core::Symbols::Symbols> symbols;
 };
 
@@ -121,12 +122,27 @@ std::vector<u64> WalkFrames(Kernel::KProcess& process, const Kernel::Svc::Thread
     return frames;
 }
 
+// The loader's end for its modules (Switch 2 modules have no path, so only it knows them), else
+// the end of the .text, .rodata, .data regions that follow the base.
+VAddr ModuleEnd(const Kernel::KProcess& process, VAddr base) {
+    for (const auto& loaded : process.GetLoadedModules()) {
+        if (loaded.base == base) {
+            return loaded.end;
+        }
+    }
+    return GetInteger(Core::GetModuleEnd(&process, base)) + 1;
+}
+
 std::string DescribeFrame(State& state, u32 index, u64 address) {
     auto module = state.modules.upper_bound(address);
     if (module == state.modules.begin()) {
         return fmt::format("  #{} {:#x} (no module)", index, address);
     }
     --module;
+    const auto end = state.ends.find(module->first);
+    if (end != state.ends.end() && address >= end->second) {
+        return fmt::format("  #{} {:#x} (no module)", index, address);
+    }
     const u64 offset = address - module->first;
     const auto symbols = state.symbols.find(module->first);
     const auto name = symbols == state.symbols.end()
@@ -171,7 +187,9 @@ void Trace(Core::System& system, State& state, std::string_view service, const c
         state.process_id = process->GetProcessId();
         state.modules = std::move(modules);
         state.symbols.clear();
+        state.ends.clear();
         for (const auto& [base, module_name] : state.modules) {
+            state.ends.emplace(base, ModuleEnd(*process, base));
             state.symbols.emplace(base, Core::Symbols::GetSymbols(base, process->GetMemory(), process->Is64Bit()));
         }
     }

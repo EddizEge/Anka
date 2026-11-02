@@ -7,6 +7,8 @@
 #pragma once
 
 #include <map>
+#include <string>
+#include <vector>
 
 #include "core/arm/arm_interface.h"
 #include "core/file_sys/program_metadata.h"
@@ -63,6 +65,19 @@ public:
 
     static constexpr u64 ProcessIdMin = InitialProcessIdMax + 1;
     static constexpr u64 ProcessIdMax = (std::numeric_limits<u64>::max)();
+
+    // A module the loader placed in this process. Core::FindModules names a module by the path
+    // after its .text; Switch 2 modules have none, so it falls back to these. dynsym / dynstr: the
+    // NSO header's symbol and string tables (absolute addresses; size 0 when absent).
+    struct LoadedModule {
+        VAddr base{};
+        VAddr end{}; // one past the module's last byte (.bss included)
+        std::string name;
+        VAddr dynsym{};
+        u64 dynsym_size{};
+        VAddr dynstr{};
+        u64 dynstr_size{};
+    };
 
 private:
     using SharedMemoryInfoList = Common::IntrusiveListBaseTraits<KSharedMemoryInfo>::ListType;
@@ -140,6 +155,8 @@ private:
     bool m_is_suspended : 1 = false;
     bool m_is_immortal : 1 = false;
     bool m_is_handle_table_initialized : 1 = false;
+
+    std::vector<LoadedModule> m_loaded_modules{};
 
 private:
     Result StartTermination(KernelCore& kernel);
@@ -523,6 +540,21 @@ public:
     Result LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size, KProcessAddress aslr_space_start, size_t aslr_space_offset);
 
     void LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr);
+
+    // Called by the loader before the process runs; a module at the same base is replaced.
+    void RegisterLoadedModule(LoadedModule module) {
+        for (auto& loaded : m_loaded_modules) {
+            if (loaded.base == module.base) {
+                loaded = std::move(module);
+                return;
+            }
+        }
+        m_loaded_modules.push_back(std::move(module));
+    }
+
+    const std::vector<LoadedModule>& GetLoadedModules() const {
+        return m_loaded_modules;
+    }
 
     void InitializeInterfaces(KernelCore& kernel);
 
