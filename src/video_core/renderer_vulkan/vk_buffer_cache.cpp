@@ -158,6 +158,10 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     last_usage_tick = owner->UsageStamp();
 }
 
+void Buffer::StampUsage() noexcept {
+    last_usage_tick = owner->UsageStamp();
+}
+
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
     if (!device) {
         // Null buffer supported, return a null descriptor

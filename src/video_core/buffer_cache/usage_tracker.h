@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <utility>
 #include <vector>
@@ -17,13 +18,18 @@
 
 namespace VideoCommon {
 
+namespace Detail {
+/// UsageTracker generations, unique over every tracker of the process (0 is none).
+inline std::atomic<u64> g_usage_generation{1};
+} // namespace Detail
+
 class UsageTracker {
     // PAGE_SHIFT is a macro on FreeBSD
     static constexpr size_t BUFFER_BYTES_PER_BITSHIFT = 6;
     static constexpr size_t BUFFER_PAGE_SHIFT = 6 + BUFFER_BYTES_PER_BITSHIFT;
     static constexpr size_t BUFFER_PAGE_BYTES = 1 << BUFFER_PAGE_SHIFT;
 public:
-    explicit UsageTracker(size_t size) {
+    explicit UsageTracker(size_t size) : generation{NextGeneration()} {
         const size_t num_pages = (size >> BUFFER_PAGE_SHIFT) + 1;
         pages.resize(num_pages, 0ULL);
     }
@@ -33,6 +39,13 @@ public:
         recent.fill({~u64{0}, 0});
         full_begin = 0;
         full_end = 0;
+        generation = NextGeneration();
+    }
+
+    /// What tracked ranges stay valid for (UsageMarkMemo): a value of this tracker alone, new at
+    /// each Reset. Between two Resets a range tracked once is tracked: Track only adds bits.
+    [[nodiscard]] u64 Generation() const noexcept {
+        return generation;
     }
 
     void Track(u64 offset, u64 size) noexcept {
@@ -80,6 +93,10 @@ public:
     }
 
 private:
+    static u64 NextGeneration() noexcept {
+        return Detail::g_usage_generation.fetch_add(1, std::memory_order_relaxed);
+    }
+
     /// EDEN_NX2_USAGE_SKIP=0 writes every whole page of a tracked range, as before.
     static bool FullPagesSkipEnabled() {
         static const bool enabled = [] {
@@ -149,6 +166,31 @@ private:
     /// Pages [full_begin, full_end) are all ones (FillPages); empty when equal.
     size_t full_begin{};
     size_t full_end{};
+    u64 generation{};
+};
+
+/// Back stages, cut c (BufferCache::MarkVertexStreamsUsed): what one vertex stream tracked last,
+/// its buffer's slot and that buffer's tracker generation then. The same range of the same
+/// buffer in the same generation is tracked already (Track adds bits until Reset, which starts a
+/// new generation; a buffer made in a reused slot has a new one too): only its use stamp is
+/// left to renew. Every packet of B's marks every stream (geo-markusage-1): ~12 Tracks a draw,
+/// most of them over ranges tracked by the draw before.
+struct UsageMarkMemo {
+    u32 buffer = ~u32{0};
+    u64 generation = 0;
+    u64 offset = 0;
+    u64 size = 0;
+
+    [[nodiscard]] bool Holds(u32 buffer_, u64 generation_, u64 offset_, u64 size_) const noexcept {
+        return generation == generation_ && buffer == buffer_ && offset == offset_ &&
+               size == size_;
+    }
+    void Note(u32 buffer_, u64 generation_, u64 offset_, u64 size_) noexcept {
+        buffer = buffer_;
+        generation = generation_;
+        offset = offset_;
+        size = size_;
+    }
 };
 
 } // namespace VideoCommon

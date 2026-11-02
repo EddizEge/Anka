@@ -70,6 +70,15 @@ public:
 
     void MarkUsage(u64 offset, u64 size) noexcept;
 
+    /// What MarkUsage leaves of a range tracked in this generation already: the use stamp
+    /// (back stages, cut c: BufferCache::MarkVertexStreamsUsed).
+    void StampUsage() noexcept;
+
+    /// The tracker's generation (VideoCommon::UsageMarkMemo): new at each ResetUsageTracking.
+    [[nodiscard]] u64 UsageGeneration() const noexcept {
+        return tracker.Generation();
+    }
+
     void ResetUsageTracking() noexcept {
         tracker.Reset();
     }
