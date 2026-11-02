@@ -130,14 +130,24 @@ inline bool Enabled() {
 }
 
 // EDEN_NX2_PROFILE_FINE=0: the finer zones of cut c's draw path off (FineScope; each costs two
-// counter reads, ~10-20 ns, a few times a draw). On with the profile otherwise.
-inline const bool g_fine = g_enabled && [] {
+// counter reads, ~10-20 ns, a few times a draw). On with the profile otherwise. Read at the first
+// call as EDEN_NX2_GPU_PROFILE is (Enabled()): at static initialization the profile's state is
+// not known yet (g_enabled is -1, which a bool reads as on) and nx2_switches.txt is not loaded.
+inline std::atomic<s8> g_fine{-1};
+
+YUZU_NO_INLINE inline bool ReadFine() {
     const char* value = std::getenv("EDEN_NX2_PROFILE_FINE");
-    return value == nullptr || value[0] != '0';
-}();
+    const bool on = Enabled() && (value == nullptr || value[0] != '0');
+    g_fine.store(on ? 1 : 0, std::memory_order_relaxed);
+    return on;
+}
 
 inline bool FineEnabled() {
-    return g_fine;
+    const s8 value = g_fine.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        return ReadFine();
+    }
+    return value != 0;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones

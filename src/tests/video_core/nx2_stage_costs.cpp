@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/buffer_cache/usage_tracker.h"
+#include "video_core/nx2_profile.h"
 
 using VideoCommon::UsageMarkMemo;
 using VideoCommon::UsageTracker;
@@ -120,6 +121,19 @@ TEST_CASE("Nx2StageCosts: skipping held marks leaves the tracker as tracking eac
         // Most marks repeat (the point of the memo).
         REQUIRE(skipped > 400 * 12 / 2);
     }
+}
+
+TEST_CASE("Nx2StageCosts: the fine zones are off with the profile off", "[video_core]") {
+    // perf/tam: EDEN_NX2_GPU_PROFILE is read at the first Enabled() (g_enabled is -1 before);
+    // EDEN_NX2_PROFILE_FINE follows it, so B's draw path times nothing without the profile.
+    namespace Profile = VideoCommon::Nx2Profile;
+    const char* profile = std::getenv("EDEN_NX2_GPU_PROFILE");
+    const bool profiling = profile != nullptr && profile[0] != '0';
+    const char* fine = std::getenv("EDEN_NX2_PROFILE_FINE");
+    const bool fine_on = fine == nullptr || fine[0] != '0';
+    REQUIRE(Profile::FineEnabled() == (profiling && fine_on));
+    REQUIRE(Profile::Enabled() == profiling);
+    REQUIRE(Profile::FineEnabled() == (profiling && fine_on));
 }
 
 TEST_CASE("Nx2StageCosts: a reset USAGE_RESET_SKIP skips keeps no held mark", "[video_core]") {
