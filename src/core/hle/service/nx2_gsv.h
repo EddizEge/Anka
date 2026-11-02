@@ -1115,6 +1115,9 @@ private:
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
+        if (!m_once_events.empty()) {
+            SignalOnceEvents();
+        }
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -2234,6 +2237,44 @@ private:
     u32 m_display_notification{};
     Kernel::KEvent* m_notification_event{};
 
+    // EDEN_NX2_VI2_KIND_EVENTS=<modes> (off by default): what signals 31's events of kinds 1-3
+    // (Bananza asks for kinds 1-3 just before its first present, each followed by a 26x setup
+    // call with the same kind; kind 0 at boot). "1": once each, at the first present after the 31
+    // call (the setup calls are done by then); "0": never; "1:once,2:never,3:vsync": per kind.
+    // Off: all of them on every vblank, as kind 0 and 32's event stay.
+    static const Nx2Vi2Events::KindModes& KindEventModes() {
+        static const Nx2Vi2Events::KindModes modes = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_KIND_EVENTS");
+            if (text == nullptr || text[0] == '\0') {
+                return Nx2Vi2Events::KindModes{};
+            }
+            const auto parsed = Nx2Vi2Events::ParseKindEvents(text);
+            if (!parsed.modes) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_KIND_EVENTS=\"{}\": {}: off", text, parsed.error);
+                return Nx2Vi2Events::KindModes{};
+            }
+            LOG_INFO(Service, "nx2:vi2 kind events (EDEN_NX2_VI2_KIND_EVENTS): 31's kinds {} (once: "
+                              "at the first present after the 31 call)",
+                     Nx2Vi2Events::DescribeKinds(*parsed.modes));
+            return *parsed.modes;
+        }();
+        return modes;
+    }
+
+    // EDEN_NX2_VI2_KIND_EVENTS: the "once" events still to signal at the next present, and kinds.
+    std::vector<std::pair<Kernel::KEvent*, u32>> m_once_events;
+
+    void SignalOnceEvents() {
+        for (const auto& [event, kind] : m_once_events) {
+            event->Signal(system.Kernel());
+            DiagSignalled(event);
+            LOG_INFO(Service, "nx2:vi2 present #{}: signalled 31's kind {} event once "
+                              "(EDEN_NX2_VI2_KIND_EVENTS)",
+                     m_presents, kind);
+        }
+        m_once_events.clear();
+    }
+
     // 31(u32 kind) and 32(u32 display): events signalled on every vblank. Title 1's main thread
     // waits on the 32 event until it has fired twice before it submits any GPU work, and hung
     // there while it never fired.
@@ -2242,10 +2283,20 @@ private:
         const std::string name = fmt::format("nx2:vi2:Vsync{}", m_events.size());
         auto* event = m_context.CreateEvent(std::string{name});
         m_events.push_back(event);
+        const u32 kind = ctx.CommandBuffer()[2];
+        const auto mode = ctx.GetCommand() == 31 ? KindEventModes().Of(kind) : Nx2Vi2Events::KindMode::Vsync;
+        if (mode != Nx2Vi2Events::KindMode::Vsync) {
+            LOG_INFO(Service, "nx2:vi2 31 kind {}: {} (EDEN_NX2_VI2_KIND_EVENTS)", kind,
+                     Nx2Vi2Events::ModeName(mode));
+        }
+        if (mode == Nx2Vi2Events::KindMode::Once) {
+            m_once_events.emplace_back(event, kind);
+        }
         {
             std::scoped_lock lk{m_vsync->mutex};
             auto& tracked = m_vsync->events.emplace_back();
             tracked.event = event;
+            tracked.on_vsync = mode == Nx2Vi2Events::KindMode::Vsync;
             if (Vi2DiagEnabled()) {
                 tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
                 m_diag_event = event;
