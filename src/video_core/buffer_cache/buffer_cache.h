@@ -944,6 +944,47 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
 }
 
 template <class P>
+void BufferCache<P>::NoteVertexStreams(u32 enabled_mask) {
+    // EDEN_NX2_GPU_PROFILE: what this draw binds, before BindHostVertexBuffers clears flags.
+    // Kept until the draw is recorded (CommitVertexStreamNote): a light draw that falls back
+    // binds again in the full setup, and only that one counts.
+    const auto& flags = maxwell3d->dirty.flags;
+    std::array<BufferId, NUM_VERTEX_BUFFERS> seen;
+    u32 num_seen = 0;
+    u32 dirty = 0;
+    for (u32 mask = enabled_mask; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        const BufferId buffer_id = v_buffer[index].buffer_id;
+        if (std::find(seen.begin(), seen.begin() + num_seen, buffer_id) ==
+            seen.begin() + num_seen) {
+            seen[num_seen++] = buffer_id;
+        }
+        dirty += flags[Dirty::VertexBuffer0 + index] ? 1 : 0;
+    }
+    vertex_note = VertexStreamNote{
+        .enabled = static_cast<u32>(std::popcount(enabled_mask)),
+        .buffers = num_seen,
+        .dirty = dirty,
+        .pending = true,
+    };
+}
+
+template <class P>
+void BufferCache<P>::CommitVertexStreamNote() {
+    if (!vertex_note.pending) {
+        return;
+    }
+    vertex_note.pending = false;
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDraws, 1);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexEnabled, vertex_note.enabled);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexBuffers, vertex_note.buffers);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexDirtyEnabled, vertex_note.dirty);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncSkipped, vertex_note.sync_skipped);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncWouldSkip, vertex_note.sync_would_skip);
+    Nx2Profile::Add(Nx2Profile::Counter::VertexSyncGuarded, vertex_note.sync_guarded);
+}
+
+template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
 
 #ifdef __ANDROID__
@@ -956,8 +997,16 @@ void BufferCache<P>::BindHostVertexBuffers() {
         auto& flags = maxwell3d->dirty.flags;
         u32 enabled_mask = enabled_vertex_buffers_mask;
         const bool vertex_skip = VertexSkipEnabled();
+        if (Nx2Profile::Enabled()) {
+            NoteVertexStreams(enabled_mask);
+        }
         HostBindings<Buffer> bindings{};
         u32 last_index = (std::numeric_limits<u32>::max)();
+        // EDEN_NX2_GPU_PROFILE: clean streams of a plain light draw skipped, checked instead
+        // (=2) and synchronized as their range may have changed.
+        u32 sync_skipped = 0;
+        u32 sync_would_skip = 0;
+        u32 sync_guarded = 0;
         const auto flush_bindings = [&]() {
             if (bindings.buffers.empty()) {
                 return;
@@ -971,6 +1020,38 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const u32 index = std::countr_zero(enabled_mask);
             enabled_mask &= (enabled_mask - 1);
             // index is a bit of the u32 enabled_vertex_buffers_mask: below v_buffer's 32.
+            // EDEN_NX2_LIGHT_SYNC_SKIP: a plain light draw's clean stream binds what the draw
+            // before bound, synchronized and touched (this frame, no memory written since but
+            // the same bytes): nothing to do for it, as below where the flag is clean. Only while
+            // its range holds no CPU-modified or untracked page since that synchronization
+            // (UnsetSince; one compare while the tracker's epoch is unchanged): a same-byte
+            // write that was made (not skipped) marks its page so at the next flush, untracking
+            // it, and CPU writes there then reach neither the tracker nor the light epoch.
+            // Otherwise the stream is synchronized as below, as before.
+            if (plain_light_draw && !flags[Dirty::VertexBuffer0 + index]) {
+                const Binding& clean = v_buffer[index];
+                if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
+                                              vertex_synced_epoch[index])) {
+                    if (Nx2LightSyncSkip() != 2) {
+                        ++sync_skipped;
+                    } else {
+                        ++sync_would_skip;
+                        if (!SynchronizeBuffer(slot_buffers[clean.buffer_id], clean.device_addr,
+                                               clean.size)) {
+                            static u32 reported{};
+                            if (reported++ < 16) {
+                                LOG_ERROR(HW_GPU,
+                                          "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain "
+                                          "light draw uploaded",
+                                          index);
+                            }
+                        }
+                    }
+                    flush_bindings();
+                    continue;
+                }
+                ++sync_guarded;
+            }
             const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
@@ -981,7 +1062,9 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 vertex_touched_ids[index] = binding.buffer_id;
                 vertex_touched_ticks[index] = frame_tick + 1;
             }
+            const u64 sync_epoch = memory_tracker.CpuSetEpoch();
             SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            vertex_synced_epoch[index] = sync_epoch;
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
@@ -1012,6 +1095,11 @@ void BufferCache<P>::BindHostVertexBuffers() {
             last_index = index;
         }
         flush_bindings();
+        if (Nx2Profile::Enabled()) {
+            vertex_note.sync_skipped = sync_skipped;
+            vertex_note.sync_would_skip = sync_would_skip;
+            vertex_note.sync_guarded = sync_guarded;
+        }
     } else {
         HostBindings<typename P::Buffer> host_bindings;
         bool any_valid{false};
@@ -1622,11 +1710,55 @@ void BufferCache<P>::UpdateVertexBuffers() {
     flags[Dirty::VertexBuffers] = false;
 
     const bool vertex_skip = VertexSkipEnabled();
+    if (Nx2VertexClean() == 2) {
+        // A cleaned stream must stay disabled until one of its registers is written. Checked
+        // where the streams are resolved again (Dirty::VertexBuffers set): what =0 would resolve
+        // here and =1 no longer does.
+        const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+        for (u32 mask = vertex_clean_mask; mask != 0; mask &= mask - 1) {
+            const u32 index = static_cast<u32>(std::countr_zero(mask));
+            if (flags[Dirty::VertexBuffer0 + index]) {
+                vertex_clean_mask &= ~(1u << index);
+                continue;
+            }
+            const auto& array = maxwell3d->regs.vertex_streams[index];
+            const GPUVAddr begin = array.Address();
+            const GPUVAddr end =
+                native ? begin + maxwell3d->regs.NativeVertexStreamSize(index)
+                       : maxwell3d->regs.vertex_stream_limits[index].Address() + 1;
+            if (array.enable != 0 && static_cast<u32>(end - begin) != 0) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU,
+                              "EDEN_NX2_VERTEX_CLEAN: stream {} enabled without its dirty flag",
+                              index);
+                }
+                flags[Dirty::VertexBuffer0 + index] = true;
+                vertex_clean_mask &= ~(1u << index);
+            }
+        }
+    }
+    // EDEN_NX2_GPU_PROFILE: the streams resolved again below (UpdateVertexBuffer passes clean
+    // ones), and of them those that bind nothing after.
+    u32 resolved_mask = 0;
+    if (Nx2Profile::Enabled()) {
+        for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
+            resolved_mask |= flags[Dirty::VertexBuffer0 + index] ? 1u << index : 0;
+        }
+    }
     for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
         // Clean streams cost a flag test here instead of a call each.
         if (!vertex_skip || flags[Dirty::VertexBuffer0 + index]) {
             UpdateVertexBuffer(index);
         }
+    }
+    if (Nx2Profile::Enabled()) {
+        Nx2Profile::Add(Nx2Profile::Counter::VertexUpdates, 1);
+        Nx2Profile::Add(Nx2Profile::Counter::VertexResolved,
+                        static_cast<u64>(std::popcount(resolved_mask)));
+        Nx2Profile::Add(Nx2Profile::Counter::VertexResolvedDisabled,
+                        static_cast<u64>(
+                            std::popcount(resolved_mask & ~enabled_vertex_buffers_mask)));
     }
 }
 
@@ -1654,6 +1786,14 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         if (array.enable == 0 || static_cast<u32>(gpu_addr_end - gpu_addr_begin) == 0) {
             channel_state->vertex_buffers[index] = NULL_BINDING;
             UpdateVertexBufferSlot(index, NULL_BINDING);
+            // EDEN_NX2_VERTEX_CLEAN: a function of this stream's registers only (enable, address,
+            // limit or native size), all in its dirty block: nothing to resolve again until one
+            // is written. Disabled streams are never bound (BindHostVertexBuffers), so nothing
+            // else clears this flag.
+            if (Nx2VertexClean() != 0) {
+                maxwell3d->dirty.flags[Dirty::VertexBuffer0 + index] = false;
+                vertex_clean_mask |= 1u << index;
+            }
             return;
         }
         // With accurate GPU fences FindBuffer also synchronizes the buffer's writes.
@@ -2147,6 +2287,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         };
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
+        bool memo_missed = false; // Counted only while profiling (EDEN_NX2_GPU_PROFILE)
         if (g_nx2_sync_memo && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
@@ -2161,10 +2302,22 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
                 memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
                 ++skipped;
+                Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
                 if (g_nx2_sync_skip_mode != 2) {
                     return true;
                 }
                 memo_hit = true;
+            } else if (Nx2Profile::Enabled()) {
+                // Why: no range yet, another range in the slot (a collision), one overlapping or
+                // touching this (not covering it), or this range's regions stamped since.
+                memo_missed = true;
+                Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
+                                : memo->begin <= device_addr && range_end <= memo->end
+                                    ? Nx2Profile::Counter::SyncMemoMissStamped
+                                : memo->begin <= range_end && device_addr <= memo->end
+                                    ? Nx2Profile::Counter::SyncMemoMissPartial
+                                    : Nx2Profile::Counter::SyncMemoMissOther,
+                                1);
             }
         }
         upload_copies.clear();
@@ -2202,6 +2355,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 memo->end = range_end;
             }
             memo->epoch = sync_epoch;
+        }
+        if (memo_missed && total_size_bytes != 0) {
+            Nx2Profile::Add(Nx2Profile::Counter::SyncMemoMissUploaded, 1);
         }
         if (memo_hit && total_size_bytes != 0) {
             static bool reported = false;

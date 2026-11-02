@@ -64,6 +64,45 @@ inline const bool g_nx2_vertex_fast = [] {
     const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
     return value == nullptr || value[0] != '0';
 }();
+/// A 0/1/2 switch (unset or another value: 1), read at the first call: not at static
+/// initialization, before main loads nx2_switches.txt into the environment (yuzu main.cpp), and
+/// without a function-local static's thread-safe initialization check on every call (MSVC: a
+/// thread-local read). Two threads racing on the first call both compute the same value.
+inline int ReadNx2Mode(std::atomic<s8>& mode, const char* name) {
+    s8 value = mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv(name);
+        value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
+        mode.store(value, std::memory_order_relaxed);
+    }
+    return value;
+}
+/// EDEN_NX2_VERTEX_CLEAN (with EDEN_NX2_VERTEX_SKIP): a stream its registers disable (enable bit
+/// clear or an empty range) is resolved to NULL_BINDING once and its VertexBuffer<n> flag cleared.
+/// BindHostVertexBuffers visits enabled streams only, so that flag was never cleared before and
+/// every draw with Dirty::VertexBuffers set resolved each disabled stream again (~18 of 32 a draw
+/// in title 4). Those registers are in the stream's dirty block (dirty_flags.cpp), so writing any
+/// of them sets the flag again; InvalidateCommandBufferState does too.
+/// =0 as before; =2 also checks, each time the streams are resolved again, that no cleaned stream
+/// got enabled without its flag (logs "EDEN_NX2_VERTEX_CLEAN: stream N enabled without its dirty
+/// flag", first 16, and resolves it).
+inline int Nx2VertexClean() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_VERTEX_CLEAN");
+}
+/// EDEN_NX2_LIGHT_SYNC_SKIP: in a plain light draw (RasterizerVulkan::TryLightDraw: nothing but
+/// stream/index/draw registers changed, no memory changed but same-byte constant buffer writes,
+/// same frame) an enabled stream whose flag is clean keeps the binding the draw before
+/// synchronized and touched; BindHostVertexBuffers skips its TouchBuffer and SynchronizeBuffer
+/// while no CPU-modified or untracked page can have appeared in the stream's range since its
+/// last synchronization there (vertex_synced_epoch, MemoryTracker::UnsetSince), and does both as
+/// before otherwise. =0 as before; =2 synchronizes the streams it would skip anyway and logs any
+/// that uploaded ("EDEN_NX2_LIGHT_SYNC_SKIP: clean stream N of a plain light draw uploaded"; none
+/// expected).
+inline int Nx2LightSyncSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_LIGHT_SYNC_SKIP");
+}
 
 using BufferId = Common::SlotId;
 
@@ -413,6 +452,16 @@ public:
     Runtime& runtime;
     bool any_buffer_uploaded = false;
     bool written_since_indirect = false; ///< See TakeIndirectBarrier
+    /// EDEN_NX2_LIGHT_SYNC_SKIP: set by the rasterizer around a plain light draw's
+    /// BindHostGeometryBuffers only.
+    bool plain_light_draw = false;
+    /// EDEN_NX2_VERTEX_CLEAN=2: streams whose flag UpdateVertexBuffer cleared as disabled.
+    u32 vertex_clean_mask = 0;
+
+    /// EDEN_NX2_GPU_PROFILE: counts the vertex streams the last BindHostVertexBuffers bound, once
+    /// its draw is recorded (the rasterizer calls it then, with the profile on; a light draw that
+    /// falls back binds them again in the full setup and is counted once, as set up there).
+    void CommitVertexStreamNote();
 
 private:
     template <typename Func>
@@ -452,6 +501,9 @@ private:
     void BindHostIndexBuffer();
 
     void BindHostVertexBuffers();
+
+    /// EDEN_NX2_GPU_PROFILE: notes the streams a draw binds (BindHostVertexBuffers).
+    void NoteVertexStreams(u32 enabled_mask);
 
     void BindHostDrawIndirectBuffers();
 
@@ -652,6 +704,22 @@ private:
     /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).
     std::array<BufferId, 32> vertex_touched_ids{};
     std::array<u64, 32> vertex_touched_ticks{};
+    /// EDEN_NX2_LIGHT_SYNC_SKIP: the memory tracker's CPU-set epoch taken before each vertex
+    /// stream's last synchronization in BindHostVertexBuffers (0, never matching, before the
+    /// first). Its range held no CPU-modified or untracked page as of then.
+    std::array<u64, 32> vertex_synced_epoch{};
+    /// EDEN_NX2_GPU_PROFILE: what the last BindHostVertexBuffers bound (NoteVertexStreams),
+    /// counted by CommitVertexStreamNote.
+    struct VertexStreamNote {
+        u32 enabled;
+        u32 buffers;
+        u32 dirty;
+        u32 sync_skipped;
+        u32 sync_would_skip;
+        u32 sync_guarded;
+        bool pending;
+    };
+    VertexStreamNote vertex_note{};
 
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.

@@ -133,7 +133,8 @@ struct HistogramData {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ticks{}; ///< See Ticks
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 96> counters{}; ///< See Counter
+    std::array<u64, 128> counters{}; ///< See Counter
+    std::array<std::array<u64, 3>, 9> drains{}; ///< See DrainSite: calls, waits, wait ticks
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ticks{}; ///< Time of the zones nested in the current one
     u64 window_start{};       ///< Now() when the window began
@@ -270,8 +271,50 @@ enum class Counter : u32 {
     LightStorageWithHandles, ///< A texture handle changed too (set up in full, as "handles")
     LightStorageDraws,       ///< Of LightUniformDraws: bound their storage buffers again
     LightStorageFellBack,    ///< Bound them again, then fell back (uploads, render pass ended)
+    // Vertex streams per draw (BindHostVertexBuffers, once a draw), summed:
+    VertexDraws,          ///< Draws whose vertex buffers were bound
+    VertexEnabled,        ///< Enabled streams
+    VertexBuffers,        ///< Different buffers they bind
+    VertexDirtyEnabled,   ///< Enabled streams flagged dirty (bound anew)
+    VertexSyncSkipped,    ///< Clean streams of plain light draws not synchronized (LIGHT_SYNC_SKIP)
+    VertexSyncWouldSkip,  ///< The same at EDEN_NX2_LIGHT_SYNC_SKIP=2 (synchronized and checked)
+    VertexSyncGuarded,    ///< Clean ones synchronized as their range may have changed since
+    // UpdateVertexBuffers with Dirty::VertexBuffers set, and the streams it resolved again:
+    VertexUpdates,
+    VertexResolved,
+    VertexResolvedDisabled, ///< Of VertexResolved: bound nothing (disabled, empty or unmapped)
+    // EDEN_NX2_SYNC_MEMO: synchronizations of a range the memo was asked about, and of them:
+    SyncMemoHits,
+    SyncMemoMissEmpty,    ///< The slot held no range
+    SyncMemoMissOther,    ///< The slot held another range, apart from this one (a collision)
+    SyncMemoMissPartial,  ///< The slot held one overlapping or touching it, not covering it
+    SyncMemoMissStamped,  ///< The slot covered it, but a 4 MiB region of it was stamped since
+    SyncMemoMissUploaded, ///< Of the misses: the walk uploaded something
     Count,
 };
+
+/// Split GPU thread drains by caller (EDEN_NX2_GPU_PROFILE; counted where they are called, see
+/// CountDrain): calls, calls that waited for the back, and the time they waited.
+enum class DrainSite : u32 {
+    PullerResume,      ///< Puller::CanResumeAcquire (a pending semaphore acquire checked again)
+    PullerAcquire,     ///< Semaphore acquires (semaphore trigger method, method 0x1A)
+    PullerExecute,     ///< SEM_EXECUTE acquires (method 0x1B)
+    FrontDmaRead,      ///< Maxwell3D::FrontDmaRead (native MME DMA reads on the front)
+    Front3DOther,      ///< Maxwell3D::Front (first use) and FrontVerify
+    PusherParameters,  ///< DmaPusher: macro / inline parameter blocks on GPU-written pages
+    PusherSync,        ///< DmaPusher: command lists with the sync bit (sync_memory_operations)
+    PusherCommandList, ///< DmaPusher: command lists on GPU-written pages
+    FrontCompute,      ///< KeplerCompute::Front (first use)
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
+    "acquire resume", "semaphore acquire", "sem execute", "MME DMA read",
+    "3D front other", "parameter blocks",  "sync lists",  "written lists",
+    "compute front",
+};
+static_assert(static_cast<size_t>(DrainSite::Count) <=
+              std::tuple_size_v<decltype(ThreadData::drains)>);
 
 /// Categories of DrawChangeDirect / DrawChangeIndirect, the widest change that applies.
 enum class DrawChange : u32 {
@@ -297,6 +340,24 @@ inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
         t_data.counters[static_cast<size_t>(counter)] += amount;
     }
+}
+
+/// Runs split.Drain() (true when it waited for the back) and, while profiling, counts it for
+/// its caller. For callers outside gpu_split.cpp (its own drains are the split drain zone).
+template <typename Split>
+inline bool CountDrain(Split& split, DrainSite site) {
+    if (!Enabled()) {
+        return split.Drain();
+    }
+    const u64 start = Ticks();
+    const bool waited = split.Drain();
+    auto& entry = t_data.drains[static_cast<size_t>(site)];
+    ++entry[0];
+    if (waited) {
+        ++entry[1];
+        entry[2] += Ticks() - start;
+    }
+    return waited;
 }
 
 inline void Note(Histogram histogram, s64 value) {
@@ -376,6 +437,18 @@ inline void Report(const char* thread_name = "GPU thread") {
         const double ms = static_cast<double>(exclusive_ns[i]) * 1000.0 / window;
         const double calls = static_cast<double>(data.count[i]) * 1e9 / window;
         line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
+    }
+    // Where draws are configured (the split's back): the thread's busy time (wall time but
+    // waiting for work) by its draws, steadier than frame times across views.
+    if (const u64 draws = data.count[static_cast<size_t>(Zone::Draw)]; draws != 0) {
+        const u64 waiting = exclusive_ns[static_cast<size_t>(Zone::SplitWait)] +
+                            exclusive_ns[static_cast<size_t>(Zone::Idle)] +
+                            exclusive_ns[static_cast<size_t>(Zone::PendingSleep)];
+        const u64 busy = window > waiting ? window - waiting : 0;
+        line += fmt::format(" | busy {:.1f} ms over {:.0f} draws: {:.3f} us/draw",
+                            static_cast<double>(busy) * 1000.0 / window,
+                            static_cast<double>(draws) * 1e9 / window,
+                            static_cast<double>(busy) / 1000.0 / static_cast<double>(draws));
     }
     line += fmt::format(" | buffer downloads {:.0f} KiB in {:.0f} copies ({:.0f} KiB on pages "
                         "MME DMA reads) | MME DMA reads {:.0f} KiB",
@@ -525,6 +598,57 @@ inline void Report(const char* thread_name = "GPU thread") {
         line += fmt::format(" | indirect draw reset uploads {:.0f} in {:.0f} copy commands",
                             rate(static_cast<size_t>(Counter::ResetUploads)),
                             rate(static_cast<size_t>(Counter::ResetCopyCommands)));
+    }
+    // Counted where vertex buffers are bound: the back's line with the split on.
+    if (const u64 draws = data.counters[static_cast<size_t>(Counter::VertexDraws)]; draws != 0) {
+        const u64 updates = data.counters[static_cast<size_t>(Counter::VertexUpdates)];
+        const auto per = [&](Counter c, u64 base) {
+            return base != 0 ? static_cast<double>(data.counters[static_cast<size_t>(c)]) /
+                                   static_cast<double>(base)
+                             : 0.0;
+        };
+        line += fmt::format(" | vertex streams per draw: {:.2f} enabled, {:.2f} buffers, {:.2f} "
+                            "dirty, {:.2f} sync skipped ({:.2f} would skip, {:.2f} guarded); per "
+                            "update {:.2f} resolved ({:.2f} to nothing) in {:.0f} updates/s",
+                            per(Counter::VertexEnabled, draws), per(Counter::VertexBuffers, draws),
+                            per(Counter::VertexDirtyEnabled, draws),
+                            per(Counter::VertexSyncSkipped, draws),
+                            per(Counter::VertexSyncWouldSkip, draws),
+                            per(Counter::VertexSyncGuarded, draws),
+                            per(Counter::VertexResolved, updates),
+                            per(Counter::VertexResolvedDisabled, updates),
+                            counter(Counter::VertexUpdates));
+    }
+    if (const u64 sync_total = data.counters[static_cast<size_t>(Counter::SyncMemoHits)] +
+                               data.counters[static_cast<size_t>(Counter::SyncMemoMissEmpty)] +
+                               data.counters[static_cast<size_t>(Counter::SyncMemoMissOther)] +
+                               data.counters[static_cast<size_t>(Counter::SyncMemoMissPartial)] +
+                               data.counters[static_cast<size_t>(Counter::SyncMemoMissStamped)];
+        sync_total != 0) {
+        line += fmt::format(
+            " | buffer sync memo {:.0f}: hits {:.1f}%, misses empty {:.0f}, other range {:.0f}, "
+            "partial {:.0f}, stamped {:.0f} ({:.0f} uploaded)",
+            static_cast<double>(sync_total) * 1e9 / window,
+            100.0 * static_cast<double>(data.counters[static_cast<size_t>(Counter::SyncMemoHits)]) /
+                static_cast<double>(sync_total),
+            counter(Counter::SyncMemoMissEmpty), counter(Counter::SyncMemoMissOther),
+            counter(Counter::SyncMemoMissPartial), counter(Counter::SyncMemoMissStamped),
+            counter(Counter::SyncMemoMissUploaded));
+    }
+    // Counted where drains are called: the front's line with the split on.
+    std::string drains;
+    for (size_t i = 0; i < drain_site_names.size(); ++i) {
+        const auto& entry = data.drains[i];
+        if (entry[0] == 0) {
+            continue;
+        }
+        drains += fmt::format("{}{} {:.0f}/{:.0f}/{:.2f}", drains.empty() ? "" : ", ",
+                              drain_site_names[i], static_cast<double>(entry[0]) * 1e9 / window,
+                              static_cast<double>(entry[1]) * 1e9 / window,
+                              static_cast<double>(entry[2]) * ns_per_tick * 1000.0 / window);
+    }
+    if (!drains.empty()) {
+        line += fmt::format(" | drains by caller (calls/waited/wait ms per second): {}", drains);
     }
     if (histograms[static_cast<size_t>(Histogram::IndirectGapMethods)].used != 0) {
         line += fmt::format(" | methods between indirect draws (first 16 of each): {}",

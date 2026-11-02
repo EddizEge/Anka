@@ -7,18 +7,44 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <bitset>
 #include <concepts>
 #include <cstddef>
+#include <cstdlib>
+#include <type_traits>
 
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 
 namespace Kernel {
 
 class KThread;
+
+// EDEN_NX2_FAST_PRIORITY_SCAN: the priority bitsets are scanned bit by bit since std::bitset
+// replaced Common::BitSet (upstream 020ad29a8); GetFront looped up to 64 times a call (reloading
+// the word each turn), every scheduler update, under the scheduler lock.
+// Unset or 1: one count-trailing-zeros on the 64-bit word. 0: the bit-by-bit scan, as before.
+// 2: both; a difference logs "EDEN_NX2_FAST_PRIORITY_SCAN: ..." (first 16) and the bit-by-bit
+// result is used.
+inline int FastPriorityScanMode() {
+    static const int mode = [] {
+        const char* const value = std::getenv("EDEN_NX2_FAST_PRIORITY_SCAN");
+        return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
+    }();
+    return mode;
+}
+
+inline void ReportPriorityScanDifference(size_t from, size_t found, size_t scanned) {
+    static std::atomic<u32> reported{};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+        LOG_ERROR(Kernel, "EDEN_NX2_FAST_PRIORITY_SCAN: from {} found {}, bit by bit {}", from,
+                  found, scanned);
+    }
+}
 
 template <typename T>
 concept KPriorityQueueAffinityMask = !
@@ -196,12 +222,7 @@ public:
         constexpr Member* GetFront(s32 core) const {
             ASSERT(IsValidCore(core));
 
-            const s32 priority = s32([](auto const& e) {
-                for (size_t i = 0; i < e.size(); ++i)
-                    if (e[i])
-                        return i;
-                return e.size();
-            }(m_available_priorities[core]));
+            const s32 priority = s32(FindSet(m_available_priorities[core], 0));
             if (priority <= LowestPriority) {
                 return m_queues[priority].GetFront(core);
             } else {
@@ -220,12 +241,49 @@ public:
             }
         }
 
-        template<size_t N>
-        constexpr size_t GetNextSet(std::bitset<N> const& bit, size_t n) const {
-            for (size_t i = n + 1; i < bit.size(); i++)
+        // First set bit at or after `from`, N if none: bit by bit (EDEN_NX2_FAST_PRIORITY_SCAN=0).
+        template <size_t N>
+        static constexpr size_t ScanSet(std::bitset<N> const& bit, size_t from) {
+            for (size_t i = from; i < bit.size(); i++)
                 if (bit[i])
                     return i;
             return bit.size();
+        }
+
+        // The same with one count-trailing-zeros: the bitset is a single 64-bit word.
+        template <size_t N>
+        static size_t CountSet(std::bitset<N> const& bit, size_t from) {
+            static_assert(N <= 64);
+            if (from >= N) {
+                return N;
+            }
+            const u64 rest = static_cast<u64>(bit.to_ullong()) >> from;
+            return rest != 0 ? from + static_cast<size_t>(std::countr_zero(rest)) : N;
+        }
+
+        template <size_t N>
+        static constexpr size_t FindSet(std::bitset<N> const& bit, size_t from) {
+            if (std::is_constant_evaluated()) {
+                return ScanSet(bit, from);
+            }
+            const int mode = FastPriorityScanMode();
+            if (mode == 0) {
+                return ScanSet(bit, from);
+            }
+            const size_t found = CountSet(bit, from);
+            if (mode == 2) [[unlikely]] {
+                const size_t scanned = ScanSet(bit, from);
+                if (found != scanned) {
+                    ReportPriorityScanDifference(from, found, scanned);
+                    return scanned;
+                }
+            }
+            return found;
+        }
+
+        template<size_t N>
+        constexpr size_t GetNextSet(std::bitset<N> const& bit, size_t n) const {
+            return FindSet(bit, n + 1);
         }
 
         constexpr Member* GetNext(s32 core, const Member* member) const {

@@ -166,7 +166,10 @@ bool DmaPusher::Step() {
                     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterBlocks, 1);
                     if (flush_all_parameters || IsGpuWrittenRange(address, bytes)) {
                         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushChecks, 1);
-                        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active() && split.Drain()) {
+                        if (auto& split = VideoCommon::GpuSplit::Get();
+                            split.Active() &&
+                            VideoCommon::Nx2Profile::CountDrain(
+                                split, VideoCommon::Nx2Profile::DrainSite::PusherParameters)) {
                             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterDrainWaits, 1);
                         }
                         back_idle = true;
@@ -281,7 +284,8 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
-        VideoCommon::GpuSplit::Get().Drain();
+        VideoCommon::Nx2Profile::CountDrain(VideoCommon::GpuSplit::Get(),
+                                            VideoCommon::Nx2Profile::DrainSite::PusherSync);
         rasterizer->SignalFence([this]() {
             std::scoped_lock lk(sync_mutex);
             synced = true;
@@ -572,7 +576,8 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     // The caches belong to the split's back: it first runs what the front queued (the dispatch
     // that writes these words among it).
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListChecks, 1);
-    if (VideoCommon::GpuSplit::Get().Drain()) {
+    if (VideoCommon::Nx2Profile::CountDrain(
+            VideoCommon::GpuSplit::Get(), VideoCommon::Nx2Profile::DrainSite::PusherCommandList)) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListDrainWaits, 1);
     }
     if (memory_manager.IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {

@@ -625,6 +625,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         Profile::Scope scope{Profile::Zone::DrawRecord};
         draw_func();
     }
+    if (Profile::Enabled()) {
+        buffer_cache.CommitVertexStreamNote();
+    }
     submitted = true;
     set_up = true;
     anchor.pipeline = pipeline;
@@ -1159,7 +1162,12 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         Profile::Add(Profile::Counter::LightFellBack, 1);
         return false;
     }
+    // EDEN_NX2_LIGHT_SYNC_SKIP: plain here (checked above): the anchor chain synchronized every
+    // enabled stream after the last memory change; only streams flagged dirty bind anew (a clean
+    // stream whose range may hold CPU-modified or untracked pages since is synchronized anyway).
+    buffer_cache.plain_light_draw = VideoCommon::Nx2LightSyncSkip() != 0;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    buffer_cache.plain_light_draw = false;
     // An upload needs ConfigureImpl's barrier after it and ends the render pass.
     if (buffer_cache.any_buffer_uploaded || !scheduler.IsRenderPassActive()) {
         Profile::Add(Profile::Counter::LightFellBack, 1);
@@ -1172,6 +1180,9 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     {
         Profile::Scope draw_scope{Profile::Zone::DrawRecord};
         draw_func();
+    }
+    if (Profile::Enabled()) {
+        buffer_cache.CommitVertexStreamNote();
     }
     Profile::Add(Profile::Counter::LightDraws, 1);
     if (indirect) {
