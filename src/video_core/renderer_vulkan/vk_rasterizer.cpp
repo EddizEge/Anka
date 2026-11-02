@@ -4657,6 +4657,8 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                 }
             }
             if (light_ok) {
+                // Every stream the draw reads, bound again or not (geo-markusage-1).
+                buffer_cache.MarkVertexStreamsUsed();
                 take_indirect();
             }
             records = buffer_cache_runtime.EndRecords();
@@ -4781,6 +4783,8 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             half = pipeline->ConfigureBuffers(is_indexed, out);
         }
         if (half == GraphicsPipeline::BufferHalf::Ready) {
+            // Every stream the draw reads, bound again or not (geo-markusage-1).
+            buffer_cache.MarkVertexStreamsUsed();
             take_indirect();
         } else {
             // SplitJoins said no: nothing was done.
