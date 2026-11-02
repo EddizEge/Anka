@@ -17,7 +17,9 @@ scope for this pass.
   `eden-cli.exe -g "<title>\exefs\main"`
 - Debug helpers:
   - `EDEN_NX2_SVC_TRACE=1` logs every SVC with arguments and results.
-  - `EDEN_NX2_IPC_TRACE=1` logs every dispatched CMIF command and non-zero result words.
+  - `EDEN_NX2_IPC_TRACE=1` logs every dispatched CMIF command and non-zero result words. Any other
+    value is a filter for request backtraces (`all`, `nx2:vi2`, `nx2:vi2:104,105,107`; see
+    "Live vi2 reply experiments" below).
   - `EDEN_NX2_AUTO_STUB=1` answers every unknown command with an empty success (the
     `use_auto_stub` setting gets reset by eden-cli's config rewrite). Used for all runs below.
   - `eden-cli --filter "<log filter>"` sets the log filter for one run (e.g. `*:Info Loader:Debug`
@@ -234,6 +236,8 @@ faulting stack as module+offset, then a minidump), `EDEN_NX2_AUTO_STUB`, `EDEN_N
 `EDEN_NX2_MODE_DIAG=1` (off by default: what the game can time its frames with; every second a "nx2 mode diag" line (presents per interval as `EDEN_NX2_PRESENT_INTERVAL_WORD` reads it, all 1 without it; GPU timestamp writes per frame in written ticks / wall / busy time, the age of 229 word 10, GET_GPU_TIME calls, SEM_EXECUTE releases asking for a timestamp, rejected native compute dispatches per program, render target and viewport sizes) and "nx2 mode diag addresses" (the report addresses written most); at each of the first 48 mode word changes the 16 frames and the timestamp writes before it and the writes of the 6 frames after it; busy time needs `EDEN_NX2_PRESENT_DIAG=1`; src/video_core/nx2_mode_diag.h),
 `EDEN_NX2_MODE_GOV=1` (multicore, off by default, needs `EDEN_NX2_PRESENT_INTERVAL_WORD`: the GPU timer is the busy time scaled at each present so that the game reads 10 ms a frame in the mode Eden's own frame time asks for (60 at <= 17 ms of work without the pacing, 30 above 19.5, 20 above 36, 30 again below 31), 36 ms to make it go faster, one 70 ms frame then 34 ms to make it go slower from 60 and the 70 ms frame alone from 30 (34 there sends it back to 60) (pushes of at most 30 / 150 frames, from 30 down 30, then 90 of rest; a push starts over when the game changes its mode), below the ~22 ms at which Bananza drops its resolution; it takes the busy time itself, so `EDEN_NX2_GPU_BUSY_CLOCK` and `EDEN_NX2_GPU_TICK_DIV` don't apply; 30 fps everywhere: `_TO60=1 _FROM60=2`; `EDEN_NX2_MODE_GOV_HOLD`, `_UP`, `_DOWN`, `_SPIKE`, `_TO60`, `_FROM60`, `_TO30`, `_FROM30` (ms), `_UP_FRAMES`, `_DOWN_FRAMES`, `_COOLDOWN` override them; "nx2 mode gov:" lines at each wanted or game mode change; src/video_core/nx2_mode_gov.h, src/tests/video_core/nx2_mode_gov.cpp. Not built or measured yet),
 `EDEN_NX2_UPSCALE_SCAN=0` (default on, only for a compute program rejected at a matrix multiply whose constant bank 0 holds its input and output sizes: Bananza's tensor-core upscalers; the input image is blitted bilinear to its outputs instead (row 151); 0 leaves them unwritten as before), `EDEN_NX2_UPSCALE_IN` / `EDEN_NX2_UPSCALE_OUT=<bank>:<hex offset>` (take only that bank word as the input / output handle), `EDEN_NX2_UPSCALE_DIAG=1` (off by default: the rejected program's banks and the images they name, the pool's images of its sizes, the next 24 draws; lines "Tensor upscale diag", with the stand-in's "Tensor upscale stand-in" lines; src/video_core/engines/nx2_upscale_pick.h, src/tests/video_core/nx2_upscale_pick.cpp),
+`EDEN_NX2_IPC_TRACE=<filter>` (off by default; `1` keeps the per-command log above: the first time a matching service, command and request data words are seen, the requesting guest thread and up to 32 backtrace frames, each as module +offset, raw symbol +offset and demangled name; at most 400 requests, then "nx2 ipc trace limit reached" once; src/core/hle/service/nx2_ipc_trace.h),
+`EDEN_NX2_VI2_REPLY_FILE=<path>` / `EDEN_NX2_VI2_REPLY=<command>:<words>;...` (off by default: nx2:vi2 replies from a table, success plus the listed words; the file is re-read while the game runs; src/core/hle/service/nx2_vi2_reply.h, below),
 `EDEN_NX2_HSETP2_REG=0` (default on: Ampere HSETP2 with a register B is lowered (row 150); 0 rejects it as before),
 `EDEN_NX2_LIGHT_STORAGE=0/2` (default 1: a light draw with uniforms whose storage buffer descriptors in constant buffers changed binds those buffers again as the full setup does instead of being set up in full; 0 refuses as before; 2 sets those draws up in full after all and compares, like `EDEN_NX2_LIGHT_UNIFORM=2`; profile line "storage descriptors changed in N draws ..."; NX2_GPU_THREAD_SPLIT.md),
 `EDEN_NX2_MARK_WORDS=0/2` (default 1: the GPU-written page bits are set 64 at a time; 0 page by page; 2 also works each word out page by page, sets that, and logs the first 16 words whose masks differ plus "GPU-written page bits (EDEN_NX2_MARK_WORDS=2): N words checked, M differed" at powers of two; src/video_core/nx2.h),
@@ -246,6 +250,48 @@ faulting stack as module+offset, then a minidump), `EDEN_NX2_AUTO_STUB`, `EDEN_N
 (pushbuffer entries changed between submit and execution), `EDEN_NX2_QUERY_TRACE` (every GPU
 report/semaphore write). `C:\dev\crashrun.sh` runs eden-cli under cdb and prints the crash stack;
 `C:\dev\stackdump.sh <main> <seconds>` dumps host thread stacks of a running test.
+
+### Live vi2 reply experiments (IPC trace + reply table)
+
+Bananza sends nx2:vi2 104, 105 and 107 every frame and 261, 265, 267, 271 (each after a 31
+GetVsyncEvent with the same index) and 351 once at setup, all with the display name "default".
+104/105 got an empty success, the rest the auto stub's. On the console the game runs 40-60 fps in
+handheld VRR without slowing down, so these are likely its VRR / HDR display queries
+(`nn::vi::QueryDisplayVrrSupported`, `SetDisplayVrrCapability`, `SetLayerExtendedSwapInterval`,
+`QueryDisplayHdrStatus`... are imported).
+
+1. Which SDK function sends a command: `EDEN_NX2_IPC_TRACE=nx2:vi2:104,105,107,261,265,267,271,351`.
+   The log gets, once per new request,
+   `nx2 ipc trace N/400: nx2:vi2 104 [tipc] "<handler>", 2 data words: 0x61666564 0x746c7561; thread 0x.. "<name>"`
+   and frame lines `  #i <module> +0x<offset> <raw symbol>+0x<into> = <demangled>`. Frames 0-1 are
+   the SVC stub and the IPC layer; the first `nn::vi::...` frame names the call, its mangled name
+   the parameter types (and so the reply's shape). The sender waits in the kernel while a service
+   thread handles the request; the trace reads the registers the scheduler saved when it switched
+   the sender out (it waits up to 20 ms for that; "registers may be stale" if it never happened).
+2. Answer it: `EDEN_NX2_VI2_REPLY_FILE=<path>`, one command a line, words decimal or 0x hex, `#`
+   comments, an empty list a success without data words:
+
+       # VRR experiment
+       104: 1
+       105:
+       107: 0x3c
+
+   (inline: `EDEN_NX2_VI2_REPLY=104:1;105:;107:0x3c`). The table covers 104, 105, 107, 261, 265,
+   267, 271, 351 and any other command without a handler of its own that is in the table when the
+   vi2 session opens; commands with handlers (1, 3, 31, 229...) are never replaced ("has a handler
+   of its own, not replaced"). A command not in the table keeps its old reply (an empty success).
+   The setup commands (261-351) are sent once, when the session opens: put them in the file
+   before starting the game; changing them later does nothing until the next boot. The per-frame
+   ones (104, 105, 107) can be edited while the game runs: the file is checked at most once a
+   second (on those calls) and re-read when its time or size changes.
+   Log: `nx2:vi2 reply table v3: 104=[0x1] 105=[] 107=[0x3c]` on each new table,
+   `nx2:vi2 reply v3: 104 -> [0x1]` on each command's first call and its first call after a change
+   (`-> empty success (not in the table)` for one without a reply), `nx2:vi2 reply table: <why>;
+   keeping v2` when the file can't be read or parsed (the previous table stays), and with
+   `EDEN_NX2_PRESENT_DIAG=1` ", reply v3" at the end of the per-second line.
+   A reply of the wrong length can break the game: the SDK copies as many words as the command's
+   reply has and reads the rest from stale memory, or rejects the reply (an abort). Start from
+   the size the trace's mangled name implies.
 
 ## Where it stops now
 
