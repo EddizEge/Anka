@@ -195,11 +195,22 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
 
 using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
 using ConfigureUniformsFuncPtr = bool (*)(GraphicsPipeline*, bool, bool);
+using VideoCommon::Nx2Stages::StageDrawReader;
+using VideoCommon::Nx2Stages::StageDrawWriter;
 
 struct ConfigureFuncs {
     ConfigureFuncPtr configure;
     ConfigureUniformsFuncPtr uniforms; ///< GraphicsPipeline::ConfigureUniforms
+    GraphicsPipeline::SplitFuncs split; ///< Cut c (GraphicsPipeline::ConfigureBuffers)
 };
+
+/// Whether a stage has texture or image buffers: with cut c each draw of such a pipeline joins
+/// (their binds read C's image views; GraphicsPipeline::ConfigureBuffers).
+bool HasTexelBuffers(const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
+    return std::ranges::any_of(stage_infos, [](const Shader::Info& info) {
+        return !info.texture_buffer_descriptors.empty() || !info.image_buffer_descriptors.empty();
+    });
+}
 
 template <typename Spec, typename... Specs>
 ConfigureFuncs FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
@@ -210,7 +221,8 @@ ConfigureFuncs FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
         }
     }
     return {GraphicsPipeline::MakeConfigureSpecFunc<Spec>(),
-            GraphicsPipeline::MakeConfigureUniformsSpecFunc<Spec>()};
+            GraphicsPipeline::MakeConfigureUniformsSpecFunc<Spec>(),
+            GraphicsPipeline::MakeSplitFuncs<Spec>(HasTexelBuffers(stage_infos))};
 }
 
 struct SimpleVertexFragmentSpec {
@@ -449,6 +461,7 @@ GraphicsPipeline::GraphicsPipeline(
     const ConfigureFuncs funcs = ConfigureFunc(*spv_modules, stage_infos);
     configure_func = funcs.configure;
     configure_uniforms_func = funcs.uniforms;
+    split_funcs = funcs.split;
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -854,6 +867,536 @@ bool GraphicsPipeline::ConfigureUniformsImpl(bool is_indexed, bool rebind_storag
     // An upload needs ConfigureImpl's barrier, which ends the render pass.
     if (buffer_cache.any_buffer_uploaded || !scheduler.IsRenderPassActive()) {
         return false;
+    }
+    return RecordDescriptors();
+}
+
+// Cut c (Kesim-2): Configure's halves, B's buffer half and C's texture half (vk_graphics_pipeline.h,
+// ConfigureBuffers). Each follows ConfigureImpl / ConfigureUniformsImpl step by step; what it
+// leaves out is the other half's. Run only with the stages on (T7).
+
+static_assert(sizeof(DescriptorUpdateEntry) ==
+                  VideoCommon::Nx2Stages::DrawEntryWords * sizeof(u64) &&
+              alignof(DescriptorUpdateEntry) <= alignof(u64));
+
+template <typename Spec>
+GraphicsPipeline::SplitFuncs GraphicsPipeline::MakeSplitFuncs(bool texel_buffers) {
+    return {
+        .buffers = [](GraphicsPipeline* pl, bool is_indexed, StageDrawWriter& out) {
+            return pl->ConfigureBuffersImpl<Spec>(is_indexed, out);
+        },
+        .textures = [](GraphicsPipeline* pl, const StageDrawReader& in,
+                       Tegra::Engines::Maxwell3D& maxwell3d_c) {
+            return pl->ConfigureTexturesImpl<Spec>(in, maxwell3d_c);
+        },
+        .uniform_buffers = [](GraphicsPipeline* pl, bool is_indexed, bool rebind_storage,
+                              StageDrawWriter& out) {
+            return pl->ConfigureUniformsBuffersImpl<Spec>(is_indexed, rebind_storage, out);
+        },
+        .record_uniforms = [](GraphicsPipeline* pl, const StageDrawReader& in) {
+            return pl->RecordUniformsFromImpl<Spec>(in);
+        },
+        .texel_buffers = texel_buffers,
+    };
+}
+
+bool GraphicsPipeline::SplitJoins() const {
+    return split_funcs.texel_buffers || maxwell3d->regs.transform_feedback_enabled != 0;
+}
+
+GraphicsPipeline::BufferHalf GraphicsPipeline::ConfigureBuffers(bool is_indexed,
+                                                                StageDrawWriter& out) {
+    return split_funcs.buffers(this, is_indexed, out);
+}
+
+bool GraphicsPipeline::ConfigureTextures(const StageDrawReader& in,
+                                         Tegra::Engines::Maxwell3D& maxwell3d_c) {
+    return split_funcs.textures(this, in, maxwell3d_c);
+}
+
+bool GraphicsPipeline::ConfigureUniformsBuffers(bool is_indexed, bool rebind_storage,
+                                                StageDrawWriter& out) {
+    return split_funcs.uniform_buffers(this, is_indexed, rebind_storage, out);
+}
+
+bool GraphicsPipeline::RecordUniformsFrom(const StageDrawReader& in) {
+    return split_funcs.record_uniforms(this, in);
+}
+
+template <typename Spec>
+GraphicsPipeline::BufferHalf GraphicsPipeline::ConfigureBuffersImpl(bool is_indexed,
+                                                                    StageDrawWriter& out) {
+    // ConfigureImpl without the texture cache: the handles are read here (B owns memory) and go
+    // to C as values (config_stage's order); the texture and image buffer binds read C's image
+    // views, so their pipelines join, as transform feedback draws do (v1).
+    if (SplitJoins()) {
+        return BufferHalf::Join;
+    }
+    namespace Profile = VideoCommon::Nx2Profile;
+    // B's buffer entries in this pipeline's descriptor form, as Acquire sets the guest queue's.
+    UpdateDescriptorQueue& scratch = buffer_cache.runtime.DescriptorScratch();
+    scratch.Restart(uses_descriptor_buffer);
+    out.ClearSetup();
+
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+
+    const auto& regs{maxwell3d->regs};
+    const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+    // EDEN_NX2_LIGHT_UNIFORM: kept as ConfigureImpl keeps them (B's light decision reads them).
+    const bool capture = LightUniformMode() != 0;
+    u32* value_it = descriptor_values.data();
+    u32* const value_end = value_it + descriptor_values.size();
+    bool values_fit = true;
+    const auto capture_value{[&](u32 value) LAMBDA_FORCEINLINE {
+        if (value_it != value_end) {
+            *value_it++ = value;
+        } else {
+            values_fit = false;
+        }
+    }};
+    if (capture) {
+        used_tics.clear();
+        used_tscs.clear();
+    }
+    const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        const Shader::Info& info{stage_infos[stage]};
+        buffer_cache.UnbindGraphicsStorageBuffers(stage);
+        const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
+        if constexpr (Spec::has_storage_buffers) {
+            size_t ssbo_index{};
+            for (const auto& desc : info.storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
+                if (capture) {
+                    // What BufferCache::StorageBufferBinding reads: address, then size.
+                    const GPUVAddr ssbo_addr{cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                    for (u32 word = 0; word < 4; ++word) {
+                        capture_value(gpu_memory->Read<u32>(ssbo_addr + word * 4));
+                    }
+                }
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
+            }
+        }
+        const auto read_handle{[&](const auto& desc, u32 index) {
+            ASSERT(cbufs[desc.cbuf_index].enabled);
+            const u32 index_offset{index << desc.size_shift};
+            const u32 offset{desc.cbuf_offset + index_offset};
+            const GPUVAddr addr{cbufs[desc.cbuf_index].address + offset};
+            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
+                          std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
+                if (desc.has_secondary) {
+                    ASSERT(cbufs[desc.secondary_cbuf_index].enabled);
+                    const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
+                    const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
+                                                 second_offset};
+                    const u32 lhs_word{gpu_memory->Read<u32>(addr)};
+                    const u32 rhs_word{gpu_memory->Read<u32>(separate_addr)};
+                    if (capture) {
+                        capture_value(lhs_word);
+                        capture_value(rhs_word);
+                    }
+                    const u32 lhs_raw{lhs_word << desc.shift_left};
+                    const u32 rhs_raw{rhs_word << desc.secondary_shift_left};
+                    const u32 raw{lhs_raw | rhs_raw};
+                    return TexturePair(raw, via_header_index);
+                }
+            }
+            const u32 word{gpu_memory->Read<u32>(addr)};
+            if (capture) {
+                capture_value(word);
+            }
+            return TexturePair(word, via_header_index);
+        }};
+        // The views' pool indices in their order, a texture's sampler index after its own.
+        const auto add_image{[&](const auto& desc) LAMBDA_FORCEINLINE {
+            for (u32 index = 0; index < desc.count; ++index) {
+                const auto handle{read_handle(desc, index)};
+                out.AddHandle(handle.first);
+                if (capture) {
+                    used_tics.push_back(handle.first);
+                }
+            }
+        }};
+        if constexpr (Spec::has_texture_buffers) {
+            for (const auto& desc : info.texture_buffer_descriptors) {
+                add_image(desc);
+            }
+        }
+        if constexpr (Spec::has_image_buffers) {
+            for (const auto& desc : info.image_buffer_descriptors) {
+                add_image(desc);
+            }
+        }
+        for (const auto& desc : info.texture_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index) {
+                const auto handle{read_handle(desc, index)};
+                out.AddHandle(handle.first);
+                out.AddHandle(handle.second);
+                if (capture) {
+                    used_tics.push_back(handle.first);
+                    used_tscs.push_back(handle.second);
+                }
+            }
+        }
+        if constexpr (Spec::has_images) {
+            for (const auto& desc : info.image_descriptors) {
+                add_image(desc);
+            }
+        }
+        // ConfigureImpl's bind_stage_info: with no texture or image buffer here (they join),
+        // only the unbind.
+        buffer_cache.UnbindGraphicsTextureBuffers(stage);
+    }};
+    {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        if constexpr (Spec::enabled_stages[0]) {
+            config_stage(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            config_stage(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            config_stage(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            config_stage(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            config_stage(4);
+        }
+    }
+    ASSERT(out.Handles().size() == num_image_elements + num_textures);
+    descriptor_values_valid = capture && values_fit && value_it == value_end;
+
+    {
+        Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        buffer_cache.UpdateGraphicsBuffers(is_indexed);
+        buffer_cache.BindHostGeometryBuffers(is_indexed);
+    }
+    // Each stage's buffer entries, for C to put before the stage's images.
+    const auto bind_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        const DescriptorUpdateEntry* const first = scratch.Cursor();
+        buffer_cache.BindHostStageBuffers(stage);
+        out.AddStageEntries(static_cast<u32>(stage), first,
+                            static_cast<u32>(scratch.Cursor() - first));
+    }};
+    {
+        Profile::Scope scope{Profile::Zone::BindStageBuffers};
+        if constexpr (Spec::enabled_stages[0]) {
+            bind_stage(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            bind_stage(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            bind_stage(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            bind_stage(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            bind_stage(4);
+        }
+    }
+    VideoCommon::Nx2Stages::DrawToC& head = out.Head();
+    head.any_upload = buffer_cache.any_buffer_uploaded;
+    if (buffer_cache.any_buffer_uploaded) {
+        // Into B's record list, with its outside render pass mark: C replays it before its own
+        // texture uploads (tasarim §3.5: the order changes, not what it means).
+        buffer_cache.runtime.PostCopyBarrier();
+        buffer_cache.any_buffer_uploaded = false;
+    }
+    head.kind = VideoCommon::Nx2Stages::DrawKind::Full;
+    head.pipeline = this;
+    head.is_indexed = is_indexed;
+    return BufferHalf::Ready;
+}
+
+template <typename Spec>
+bool GraphicsPipeline::ConfigureTexturesImpl(const StageDrawReader& in,
+                                             Tegra::Engines::Maxwell3D& maxwell3d_c) {
+    // ConfigureImpl without the buffer cache: B read the handles (in.Handles()) and made the
+    // buffer entries (in.StageEntries); C's replica gives the registers.
+    ASSERT(in.Head().pipeline == this);
+    boost::container::small_vector<VideoCommon::ImageViewInOut, 64> views;
+    boost::container::small_vector<VideoCommon::SamplerId, 64> samplers;
+    views.reserve(num_image_elements);
+    samplers.reserve(num_textures);
+
+    namespace Profile = VideoCommon::Nx2Profile;
+    {
+        Profile::Scope scope{Profile::Zone::SyncDescriptors};
+        texture_cache.SynchronizeDescriptors(false);
+    }
+
+    const std::span<const u32> handles = in.Handles();
+    ASSERT(handles.size() == num_image_elements + num_textures);
+    const u32* handle_it = handles.data();
+    // config_stage's views and samplers, from B's values in its order.
+    const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        const Shader::Info& info{stage_infos[stage]};
+        const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
+            for (u32 index = 0; index < desc.count; ++index) {
+                views.push_back({
+                    .index = *handle_it++,
+                    .blacklist = blacklist,
+                    .id = {}
+                });
+            }
+        }};
+        if constexpr (Spec::has_texture_buffers) {
+            for (const auto& desc : info.texture_buffer_descriptors) {
+                add_image(desc, false);
+            }
+        }
+        if constexpr (Spec::has_image_buffers) {
+            for (const auto& desc : info.image_buffer_descriptors) {
+                add_image(desc, false);
+            }
+        }
+        for (const auto& desc : info.texture_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index) {
+                views.push_back({*handle_it++});
+                VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(*handle_it++, false)};
+                samplers.push_back(sampler);
+            }
+        }
+        if constexpr (Spec::has_images) {
+            for (const auto& desc : info.image_descriptors) {
+                add_image(desc, desc.is_written);
+            }
+        }
+    }};
+    {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        if constexpr (Spec::enabled_stages[0]) {
+            config_stage(0);
+        }
+        if constexpr (Spec::enabled_stages[1]) {
+            config_stage(1);
+        }
+        if constexpr (Spec::enabled_stages[2]) {
+            config_stage(2);
+        }
+        if constexpr (Spec::enabled_stages[3]) {
+            config_stage(3);
+        }
+        if constexpr (Spec::enabled_stages[4]) {
+            config_stage(4);
+        }
+    }
+    ASSERT(views.size() == num_image_elements);
+    ASSERT(samplers.size() == num_textures);
+    // A light draw with uniforms is repaired with them (LastHandles); a repair passes them in.
+    if (LightUniformMode() != 0 && handles.data() != last_handles.data()) {
+        last_handles.assign(handles.begin(), handles.end());
+    }
+    {
+        Profile::Scope scope{Profile::Zone::FillImageViews};
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
+                                     Spec::has_images);
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
+        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    }
+
+    const auto& regs{maxwell3d_c.regs};
+    RescalingPushConstant rescaling;
+    RenderAreaPushConstant render_area;
+    const VideoCommon::SamplerId* samplers_it{samplers.data()};
+    const VideoCommon::ImageViewInOut* views_it{views.data()};
+    const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        // B's buffer entries of the stage, where BindHostStageBuffers puts them.
+        const u32 stage_index = static_cast<u32>(stage);
+        guest_descriptor_queue.AddEntries(
+            reinterpret_cast<const DescriptorUpdateEntry*>(in.StageEntries(stage_index)),
+            in.StageEntryCount(stage_index));
+        {
+            Profile::Scope scope{Profile::Zone::PushDescriptors};
+            PushStageImageDescriptors(stage, rescaling, samplers_it, views_it);
+        }
+        const auto& info{stage_infos[stage]};
+        if (info.uses_render_area) {
+            render_area.uses_render_area = true;
+            // Switch 2 titles may never program the surface clip; use colour target 0 then.
+            const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
+            const bool clip_set = clip_width != 0 && clip_height != 0;
+            render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
+                                 static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+        }
+    }};
+    if constexpr (Spec::enabled_stages[0]) {
+        prepare_stage(0);
+    }
+    if constexpr (Spec::enabled_stages[1]) {
+        prepare_stage(1);
+    }
+    if constexpr (Spec::enabled_stages[2]) {
+        prepare_stage(2);
+    }
+    if constexpr (Spec::enabled_stages[3]) {
+        prepare_stage(3);
+    }
+    if constexpr (Spec::enabled_stages[4]) {
+        prepare_stage(4);
+    }
+    {
+        Profile::Scope scope{Profile::Zone::RenderTargets};
+        texture_cache.UpdateRenderTargets(false);
+        texture_cache.CheckFeedbackLoop(
+            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
+    }
+    if (IsBuilt() && !pipeline) {
+        return false;
+    }
+    // Read after every image was prepared and marked (the render targets above).
+    views_repeat = LightDrawOn() &&
+                   texture_cache.ViewsNeedRepeat(
+                       std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
+    Profile::Scope scope{Profile::Zone::ConfigureDraw};
+    return ConfigureDraw(rescaling, render_area);
+}
+
+template <typename Spec>
+bool GraphicsPipeline::ConfigureUniformsBuffersImpl(bool is_indexed, bool rebind_storage,
+                                                    StageDrawWriter& out) {
+    // ConfigureUniformsImpl's buffer half; its image descriptor memo check is C's
+    // (RecordUniformsFrom), which repairs where it fails.
+    UpdateDescriptorQueue& scratch = buffer_cache.runtime.DescriptorScratch();
+    scratch.Restart(uses_descriptor_buffer);
+    out.ClearSetup();
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    if constexpr (Spec::has_storage_buffers) {
+        if (rebind_storage) {
+            const auto bind_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+                buffer_cache.UnbindGraphicsStorageBuffers(stage);
+                const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
+                u32* value_it = descriptor_values.data() + storage_word_begin[stage];
+                size_t ssbo_index{};
+                for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                    const GPUVAddr ssbo_addr{cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                    for (u32 word = 0; word < 4; ++word) {
+                        *value_it++ = gpu_memory->Read<u32>(ssbo_addr + word * 4);
+                    }
+                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                           desc.cbuf_offset, desc.is_written);
+                    ++ssbo_index;
+                }
+            }};
+            if constexpr (Spec::enabled_stages[0]) {
+                bind_stage(0);
+            }
+            if constexpr (Spec::enabled_stages[1]) {
+                bind_stage(1);
+            }
+            if constexpr (Spec::enabled_stages[2]) {
+                bind_stage(2);
+            }
+            if constexpr (Spec::enabled_stages[3]) {
+                bind_stage(3);
+            }
+            if constexpr (Spec::enabled_stages[4]) {
+                bind_stage(4);
+            }
+        }
+    }
+    buffer_cache.UpdateGraphicsBuffers(is_indexed);
+    buffer_cache.BindHostGeometryBuffers(is_indexed);
+    const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        const DescriptorUpdateEntry* const first = scratch.Cursor();
+        buffer_cache.BindHostStageBuffers(stage);
+        out.AddStageEntries(static_cast<u32>(stage), first,
+                            static_cast<u32>(scratch.Cursor() - first));
+    }};
+    if constexpr (Spec::enabled_stages[0]) {
+        prepare_stage(0);
+    }
+    if constexpr (Spec::enabled_stages[1]) {
+        prepare_stage(1);
+    }
+    if constexpr (Spec::enabled_stages[2]) {
+        prepare_stage(2);
+    }
+    if constexpr (Spec::enabled_stages[3]) {
+        prepare_stage(3);
+    }
+    if constexpr (Spec::enabled_stages[4]) {
+        prepare_stage(4);
+    }
+    // An upload needs ConfigureImpl's barrier: the full setup follows (ConfigureBuffers).
+    if (buffer_cache.any_buffer_uploaded) {
+        return false;
+    }
+    VideoCommon::Nx2Stages::DrawToC& head = out.Head();
+    head.kind = VideoCommon::Nx2Stages::DrawKind::LightUniform;
+    head.pipeline = this;
+    head.is_indexed = is_indexed;
+    return true;
+}
+
+template <typename Spec>
+bool GraphicsPipeline::RecordUniformsFromImpl(const StageDrawReader& in) {
+    // ConfigureUniformsImpl's texture half: its checks that are C's first (the memos, the
+    // render pass after B's list was replayed), so a failure records nothing.
+    ASSERT(in.Head().pipeline == this);
+    const u64 texture_epoch = texture_cache.ImageViewEpoch();
+    const u64 sampler_generation = Sampler::VariantGeneration();
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const Shader::Info& info{stage_infos[stage]};
+        if (!Spec::enabled_stages[stage] || Shader::NumDescriptors(info.texture_descriptors) +
+                                                    Shader::NumDescriptors(info.image_descriptors) ==
+                                                0) {
+            continue;
+        }
+        const ImageDescriptorMemo& memo{image_descriptor_memos[stage]};
+        if (!DescriptorReuseEnabled() || !memo.valid || memo.texture_epoch != texture_epoch ||
+            memo.sampler_generation != sampler_generation) {
+            return false;
+        }
+    }
+    if (!scheduler.IsRenderPassActive()) {
+        return false;
+    }
+    guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
+        const u32 stage_index = static_cast<u32>(stage);
+        guest_descriptor_queue.AddEntries(
+            reinterpret_cast<const DescriptorUpdateEntry*>(in.StageEntries(stage_index)),
+            in.StageEntryCount(stage_index));
+        const Shader::Info& info{stage_infos[stage]};
+        const u32 stage_textures = Shader::NumDescriptors(info.texture_descriptors);
+        if (stage_textures + Shader::NumDescriptors(info.image_descriptors) == 0) {
+            return;
+        }
+        const ImageDescriptorMemo& memo{image_descriptor_memos[stage]};
+        guest_descriptor_queue.AddEntries(memo.entries.data(), memo.entries.size());
+        // Written storage images are marked modified, as PushStageImageDescriptors does.
+        const u32* image_id = memo.ids.data() + stage_textures;
+        for (const auto& desc : info.image_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index, ++image_id) {
+                if (desc.is_written) {
+                    texture_cache.MarkModification(
+                        texture_cache.GetImageView(VideoCommon::ImageViewId{*image_id}).image_id);
+                }
+            }
+        }
+    }};
+    if constexpr (Spec::enabled_stages[0]) {
+        prepare_stage(0);
+    }
+    if constexpr (Spec::enabled_stages[1]) {
+        prepare_stage(1);
+    }
+    if constexpr (Spec::enabled_stages[2]) {
+        prepare_stage(2);
+    }
+    if constexpr (Spec::enabled_stages[3]) {
+        prepare_stage(3);
+    }
+    if constexpr (Spec::enabled_stages[4]) {
+        prepare_stage(4);
     }
     return RecordDescriptors();
 }
