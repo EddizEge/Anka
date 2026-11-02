@@ -150,7 +150,10 @@ void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,
 /// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7). K2: C holds
 /// it while its ParkB or boundary work is pending (StageTickWork's requests run after it in the
-/// stream), until their op ran.
+/// stream), until their op ran. So the guest writes C makes for work before a mark (the queries
+/// and semaphore releases B sends it) are made when the front's Drain ends: the puller's
+/// PendingSemaphoreRelease and reads after a Drain see them (a DMA read waits for the releases
+/// before it, PLAN §7/19). No stage defers a guest write of work before a mark past it.
 void PostMark(Ring ring, u64 ring1_position);
 
 /// Why A joins (counted: Counter::JoinsAEngine + reason).
@@ -227,6 +230,9 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 // - An `op` waits on no ring and no stage. The joiner writes no record inside its `op` (K4 for A;
 //   B inside a JoinFromB / JoinFromBLocked `op` is the record owner, RecordOwner() == Stage::B:
 //   it runs C's half of its work itself instead of sending it).
+// - Events: the proxy sends each to B, whose rasterizer runs it or its B half there and sends C
+//   the rest; B notes the engine work at its own point (NoteLightWork: B's light draws, S12)
+//   also for an event it sends on to C.
 // - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
 //   inside a record at =1; a JoinFromB / JoinFromBLocked still waiting after 50 ms, reported
 //   while it waits (then every second), with B's stack, as a K3 deadlock suspect.
