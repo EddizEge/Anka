@@ -13,6 +13,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_stage_api.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 
 #define OFF(field_name) MAXWELL3D_REG_INDEX(field_name)
@@ -258,7 +259,10 @@ void StateTracker::SetupTables(Tegra::Control::ChannelState& channel_state) {
 }
 
 void StateTracker::ChangeChannel(Tegra::Control::ChannelState& channel_state) {
-    flags = &channel_state.payload->maxwell_3d.dirty.flags;
+    // Back stages: the flags of the Maxwell3D the rasterizer records with (a replica while
+    // staged, nx2_stage_api.h).
+    flags = &VideoCommon::Nx2Stages::EngineFor(channel_state, VideoCommon::Nx2Stages::Role::Record)
+                 .dirty.flags;
 }
 
 void StateTracker::InvalidateState() {
