@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -155,19 +156,39 @@ GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
-/// GpuSplit::CheckOwner).
+/// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
+/// alone): where, the thread's name and the first frames.
 void ReportStack(const char* check, const char* where) {
 #ifdef _WIN32
+    constexpr u32 MaxReports = 20;
+    constexpr USHORT LogFrames = 6;
     static std::atomic<u32> reports{};
-    if (reports.fetch_add(1, std::memory_order_relaxed) >= 12) {
+    const u32 report = reports.fetch_add(1, std::memory_order_relaxed);
+    if (report >= MaxReports) {
         return;
     }
     const u8 stage = Detail::t_stage;
-    std::fprintf(stderr, "GPU %s: %s on thread %lu (%s%s), the record owner is %s\n", check, where,
-                 GetCurrentThreadId(),
-                 stage < 3 ? Nx2Profile::stage_report_names[stage] : "no stage",
-                 Detail::t_in_join ? ", in a join" : "",
-                 Nx2Profile::stage_report_names[g_owner.load(std::memory_order_relaxed)]);
+    const char* const stage_name =
+        stage < 3 ? Nx2Profile::stage_report_names[stage] : "no stage";
+    const char* const owner_name =
+        Nx2Profile::stage_report_names[g_owner.load(std::memory_order_relaxed)];
+    char thread_name[64] = "?";
+    using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static const auto get_description = reinterpret_cast<GetThreadDescriptionFn>(
+        GetProcAddress(GetModuleHandleA("KernelBase.dll"), "GetThreadDescription"));
+    if (PWSTR description{}; get_description != nullptr &&
+                             SUCCEEDED(get_description(GetCurrentThread(), &description))) {
+        if (description[0] != L'\0') {
+            WideCharToMultiByte(CP_UTF8, 0, description, -1, thread_name, sizeof(thread_name),
+                                nullptr, nullptr);
+            thread_name[sizeof(thread_name) - 1] = '\0';
+        }
+        LocalFree(description);
+    }
+    std::fprintf(stderr, "GPU %s: %s on thread %lu %s (%s%s), the record owner is %s\n", check,
+                 where, GetCurrentThreadId(), thread_name, stage_name,
+                 Detail::t_in_join ? ", in a join" : "", owner_name);
+    std::string log_frames;
     void* frames[40];
     const USHORT count = RtlCaptureStackBackTrace(1, 40, frames, nullptr);
     for (USHORT i = 0; i < count; ++i) {
@@ -179,11 +200,18 @@ void ReportStack(const char* check, const char* where) {
             GetModuleFileNameA(module, name, sizeof(name));
         }
         const char* base_name = std::strrchr(name, '\\');
-        std::fprintf(stderr, "  frame %s+%#llx\n", base_name ? base_name + 1 : name,
-                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) -
-                                                     reinterpret_cast<uintptr_t>(module)));
+        const auto offset = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) -
+                                                            reinterpret_cast<uintptr_t>(module));
+        std::fprintf(stderr, "  frame %s+%#llx\n", base_name ? base_name + 1 : name, offset);
+        if (i < LogFrames) {
+            log_frames += fmt::format("{}{}+{:#x}", i == 0 ? "" : " < ",
+                                      base_name ? base_name + 1 : name, offset);
+        }
     }
     std::fflush(stderr);
+    LOG_WARNING(HW_GPU, "GPU {} ({}/{}): {} on thread {} '{}' ({}{}), the record owner is {}; {}",
+                check, report + 1, MaxReports, where, GetCurrentThreadId(), thread_name,
+                stage_name, Detail::t_in_join ? ", in a join" : "", owner_name, log_frames);
 #else
     LOG_ERROR(HW_GPU, "GPU {}: {}", check, where);
 #endif
