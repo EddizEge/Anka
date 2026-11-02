@@ -402,17 +402,19 @@ public:
 
     /// Cut c, B inside a packet: work only the recording stage may do (a Wait or Finish on work
     /// C has not submitted, a multi-range bind or retirement: vk_multi_range_buffer uses the
-    /// scheduler). The integration (T9) binds it to JoinFromB: `records` (B's list so far, may
-    /// be null) is replayed by C first, then `op` runs on this thread with C parked; the runtime
-    /// records straight to the scheduler inside `op` and goes on with a new list of the same seq
-    /// after. K3, option (a) (R2): it runs inside buffer cache operations, whose callers hold
-    /// BufferCache::mutex, and the runtime keeps it held through the hook: the operation stays
-    /// atomic for the CPU write traps and the fencing thread, which wait for it as they wait for
-    /// a Finish with the stages off. So the binding's join writes no ring 3 record and serves no
-    /// ParkB while B waits (JoinFromBLocked, T9), and C takes the buffer cache mutex only inside
-    /// ParkB work and the join's op; any other C path taking it is a deadlock (STAGE_CHECK, T9).
-    /// The per-packet joins (Finish from the garbage collector's downloads, Wait with accurate
-    /// fences, multi-range) should go to ~0 (§7/14) to keep the wait short.
+    /// scheduler). The integration binds it to Nx2Stages::JoinFromBLocked (T7, with T9a's K3 (a)
+    /// contract, nx2_stages.h): B publishes ring 3, writes no record there and serves no ParkB
+    /// while it waits; C runs everything B published before and parks; then this thread, B, runs
+    /// both halves as the record owner: replays `records` (B's list so far, may be null) and runs
+    /// `op`, which records straight to the scheduler; the runtime goes on with a new list of the
+    /// same seq after. The hook runs inside buffer cache operations, whose callers hold
+    /// BufferCache::mutex, and B keeps holding it through all of it (taking it again in `op` is
+    /// the same thread's, the mutex recursive): the operation stays atomic for the CPU write traps
+    /// and the fencing thread, which wait for it as they wait for a Finish with the stages off. C
+    /// takes the buffer cache mutex only inside a ParkB `op`, never in a record it runs; any other
+    /// C path taking it hangs this join (STAGE_CHECK: CheckBufferLock). The per-packet joins
+    /// (Finish from the garbage collector's downloads, Wait with accurate fences, multi-range)
+    /// should go to ~0 (§7/14) to keep the CPU threads' wait short.
     using RecordOwnerHook = void (*)(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     void SetRecordOwnerHook(RecordOwnerHook hook, void* context) noexcept {
