@@ -519,8 +519,9 @@ public:
         alignas(64) std::atomic<u32> ack{};
         alignas(64) std::atomic<u32> release{};
 
-        // Producer side.
-        u16 seq{};
+        // Producer side, written for each record: a line of its own, as the consumer's (R1
+        // sifir-3).
+        alignas(64) u16 seq{};
         u32 joins{};
         RecordKind last_kind{RecordKind::Wrap};
         u64 last_start{};
@@ -529,7 +530,7 @@ public:
         u64 cb_end{};
 
         // Consumer side.
-        u16 seen_seq{};
+        alignas(64) u16 seen_seq{};
         u32 joins_seen{};
     };
     using LinkB = Link<BWords>;
@@ -1121,31 +1122,38 @@ private:
         Loop<false>(*to_c, c, stop_c);
     }
 
+    // What A reads for each record (BeginB, EndB): one line, written by Start and Stop, and by
+    // A alone at its joins (a_in_join); apart from what B and C write for each record (R1
+    // sifir-3).
     Handler& handler;
     StageOptions options;
     bool running{};
-    std::unique_ptr<LinkB> to_b;
-    std::unique_ptr<LinkC> to_c;
-    Consumer b;
-    Consumer c;
-    /// B: the deltas it ran that C has not got yet (cut c).
-    std::vector<u64> passed;
     /// A: inside JoinABegin / JoinAEnd.
     bool a_in_join{};
+    std::unique_ptr<LinkB> to_b;
+    std::unique_ptr<LinkC> to_c;
+
+    // B's own.
+    alignas(64) Consumer b;
+    /// B: the deltas it ran that C has not got yet (cut c).
+    std::vector<u64> passed;
+    u32 park_served{}; ///< B: the last ParkB request it served
+    u32 join_count{};  ///< B: JoinFromB requests made
+
+    // C's own.
+    alignas(64) Consumer c;
+    u32 park_count{};  ///< C: ParkB requests made
+    u32 join_served{}; ///< C: the last JoinFromB request it served
 
     // ParkB: C asks (park_request), B acks once parked, C releases.
     alignas(64) std::atomic<u32> park_request{};
     alignas(64) std::atomic<u32> park_ack{};
     alignas(64) std::atomic<u32> park_release{};
-    u32 park_served{}; ///< B: the last request it served
-    u32 park_count{};  ///< C: requests made
     // JoinFromB: B asks (join_request, for ring 3 up to join_target), C acks parked, B releases.
     alignas(64) std::atomic<u32> join_request{};
     std::atomic<u64> join_target{};
     alignas(64) std::atomic<u32> join_ack{};
     alignas(64) std::atomic<u32> join_release{};
-    u32 join_served{}; ///< C: the last request it served
-    u32 join_count{};  ///< B: requests made
     /// Where B sleeps waiting for C's ack of a join it passes on, and C in ParkB (AwaitServing).
     alignas(64) std::atomic<u32> b_wake{};
     alignas(64) std::atomic<u32> c_wake{};
