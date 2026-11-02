@@ -191,6 +191,39 @@ std::vector<Action> Schedule(const Script& script) {
     return actions;
 }
 
+ExitSpec ParseExit(std::string_view text) {
+    ExitSpec spec;
+    const auto words = Split(text);
+    if (words.empty()) {
+        return spec;
+    }
+    if (words.size() != 1) {
+        spec.error = "expected '<seconds>[@boot|@present]'";
+        return spec;
+    }
+    std::string_view seconds = words[0];
+    if (const size_t at = seconds.find('@'); at != std::string_view::npos) {
+        const std::string_view anchor = seconds.substr(at + 1);
+        if (SameText(anchor, "boot")) {
+            spec.anchor = Anchor::Boot;
+        } else if (SameText(anchor, "present")) {
+            spec.anchor = Anchor::Present;
+        } else {
+            spec.error = "unknown anchor after '@' (boot or present)";
+            return spec;
+        }
+        seconds = seconds.substr(0, at);
+    }
+    const auto value = Number(seconds);
+    if (!value || *value < 0.0) {
+        spec.error = "the time is not a number of seconds >= 0";
+        return spec;
+    }
+    spec.seconds = *value;
+    spec.enabled = *value > 0.0;
+    return spec;
+}
+
 const char* AnchorName(Anchor anchor) {
     return anchor == Anchor::Boot ? "boot" : "present";
 }

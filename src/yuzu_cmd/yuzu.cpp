@@ -483,6 +483,8 @@ static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem) {
 // EDEN_NX2_AUTO_INPUT_FILE (yuzu_cmd/nx2_auto_script.h): the script presses keys on the virtual
 // gamepad. Its port of a player is always one of that player's inputs, next to the configured
 // ones, so player 1 needs no remapping; it is only connected for this run when it is not.
+// EDEN_NX2_AUTO_EXIT: SDL_AppIterate then returns success, as it does once the window is closed,
+// and SDL_AppQuit shuts the emulation down; a PGO training build writes its counts only then.
 namespace {
 using Nx2AutoScript::Anchor;
 using VirtualButton = InputCommon::VirtualGamepad::VirtualButton;
@@ -496,6 +498,8 @@ static_assert(int(VirtualButton::ButtonA) == 0 && int(VirtualButton::ButtonY) ==
 struct AutoRun {
     bool active = false;
     Nx2AutoScript::Script script;
+    Nx2AutoScript::ExitSpec exit;
+    bool exiting = false;
     std::vector<Nx2AutoScript::Action> actions;
     size_t next = 0;
     bool bound = false;
@@ -506,13 +510,29 @@ struct AutoRun {
 AutoRun g_auto;
 } // Anonymous namespace
 
+static void StartAutoExit() {
+    const char* text = std::getenv("EDEN_NX2_AUTO_EXIT");
+    if (text == nullptr) {
+        return;
+    }
+    g_auto.exit = Nx2AutoScript::ParseExit(text);
+    if (!g_auto.exit.error.empty()) {
+        LOG_ERROR(Frontend, "nx2 auto exit: EDEN_NX2_AUTO_EXIT '{}': {}, no automatic exit", text,
+                  g_auto.exit.error);
+    } else if (g_auto.exit.enabled) {
+        LOG_INFO(Frontend, "nx2 auto exit: closing the window {:.2f} s after {}",
+                 g_auto.exit.seconds, Nx2AutoScript::AnchorName(g_auto.exit.anchor));
+    }
+}
+
 static void StartAutoRun() {
+    g_auto.boot = std::chrono::steady_clock::now();
+    StartAutoExit();
     const char* path = std::getenv("EDEN_NX2_AUTO_INPUT_FILE");
+    g_auto.active = g_auto.exit.enabled || (path != nullptr && *path != '\0');
     if (path == nullptr || *path == '\0') {
         return;
     }
-    g_auto.active = true;
-    g_auto.boot = std::chrono::steady_clock::now();
     std::ifstream file{path};
     if (!file) {
         LOG_ERROR(Frontend, "nx2 auto input: cannot read EDEN_NX2_AUTO_INPUT_FILE '{}'", path);
@@ -583,19 +603,31 @@ static std::optional<double> AutoSeconds(Anchor anchor, std::chrono::steady_cloc
     return std::chrono::duration<double>(now - *g_auto.first_present).count();
 }
 
-static void RunAutoInput(SdlState& state) {
+// Returns true once the automatic exit is due.
+static bool RunAutoInput(SdlState& state) {
     if (!g_auto.active) {
-        return;
+        return false;
     }
     const auto now = std::chrono::steady_clock::now();
     const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
     if (!g_auto.first_present && presents > 0) {
         g_auto.first_present = now;
-        LOG_INFO(Frontend, "nx2 auto input: first present {:.2f} s after start-up",
+        LOG_INFO(Frontend, "nx2 auto: first present {:.2f} s after start-up",
                  std::chrono::duration<double>(now - g_auto.boot).count());
     }
+    if (g_auto.exit.enabled && !g_auto.exiting) {
+        const auto elapsed = AutoSeconds(g_auto.exit.anchor, now);
+        if (elapsed && *elapsed >= g_auto.exit.seconds) {
+            LOG_INFO(Frontend, "nx2 auto exit after {:.2f} s (anchor {}, present #{}): closing the window",
+                     *elapsed, Nx2AutoScript::AnchorName(g_auto.exit.anchor), presents);
+            g_auto.exiting = true;
+        }
+    }
+    if (g_auto.exiting) {
+        return true;
+    }
     if (g_auto.next >= g_auto.actions.size()) {
-        return;
+        return false;
     }
     if (!g_auto.bound) {
         BindAutoInput(state);
@@ -618,12 +650,15 @@ static void RunAutoInput(SdlState& state) {
                      presents, event.name, action.down ? "down" : "up");
         }
     }
+    return false;
 }
 
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
     RunKeyScript(state->input_subsystem);
-    RunAutoInput(*state);
+    if (RunAutoInput(*state)) {
+        return SDL_APP_SUCCESS;
+    }
     return state->emu_window && state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {

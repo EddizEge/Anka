@@ -47,6 +47,17 @@ struct Action {
 
 std::vector<Action> Schedule(const Script& script);
 
+// EDEN_NX2_AUTO_EXIT=<seconds>[@boot|@present]: close the window that many seconds after start-up
+// (or the first present), the same way as closing it by hand. "0" or empty is off.
+struct ExitSpec {
+    bool enabled = false;
+    double seconds = 0.0;
+    Anchor anchor = Anchor::Boot;
+    std::string error; // set when the text is not valid; enabled is false then
+};
+
+ExitSpec ParseExit(std::string_view text);
+
 const char* AnchorName(Anchor anchor);
 
 } // namespace Nx2AutoScript
