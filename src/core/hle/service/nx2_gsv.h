@@ -2248,6 +2248,7 @@ private:
     void OpenDisplay(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         m_display_notification = w[4];
+        m_display_opened = true;
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
         if (NotifyOpenMode() == 1) {
@@ -2280,12 +2281,19 @@ private:
     }
 
     bool m_notified_open{};
+    bool m_display_opened{}; // 101 came on this session
 
     void NotifyOpen(std::string_view when) {
         if (m_notified_open) {
             return;
         }
         m_notified_open = true;
+        if (!m_display_opened || m_display_notification >= m_notifications.size() * 32) {
+            LOG_WARNING(Service, "nx2:vi2 notify open {}: {}, nothing set (EDEN_NX2_VI2_NOTIFY_OPEN)", when,
+                        m_display_opened ? fmt::format("display notification {} out of range", m_display_notification)
+                                         : std::string{"no 101 on this session"});
+            return;
+        }
         LOG_INFO(Service, "nx2:vi2 notify open: display notification {} set {} (EDEN_NX2_VI2_NOTIFY_OPEN)",
                  m_display_notification, when);
         Notify(m_display_notification, "EDEN_NX2_VI2_NOTIFY_OPEN");
