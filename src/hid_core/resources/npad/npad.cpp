@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
 
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -27,6 +28,24 @@
 #include "hid_core/resources/shared_memory_format.h"
 
 namespace Service::HID {
+
+namespace {
+// EDEN_NX2_HID_DIAG=1: once a second, why player 1's pad state does or does not reach the game.
+// Counts the OnUpdate gates (applet resource slot, supported style set, pad input enable,
+// connection, activation) and ORs the buttons the controller reported and the ones written.
+struct HidDiag {
+    bool enabled = [] {
+        const char* v = std::getenv("EDEN_NX2_HID_DIAG");
+        return v != nullptr && v[0] != '0';
+    }();
+    u64 last_ns = 0;
+    u32 updates = 0, assigned = 0, style_set = 0, pad_input = 0, connected = 0, active = 0, written = 0;
+    u64 seen_buttons = 0, written_buttons = 0;
+    int style = -1;
+    u64 aruid = 0;
+};
+HidDiag g_hid_diag;
+} // namespace
 
 NPad::NPad(Core::HID::HIDCore& hid_core_, KernelHelpers::ServiceContext& service_context_)
     : hid_core{hid_core_}
@@ -500,6 +519,26 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
     }
 
     std::scoped_lock lock{*applet_resource_holder.shared_mutex};
+    auto& diag = g_hid_diag;
+    if (diag.enabled) {
+        const u64 now = static_cast<u64>(core_timing.GetGlobalTimeNs().count());
+        if (diag.last_ns == 0) {
+            diag.last_ns = now;
+        }
+        if (now - diag.last_ns >= 1'000'000'000ULL) {
+            LOG_INFO(Service_HID,
+                     "nx2 hid diag: {} updates, {} assigned, style set {}, pad input {}, player 1 style {} "
+                     "connected {} active {} written {}, buttons seen 0x{:x} written 0x{:x}, aruid 0x{:x}",
+                     diag.updates, diag.assigned, diag.style_set, diag.pad_input, diag.style,
+                     diag.connected, diag.active, diag.written, diag.seen_buttons,
+                     diag.written_buttons, diag.aruid);
+            diag.updates = diag.assigned = diag.style_set = diag.pad_input = 0;
+            diag.connected = diag.active = diag.written = 0;
+            diag.seen_buttons = diag.written_buttons = 0;
+            diag.last_ns = now;
+        }
+        ++diag.updates;
+    }
     for (std::size_t aruid_index = 0; aruid_index < AruidIndexMax; ++aruid_index) {
         const auto* data = applet_resource_holder.applet_resource->GetAruidDataByIndex(aruid_index);
 
@@ -510,6 +549,18 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
         bool is_set{};
         const auto aruid = data->aruid;
         npad_resource.IsSupportedNpadStyleSet(is_set, aruid);
+        if (diag.enabled) {
+            ++diag.assigned;
+            diag.aruid = aruid;
+            diag.style_set += is_set ? 1 : 0;
+            diag.pad_input += data->flag.enable_pad_input ? 1 : 0;
+            if (const auto& first = controller_data[aruid_index][0]; first.device != nullptr) {
+                diag.style = static_cast<int>(first.device->GetNpadStyleIndex());
+                diag.connected += first.device->IsConnected() ? 1 : 0;
+                diag.active += first.is_active ? 1 : 0;
+                diag.seen_buttons |= static_cast<u64>(first.device->GetNpadButtons().raw);
+            }
+        }
         // Wait until style is defined
         if (!is_set) {
             continue;
@@ -541,6 +592,10 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
 
             RequestPadStateUpdate(kernel, aruid, controller.device->GetNpadIdType());
             auto& pad_state = controller.npad_pad_state;
+            if (diag.enabled && i == 0) {
+                ++diag.written;
+                diag.written_buttons |= static_cast<u64>(pad_state.npad_buttons.raw);
+            }
             auto& libnx_state = controller.npad_libnx_state;
             auto& trigger_state = controller.npad_trigger_state;
 
