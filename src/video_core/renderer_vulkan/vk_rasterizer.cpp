@@ -4053,17 +4053,26 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
         return;
     }
     // The bound targets' GPU ranges, conservatively (D6): a layer's stride (pitch linear: pitch
-    // times height; neither: 16 bytes a texel) times the layers or depth.
+    // times height; neither: 16 bytes a texel) times the layers or depth. A target larger than
+    // MaxTargetBytes holds every page instead of a walk that long (R2 dogrulama-4). Not covered:
+    // a target that is a layer or level of a larger image, of which C marks the whole image
+    // (Nx2MarkImagePages) once it ran the packet, B only the target's range before.
     const auto& regs = mb.regs;
     using Regs = Tegra::Engines::Maxwell3D::Regs;
     static constexpr u64 MaxTargetBytes = u64{256} << 20;
-    const auto target_bytes = [](u64 stride, u64 linear, u64 width, u64 height, u64 layers,
-                                 u64 texel) {
+    const auto times = [](u64 a, u64 b) {
+        return a != 0 && b > ~u64{0} / a ? ~u64{0} : a * b;
+    };
+    bool oversized = false;
+    const auto target_bytes = [&](u64 stride, u64 linear, u64 width, u64 height, u64 layers,
+                                  u64 texel) {
         u64 layer = (std::max)(stride, linear);
         if (layer == 0) {
-            layer = width * height * texel;
+            layer = times(times(width, height), texel);
         }
-        return (std::min)(layer * (std::max)(layers, u64{1}), MaxTargetBytes);
+        const u64 bytes = times(layer, (std::max)(layers, u64{1}));
+        oversized |= bytes > MaxTargetBytes;
+        return (std::min)(bytes, MaxTargetBytes);
     };
     decltype(StageTargets::key) key{};
     const u32 count = (std::min)(static_cast<u32>(regs.rt_control.count),
@@ -4088,6 +4097,10 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
             regs.zeta.Address(), target_bytes(u64{regs.zeta.array_pitch} * 4, 0,
                                               regs.zeta_size.width, regs.zeta_size.height,
                                               layers, 8)};
+    }
+    if (oversized) [[unlikely]] {
+        pages.PreSetAll(seq);
+        return;
     }
     StageTargets& targets = stage_targets;
     // Read before the walk: a mapping changed meanwhile walks again at the next packet.
@@ -4128,7 +4141,7 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
         pages.PreSet(begin, size, seq);
     }
     if (targets.ranges.empty()) {
-        // Only the seq: work before it holds until C ran it.
+        // No target: only B's position (b_next, STAGE_CHECK's) moves; no page is held.
         pages.PreSet(0, 0, seq);
     }
 }
@@ -5226,17 +5239,24 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         UpdateDynamicStates();
         stage_dynamic = {};
     }
+    if (Stages::Get().mode == 2) [[unlikely]] {
+        // The double setup parks B: not with the texture cache held (B's joins take it). Before
+        // the queries begin, as the old path checks (R2 dogrulama-2): a render pass the old setup
+        // ends would end them, and the draw would record outside.
+        const SplitCheckBase base{
+            .image_hits = image_hits,
+            .view_epoch = texture_cache.ImageViewEpoch(),
+            .light_epoch = light_epoch_b.load(std::memory_order_seq_cst),
+        };
+        lock.unlock();
+        CheckSplitSetup(pipeline, head.kind == DrawKind::Full ? in.Handles() : pipeline.LastHandles(),
+                        head.is_indexed, light, !set_up, base);
+        lock.lock();
+    }
     query_cache.NotifySegment(true);
     HandleTransformFeedback();
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
                               mc.regs.zpass_pixel_count_enable);
-    if (Stages::Get().mode == 2) [[unlikely]] {
-        // The double setup parks B: not with the texture cache held (B's joins take it).
-        lock.unlock();
-        CheckSplitSetup(pipeline, head.kind == DrawKind::Full ? in.Handles() : pipeline.LastHandles(),
-                        head.is_indexed, light);
-        lock.lock();
-    }
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         BindGeometryC(head);
@@ -5404,16 +5424,21 @@ void RasterizerVulkan::RecordStageDraw(const StageDrawParams& params) {
 }
 
 void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<const u32> handles,
-                                       bool is_indexed, bool light) {
+                                       bool is_indexed, bool light, bool followed,
+                                       const SplitCheckBase& base) {
     // EDEN_NX2_BACK_STAGES=2: the split setup's snapshot, then the old one (Configure, no
     // SetEngine: =2's lockstep keeps B at the end of this packet, its replica this draw's) with B
     // parked, compared. The draw records with the old setup. A light draw that differs is an
     // error (the split chain took a light way the full setup would not match); the reverse (the
     // old chain light where the split one set up in full) is not seen here. Besides the
     // descriptors (CompareSetups), as CheckLightVerify (esdeger-6): the pipeline the cache looks up
-    // for B's replica (B parked: safe here), a render pass the old setup begins and the dynamic
-    // state it records after it. Not compared: the geometry binds (no geometry mirror yet) and
-    // the rescaling and render area outside EDEN_NX2_LIGHT_UNIFORM=2 (TakeSetupSnapshot, T6).
+    // for B's replica (B parked: safe here) and, for a draw that followed without a setup (R2
+    // dogrulama-1 / kayit-1: a setup makes them again, feedback loops and aliases end the render
+    // pass each time), a render pass the old setup begins and the dynamic state it records after
+    // it. A difference after another thread wrote memory in between (dogrulama-3: the texture
+    // cache is let go for the ParkB) is counted apart, not as an error. Not compared: the geometry
+    // binds (C's mirror binds them right before the draw, BindGeometryC) and the rescaling and
+    // render area outside EDEN_NX2_LIGHT_UNIFORM=2 (TakeSetupSnapshot, T6).
     GraphicsPipeline::SetupSnapshot split;
     pipeline.TakeSetupSnapshot(split, handles);
     GraphicsPipeline::SetupSnapshot full;
@@ -5421,9 +5446,15 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
     GraphicsPipeline* looked_up = nullptr;
     u64 render_passes = 0;
     u64 dynamic_records = 0;
+    bool raced = false;
     VideoCommon::Nx2Stages::ParkB([&] {
         CheckBufferLockOffB("RasterizerVulkan::CheckSplitSetup");
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        // A guest CPU write (OnCPUWrite: WriteMemory under this lock), an unmap (image views
+        // deleted) or a buffer side note since the split setup.
+        raced = texture_cache.WriteHits() != base.image_hits ||
+                texture_cache.ImageViewEpoch() != base.view_epoch ||
+                light_epoch_b.load(std::memory_order_seq_cst) != base.light_epoch;
         looked_up = pipeline_cache.CurrentGraphicsPipeline();
         const u64 render_pass_begins = scheduler.RenderPassBegins();
         // Vertex streams the old setup binds straight to C's command buffer (those B's flags have
@@ -5437,6 +5468,9 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
         if (!configured) {
             return;
         }
+        // The old path's UpdateVertexBuffers clears it on its one replica before its dynamic
+        // state (kayit-1): C's, set by InvalidateState, would record the vertex input again.
+        maxwell3d->dirty.flags[VideoCommon::Dirty::VertexBuffers] = false;
         pipeline.TakeSetupSnapshot(full, {});
         const u64 records = scheduler.RecordCount();
         stage_dynamic = {.active = true, .pipeline = &pipeline};
@@ -5462,38 +5496,52 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
     thread_local u64 checks{};
     thread_local u64 mismatches{};
     thread_local u64 light_errors{};
+    thread_local u64 raced_differences{};
     ++checks;
     std::string differences = pipeline.CompareSetups(split, full, bytes);
     if (looked_up != &pipeline) {
         differences += fmt::format(" pipeline: the cache looks up {} for the packet's {};",
                                    fmt::ptr(looked_up), fmt::ptr(&pipeline));
     }
-    if (render_passes != 0) {
+    if (followed && render_passes != 0) {
         differences += fmt::format(" the old setup began {} render passes;", render_passes);
     }
-    if (dynamic_records != 0) {
+    if (followed && dynamic_records != 0) {
         differences += fmt::format(" the old setup recorded {} dynamic state commands after it;",
                                    dynamic_records);
     }
     if (!differences.empty()) {
-        ++mismatches;
-        light_errors += light ? 1 : 0;
+        if (raced) {
+            ++raced_differences;
+        } else {
+            ++mismatches;
+            light_errors += light ? 1 : 0;
+        }
     }
     if ((checks & (checks - 1)) == 0 && checks >= 1024) {
-        LOG_INFO(HW_GPU, "Split setups checked: {}, differing {} (light draws {})", checks,
-                 mismatches, light_errors);
+        LOG_INFO(HW_GPU,
+                 "Split setups checked: {}, differing {} (light draws {}), after a write in "
+                 "between {}",
+                 checks, mismatches, light_errors, raced_differences);
     }
     if (differences.empty()) {
         return;
     }
-    thread_local u32 logged{};
-    if (logged < 16) {
-        ++logged;
-        if (light) {
+    if (raced) {
+        LOG_DEBUG(HW_GPU, "Split setup differs after a write in between: {}", differences);
+        return;
+    }
+    // Apart: warnings must not use up the errors' lines.
+    thread_local u32 logged_errors{};
+    thread_local u32 logged_warnings{};
+    if (light) {
+        if (logged_errors < 16) {
+            ++logged_errors;
             LOG_ERROR(HW_GPU, "Split light draw differs from the full setup: {}", differences);
-        } else {
-            LOG_WARNING(HW_GPU, "Split setup differs from the old one: {}", differences);
         }
+    } else if (logged_warnings < 16) {
+        ++logged_warnings;
+        LOG_WARNING(HW_GPU, "Split setup differs from the old one: {}", differences);
     }
 }
 

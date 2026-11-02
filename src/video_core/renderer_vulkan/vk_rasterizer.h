@@ -375,8 +375,9 @@ private:
     /// B, no cache lock held: the draw packet in stage_writer.
     void SendStageDraw();
     /// B (T8): the pages C may write for work `seq` (or, between packets, the next packet's): the
-    /// bound render targets and depth, every page when the pipeline writes memory it does not
-    /// place (storage images, global stores).
+    /// bound render targets and depth only (every page for a target too large to walk). A caller
+    /// whose pipeline writes memory it does not place (storage images, global stores) adds
+    /// GpuPages().PreSetAll(seq) itself.
     void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
     /// B: the seq of the next packet (work sent between packets runs before it).
     [[nodiscard]] u64 NextStageSeq() const noexcept;
@@ -414,9 +415,17 @@ private:
     void ReleaseAnchorC();
     /// C: the anchor's packet as a light draw's repair reads it.
     void SaveAnchorC(const StageDrawReader& in, std::span<const u32> handles);
+    /// EDEN_NX2_BACK_STAGES=2: what another thread's write between the split setup and the old
+    /// one moves (C lets the texture cache go for the ParkB; R2 dogrulama-3).
+    struct SplitCheckBase {
+        u64 image_hits;  ///< texture_cache.WriteHits() before the split setup
+        u64 view_epoch;  ///< texture_cache.ImageViewEpoch() once it was done
+        u64 light_epoch; ///< light_epoch_b then (B waits in lockstep: other threads move it)
+    };
     /// EDEN_NX2_BACK_STAGES=2: the split setup against the old one (Configure, B parked).
+    /// `followed`: drawn without a setup (a light draw that needed no repair).
     void CheckSplitSetup(GraphicsPipeline& pipeline, std::span<const u32> handles, bool is_indexed,
-                         bool light);
+                         bool light, bool followed, const SplitCheckBase& base);
 
     void FlushWork();
 
