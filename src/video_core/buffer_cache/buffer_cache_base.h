@@ -79,6 +79,14 @@ inline int Nx2SyncSets() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SYNC_SETS");
 }
+/// EDEN_NX2_SSBO_FAST: a storage buffer binding's layout size from a remembered run of one page
+/// kind (LayoutRunMemo), its device address from the aligned one's when both lie on one 4 KiB
+/// page, and no multi-range query for a range within one 4 KiB page (one segment at most). =0
+/// as before; =2 also does each the old way and logs any difference ("EDEN_NX2_SSBO_FAST: ...").
+inline int Nx2SsboFast() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
+}
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
 inline bool Nx2VertexFast() {
@@ -777,6 +785,8 @@ private:
     };
     static constexpr size_t STORAGE_BINDING_MEMO_SIZE = 256;
     std::array<StorageBindingMemo, STORAGE_BINDING_MEMO_SIZE> storage_binding_memo{};
+    /// EDEN_NX2_SSBO_FAST: GetMemoryLayoutSize answers (StorageBufferBindingAt).
+    mutable LayoutRunMemo layout_runs;
 
     MemoryTracker memory_tracker;
     Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;

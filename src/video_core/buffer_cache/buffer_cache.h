@@ -1332,6 +1332,22 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
         }
+        // EDEN_NX2_SSBO_FAST: within one 4 KiB page the range is one GPU page's, mapped to one
+        // device page: one segment or none, for which QueryMultiRange returns null (its lookup
+        // and, for a new range, the change count that drops every remembered answer are left).
+        if (const int fast = Nx2SsboFast();
+            fast != 0 && (binding.gpu_addr >> 12) == ((binding.gpu_addr + binding.size - 1) >> 12)) {
+            if (fast == 2 &&
+                virtual_ranges.QueryMultiRange(*gpu_memory, binding.gpu_addr, binding.size)) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU, "EDEN_NX2_SSBO_FAST: {:#x}+{:#x} has several segments",
+                              binding.gpu_addr, binding.size);
+                }
+            } else {
+                return;
+            }
+        }
         // Null unless the range has two or more segments (EDEN_NX2_SSBO_MEMO remembers it).
         const VirtualSegments* found =
             virtual_ranges.QueryMultiRange(*gpu_memory, binding.gpu_addr, binding.size);
@@ -2896,9 +2912,37 @@ Binding BufferCache<P>::MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_in
 template <class P>
 Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword, u32 cbuf_index,
                                                bool is_written) const {
+    const int fast = Nx2SsboFast();
+    const auto layout_size = [&]() -> u64 {
+        if (fast == 0) {
+            return gpu_memory->GetMemoryLayoutSize(gpu_addr);
+        }
+        const size_t owner = gpu_memory->GetID();
+        // Read before the lookup: a change meanwhile leaves a run no later call matches.
+        const u64 epoch = gpu_memory->MappingEpoch();
+        u64 run_size{};
+        if (layout_runs.Find(owner, epoch, gpu_addr, run_size)) {
+            if (fast == 2) {
+                const u64 looked_up = gpu_memory->GetMemoryLayoutSize(gpu_addr);
+                if (looked_up != run_size) {
+                    static u32 reported{};
+                    if (reported++ < 16) {
+                        LOG_ERROR(HW_GPU,
+                                  "EDEN_NX2_SSBO_FAST: layout size of {:#x} is {:#x}, the run "
+                                  "gave {:#x}",
+                                  gpu_addr, looked_up, run_size);
+                    }
+                    return looked_up;
+                }
+            }
+            return run_size;
+        }
+        const u64 looked_up = gpu_memory->GetMemoryLayoutSize(gpu_addr);
+        layout_runs.Store(owner, epoch, gpu_addr, looked_up);
+        return looked_up;
+    };
     const auto size = [&]() {
-        const u32 memory_layout_size =
-            static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+        const u32 memory_layout_size = static_cast<u32>(layout_size());
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
@@ -2919,7 +2963,25 @@ Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword
         LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
         return NULL_BINDING;
     }
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    // EDEN_NX2_SSBO_FAST: on the aligned address's 4 KiB page (alignments divide 4 KiB) both
+    // translate through one GPU page, mapped to consecutive device pages: one translation.
+    std::optional<DAddr> device_addr;
+    if (fast != 0 && (aligned_gpu_addr >> 12) == (gpu_addr >> 12)) {
+        device_addr = *aligned_device_addr + (gpu_addr - aligned_gpu_addr);
+        if (fast == 2) {
+            const std::optional<DAddr> translated = gpu_memory->GpuToCpuAddress(gpu_addr);
+            if (translated != device_addr) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU, "EDEN_NX2_SSBO_FAST: {:#x} translates to {:#x}, not {:#x}",
+                              gpu_addr, translated.value_or(0), *device_addr);
+                }
+                device_addr = translated;
+            }
+        }
+    } else {
+        device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    }
     ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
                cbuf_index);
     // The end address used for size calculation does not need to be aligned

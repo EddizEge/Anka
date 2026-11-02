@@ -11,6 +11,7 @@
 
 namespace {
 
+using VideoCommon::LayoutRunMemo;
 using VideoCommon::SyncMemoSets;
 
 /// The memory tracker as SynchronizeBuffer sees it: per 4 KiB page a dirty (CPU or untracked)
@@ -173,4 +174,93 @@ TEST_CASE("SyncMemoSets random against the tracker model", "[video_core][nx2]") 
         }
         REQUIRE(hits > 0);
     }
+}
+
+namespace {
+
+/// kind_map's answer: runs of one kind between boundaries, joined; kind 0 is unmapped.
+struct KindMapModel {
+    std::vector<std::pair<u64, int>> starts{{0, 0}}; ///< (start, kind), sorted, neighbours differ
+
+    void Map(u64 begin, u64 end, int kind) {
+        // Rebuild from a page view: simple and exact for the test's small space.
+        std::vector<int> pages(PAGES);
+        for (u64 page = 0; page < PAGES; ++page) {
+            pages[page] = KindAt(page << 12);
+        }
+        for (u64 page = begin >> 12; page < (end >> 12) && page < PAGES; ++page) {
+            pages[page] = kind;
+        }
+        starts.clear();
+        for (u64 page = 0; page < PAGES; ++page) {
+            if (starts.empty() || starts.back().second != pages[page]) {
+                starts.emplace_back(page << 12, pages[page]);
+            }
+        }
+    }
+    int KindAt(u64 addr) const {
+        int kind = 0;
+        for (const auto& [start, value] : starts) {
+            if (start > addr) {
+                break;
+            }
+            kind = value;
+        }
+        return kind;
+    }
+    u64 LayoutSize(u64 addr) const {
+        for (size_t i = 0; i < starts.size(); ++i) {
+            const u64 end = i + 1 < starts.size() ? starts[i + 1].first : ~u64{0} >> 1;
+            if (starts[i].first <= addr && addr < end) {
+                return starts[i].second == 0 ? 0 : end - addr;
+            }
+        }
+        return 0;
+    }
+    static constexpr u64 PAGES = 512;
+};
+
+} // namespace
+
+TEST_CASE("LayoutRunMemo answers as the lookup", "[video_core][nx2]") {
+    std::mt19937_64 rng{777};
+    for (int round = 0; round < 30; ++round) {
+        LayoutRunMemo memo;
+        KindMapModel map;
+        u64 epoch = 1;
+        u64 found = 0;
+        for (int step = 0; step < 3000; ++step) {
+            if (rng() % 64 == 0) {
+                const u64 begin = (rng() % KindMapModel::PAGES) << 12;
+                map.Map(begin, begin + ((1 + rng() % 64) << 12), static_cast<int>(rng() % 3));
+                ++epoch;
+                continue;
+            }
+            const size_t owner = rng() % 2;
+            // Another address space (owner 1) maps everything as one kind.
+            const u64 addr = rng() % (KindMapModel::PAGES << 12);
+            const u64 truth = owner == 0 ? map.LayoutSize(addr) : (~u64{0} >> 1) - addr;
+            u64 size{};
+            if (memo.Find(owner, epoch, addr, size)) {
+                ++found;
+                REQUIRE(size == truth);
+            } else {
+                memo.Store(owner, epoch, addr, truth);
+            }
+        }
+        REQUIRE(found > 0);
+    }
+    LayoutRunMemo memo;
+    u64 size{};
+    memo.Store(0, 1, 0x1000, 0);
+    REQUIRE(!memo.Find(0, 1, 0x1000, size));
+    memo.Store(0, 1, 0x1000, 0x3000);
+    REQUIRE(memo.Find(0, 1, 0x3fff, size));
+    REQUIRE(size == 1);
+    REQUIRE(!memo.Find(0, 1, 0x4000, size));
+    REQUIRE(!memo.Find(0, 1, 0xfff, size));
+    REQUIRE(!memo.Find(0, 2, 0x2000, size));
+    REQUIRE(!memo.Find(1, 1, 0x2000, size));
+    memo.Store(0, 1, ~u64{0} - 0x10, 0x20);
+    REQUIRE(!memo.Find(0, 1, ~u64{0} - 0x8, size));
 }

@@ -116,4 +116,48 @@ private:
     std::unique_ptr<Set[]> sets;
 };
 
+/// EDEN_NX2_SSBO_FAST (BufferCache::StorageBufferBindingAt): MemoryManager::GetMemoryLayoutSize
+/// takes a lock and walks kind_map, a range map whose neighbours of one kind are joined, to
+/// answer the end of the run holding the address minus the address. An answer s at q is then the
+/// run [q, q + s): any address a in it gets q + s - a, while the manager (owner) and its mapping
+/// epoch (bumped after every kind_map change) are the same. Unmapped answers (0) are not kept.
+class LayoutRunMemo {
+public:
+    static constexpr size_t NUM_RUNS = 4;
+
+    /// The size for `addr` from a remembered run.
+    bool Find(size_t owner, u64 epoch, u64 addr, u64& size) const noexcept {
+        for (const Run& run : runs) {
+            if (run.begin <= addr && addr < run.end && run.owner == owner && run.epoch == epoch) {
+                size = run.end - addr;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// GetMemoryLayoutSize(addr) returned `size`, with `epoch` read before it.
+    void Store(size_t owner, u64 epoch, u64 addr, u64 size) noexcept {
+        if (size == 0 || size > ~u64{0} - addr) {
+            return;
+        }
+        runs[next++ % NUM_RUNS] = Run{
+            .owner = owner,
+            .epoch = epoch,
+            .begin = addr,
+            .end = addr + size,
+        };
+    }
+
+private:
+    struct Run {
+        size_t owner;
+        u64 epoch;
+        u64 begin;
+        u64 end; ///< Equal to begin: empty
+    };
+    std::array<Run, NUM_RUNS> runs{};
+    u32 next{};
+};
+
 } // namespace VideoCommon
