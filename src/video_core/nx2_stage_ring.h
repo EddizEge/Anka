@@ -583,10 +583,12 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   void Busy(u8 stage, bool busy);                            around a stage's batches
 ///   void Wrote(u8 to_stage, size_t bytes); void Parked();      counters (Parked: B for ParkB)
 ///   void Hazard(u8 stage, StageHazard what, u64 a, u64 b);     K3 (on the stage's thread)
-///   void JoinStall(u64 c_record, u64 target, u64 ms);          STAGE_CHECK, on B: a join from B
-///                                                              waits that long (WatchFirst, then
+///   void JoinStall(u64 c_record, u64 target, u64 ms,           STAGE_CHECK, on B: a join from B
+///                  bool stuck);                                waits that long (WatchFirst, then
 ///                                                              every WatchEvery), C last began
-///                                                              the record at c_record
+///                                                              the record at c_record; `stuck`:
+///                                                              at the report before too (C not
+///                                                              going on, a deadlock suspect)
 ///   void BoundaryWork();                                       C at a record boundary, asked
 ///                                                              (RequestBoundaryWork); may ParkB
 template <typename Handler, size_t BWords = RingToBWords, size_t CWords = RingToCWords>
@@ -1031,9 +1033,13 @@ private:
         Nudge(c_wake);
         if (options.check) {
             // A wait that lasts is reported while it lasts, with B's stack (a deadlock ends never;
-            // T9b review kilit-4).
+            // T9b review kilit-4). C on the record of the report before is stuck, not slow (R2c).
+            u64 last_record = ~u64{0};
             AwaitValueWatched<typename Scopes::JoinWait>(join_ack, id, join_watch, [&](u64 ms) {
-                handler.JoinStall(c_progress.load(std::memory_order_relaxed), target, ms);
+                const u64 record = c_progress.load(std::memory_order_relaxed);
+                const bool stuck = record == last_record;
+                last_record = record;
+                handler.JoinStall(record, target, ms, stuck);
             });
         } else {
             AwaitValue<typename Scopes::JoinWait>(join_ack, id);

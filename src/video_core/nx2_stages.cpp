@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -166,7 +167,7 @@ struct GpuHandler {
         Nx2Profile::Add(Counter::Parks, 1);
     }
     void Hazard(u8 stage, StageHazard what, u64 a, u64 b);
-    void JoinStall(u64 c_record, u64 target, u64 ms);
+    void JoinStall(u64 c_record, u64 target, u64 ms, bool stuck);
     /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
     void BoundaryWork() {
         g_system->GPU().TickWork();
@@ -278,19 +279,36 @@ void GpuHandler::Hazard(u8 stage, StageHazard what, u64 a, u64 b) {
     }
 }
 
-void GpuHandler::JoinStall(u64 c_record, u64 target, u64 ms) {
+void GpuHandler::JoinStall(u64 c_record, u64 target, u64 ms, bool stuck) {
     // STAGE_CHECK, on B while its join still waits (T9b review kilit-4). A deadlock never ends:
     // C waiting on a lock B holds on its way to the join's target (K3 (a): the buffer cache mutex
-    // in a locked join). A long wait for a C far behind ends and moves C's record on.
+    // in a locked join), on one record. A C behind (a pipeline built on C, a wait for the GPU)
+    // goes on from record to record: a slow join, lines of its own and no stack, so slow joins
+    // leave the deadlock reports to a deadlock (R2c review).
+    const char* const locked = t_locked_join ? "locked " : "";
+    if (!stuck) {
+        static std::atomic<u32> slow{};
+        if (slow.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(HW_GPU,
+                        "GPU stages: a {}join from B has waited {} ms for C, at the record at "
+                        "{:#x} (the join's target {:#x}): a slow join",
+                        locked, ms, c_record, target);
+        }
+        return;
+    }
     static std::atomic<u32> reports{};
     if (reports.fetch_add(1, std::memory_order_relaxed) >= 8) {
         return;
     }
     LOG_WARNING(HW_GPU,
-                "GPU stages: a {}join from B has waited {} ms for C, which began the record at "
-                "{:#x} (the join's target {:#x}): K3 deadlock suspect",
-                t_locked_join ? "locked " : "", ms, c_record, target);
-    ReportStack("join from B waits", t_locked_join ? "JoinFromBLocked" : "JoinFromB");
+                "GPU stages: a {}join from B has waited {} ms for C, on the record at {:#x} since "
+                "the report before (the join's target {:#x}): K3 deadlock suspect",
+                locked, ms, c_record, target);
+    // B's stack once a wait: it does not change while B waits.
+    thread_local u64 t_stack_target = ~u64{0};
+    if (std::exchange(t_stack_target, target) != target) {
+        ReportStack("join from B waits", t_locked_join ? "JoinFromBLocked" : "JoinFromB");
+    }
 }
 
 u64* BeginRecord(Ring ring, RecordKind kind, u32 body_words, u32 flags = 0) {

@@ -96,9 +96,11 @@ struct FakeHandler {
     void (*on_boundary)(){};
     /// Hazard reports by kind (StageHazard).
     std::array<std::atomic<u32>, 2> hazards{};
-    /// STAGE_CHECK's reports of a join from B that lasts (JoinStall), the last one's wait.
+    /// STAGE_CHECK's reports of a join from B that lasts (JoinStall), the last one's wait, the
+    /// ones with C stuck.
     std::atomic<u32> join_stalls{};
     std::atomic<u64> join_stall_ms{};
+    std::atomic<u32> join_stuck{};
 
     u32 PendingDeltas() {
         return static_cast<u32>(capture.size());
@@ -158,8 +160,12 @@ struct FakeHandler {
             on_boundary();
         }
     }
-    void JoinStall(u64, u64, u64 ms) {
+    void JoinStall(u64, u64, u64 ms, bool stuck) {
+        // A wait's first report (after WatchFirst, before WatchEvery) has no report before it.
+        Expect(!stuck || ms >= static_cast<u64>(WatchEvery.count()),
+               "a wait's first report finds C stuck on nothing", ms);
         join_stall_ms = ms;
+        join_stuck += stuck ? 1 : 0;
         ++join_stalls;
     }
 };
@@ -1432,8 +1438,22 @@ void HoldOnC(const u64*, u32) {
         std::this_thread::yield();
     }
 }
-void HoldCThenJoinOnB(const u64*, u32) {
-    PostCallC(*g_pipe, &HoldOnC, 0);
+/// C going on (behind, not stuck): record n of these ends once the test let n + 1 of them end.
+std::atomic<u64> g_c_steps{};
+void StepOnC(const u64* payload, u32) {
+    g_c_held = true;
+    while (g_c_steps.load() <= payload[0] && !g_c_release.load()) {
+        std::this_thread::yield();
+    }
+}
+/// payload[0]: 0, C held on one record; n, C on n records the test ends one by one.
+void HoldCThenJoinOnB(const u64* payload, u32) {
+    if (payload[0] == 0) {
+        PostCallC(*g_pipe, &HoldOnC, 0);
+    }
+    for (u64 n = 0; n < payload[0]; ++n) {
+        PostCallC(*g_pipe, &StepOnC, n);
+    }
     g_pipe->JoinFromB([] {
         Expect(g_c_release.load(), "the join's op runs once C went on");
         g_op_after_release_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1447,35 +1467,51 @@ void HoldCThenJoinOnB(const u64*, u32) {
 TEST_CASE("Nx2StagePipeline: STAGE_CHECK reports a join from B while it waits (kilit-4)",
           "[video_core]") {
     Watchdog watchdog{"join stall"};
-    for (u32 round = 0; round < 3; ++round) {
+    // 0: C held on one record (its second report stuck, a deadlock suspect); 3: C going on from
+    // record to record, one a report (slow, never stuck; R2c review).
+    for (const u64 steps : {u64{0}, u64{3}, u64{0}, u64{3}}) {
         FakeHandler handler;
         TestPipeline pipe{handler};
         ResetK3(handler, pipe);
         g_c_held = false;
         g_c_release = false;
+        g_c_steps = 0;
         g_op_after_release_ms = -1;
         REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true, .check = true}));
-        PostCallB(pipe, &HoldCThenJoinOnB, 0);
+        PostCallB(pipe, &HoldCThenJoinOnB, steps);
         pipe.PublishB();
-        // The report comes while the join waits (C still held), not once it ended.
-        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-        while (handler.join_stalls.load() == 0 && std::chrono::steady_clock::now() < give_up) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        REQUIRE(WaitFor([] { return g_c_held.load(); }, 10));
+        // The reports come while the join waits (C still held), not once it ended.
+        const u32 reports = steps == 0 ? 2 : static_cast<u32>(steps);
+        for (u32 report = 1; report <= reports; ++report) {
+            const bool came = WaitFor([&] { return handler.join_stalls.load() >= report; }, 10);
+            Expect(came, "a join waiting past 50 ms is reported while it waits, then every second",
+                   handler.join_stalls.load(), report);
+            if (!came) {
+                break;
+            }
+            if (steps != 0 && report < reports) {
+                // C goes on to its next record before the next report.
+                g_c_steps = report;
+            }
         }
-        const u32 stalls = handler.join_stalls.load();
-        Expect(stalls >= 1, "a join waiting past 50 ms is reported while it waits", stalls);
         Expect(handler.join_stall_ms.load() >= 50, "the report says how long it waited",
                handler.join_stall_ms.load());
-        Expect(g_c_held.load(), "C is held meanwhile");
         g_c_released_at = std::chrono::steady_clock::now();
         g_c_release = true;
         Drain(pipe);
         pipe.Stop();
         REQUIRE(g_failures == 0);
         REQUIRE(g_order == std::vector<char>({'b'}));
-        // C's ack wakes B at once (SignalWatched), not at the watch's next timeout.
+        if (steps == 0) {
+            REQUIRE(handler.join_stuck >= 1);
+        } else {
+            REQUIRE(handler.join_stuck == 0);
+        }
+        // C's ack wakes B at once (SignalWatched), not at the watch's next timeout (a WatchEvery
+        // after the last report, just before the release).
         REQUIRE(g_op_after_release_ms.load() >= 0);
-        REQUIRE(g_op_after_release_ms.load() < 300);
+        REQUIRE(g_op_after_release_ms.load() < WatchEvery.count() / 2);
     }
 }
 

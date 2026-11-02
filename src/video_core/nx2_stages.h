@@ -235,7 +235,8 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 //   also for an event it sends on to C.
 // - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
 //   inside a record at =1; a JoinFromB / JoinFromBLocked still waiting after 50 ms, reported
-//   while it waits (then every second), with B's stack, as a K3 deadlock suspect.
+//   while it waits (then every second): a slow join while C goes on from record to record, a K3
+//   deadlock suspect with B's stack once C stayed on one record from a report to the next.
 
 /// K2, B inside a record of ring 2, outside any packet and holding no cache lock (a draw's
 /// joined setup, RESETFIX's FlushRegion, a WaitForIdle with a query sync pending, an event whose
