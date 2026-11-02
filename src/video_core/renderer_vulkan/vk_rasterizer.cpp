@@ -4120,6 +4120,7 @@ void RasterizerVulkan::SendStageRecords(u64 seq, RecordList* records) {
 
 void RasterizerVulkan::SendStageDraw() {
     namespace Stages = VideoCommon::Nx2Stages;
+    VideoCommon::Nx2Profile::FineScope scope{VideoCommon::Nx2Profile::Zone::PacketSend};
     FlushStageCWork();
     if (OwnsRecordsB()) [[unlikely]] {
         // C parked: the packet runs here (no draw is set up in a join's op so far).
@@ -4136,6 +4137,11 @@ void RasterizerVulkan::SendStageDraw() {
 u64 RasterizerVulkan::NextStageSeq() const noexcept {
     // While staged, what the runtime stamps with: the seq its next packet gets.
     return Nx2Record::SeqTicks::SeqOf(buffer_cache_runtime.UsageStamp());
+}
+
+void RasterizerVulkan::MarkStreamsB() {
+    VideoCommon::Nx2Profile::FineScope scope{VideoCommon::Nx2Profile::Zone::MarkStreams};
+    buffer_cache.MarkVertexStreamsUsed();
 }
 
 void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) {
@@ -4603,6 +4609,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     };
     Stages::StageDrawWriter& out = stage_writer;
     const auto finish_head = [&](u64 seq, RecordList* records, LightLevel level) {
+        Profile::FineScope scope{Profile::Zone::PacketBuild};
         Stages::DrawToC& head = out.Head();
         head.seq = seq;
         head.records = records;
@@ -4630,6 +4637,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     bool try_uniform = false;
     bool rebind_storage = false;
     if (LightDrawEnabled() && StageLightEnabled()) {
+        Profile::FineScope decide_scope{Profile::Zone::LightDecide};
         const auto& light = mb.light;
         const auto& draw_state = mb.draw_manager.draw_state;
         const u32 uniform_mode = LightUniformMode();
@@ -4678,6 +4686,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             if (try_plain) {
                 // ConfigureImpl's geometry buffers (TryLightDraw); an upload needs the full
                 // setup's barrier.
+                Profile::FineScope geometry_scope{Profile::Zone::LightGeometry};
                 if (buffer_cache.UpdateGeometryBuffers(is_indexed)) {
                     buffer_cache.BindHostGeometryBuffers(is_indexed);
                     light_ok = !buffer_cache.any_buffer_uploaded;
@@ -4692,6 +4701,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                 }
             } else {
                 // The anchor's SetEngine holds (same replica and memory manager).
+                Profile::FineScope uniform_scope{Profile::Zone::LightUniform};
                 light_ok = pipeline.ConfigureUniformsBuffers(is_indexed, rebind_storage, out);
                 if (!light_ok) {
                     Profile::Add(Profile::Counter::LightUniformFellBack, 1);
@@ -4702,17 +4712,22 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             }
             if (light_ok) {
                 // Every stream the draw reads, bound again or not (geo-markusage-1).
-                buffer_cache.MarkVertexStreamsUsed();
+                MarkStreamsB();
                 take_indirect();
+                // EDEN_NX2_GPU_PROFILE: the streams this draw bound, as TryLightDraw counts them.
+                buffer_cache.CommitVertexStreamNote();
             }
             records = buffer_cache_runtime.EndRecords();
         }
         if (light_ok) {
             finish_head(seq, records, last.level);
-            NotePoolsB(mb, seq);
-            PreSetTargets(mb, seq);
-            if (pipeline.WritesMemory()) {
-                VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+            {
+                Profile::FineScope presets_scope{Profile::Zone::StagePresets};
+                NotePoolsB(mb, seq);
+                PreSetTargets(mb, seq);
+                if (pipeline.WritesMemory()) {
+                    VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+                }
             }
             SendStageDraw();
             if (try_plain) {
@@ -4828,8 +4843,9 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         if (half == GraphicsPipeline::BufferHalf::Ready) {
             // Every stream the draw reads, bound again or not (geo-markusage-1).
-            buffer_cache.MarkVertexStreamsUsed();
+            MarkStreamsB();
             take_indirect();
+            buffer_cache.CommitVertexStreamNote();
         } else {
             // SplitJoins said no: nothing was done.
             LOG_ERROR(HW_GPU, "ConfigureBuffers joined a draw SplitJoins kept split");
@@ -4844,13 +4860,16 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                                                             : LightLevel::None;
     }
     finish_head(seq, records, follows);
-    NotePoolsB(mb, seq);
-    if (params.command != StageCommand::None) {
-        // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
-        PreSetTargets(mb, seq);
-        if (pipeline->WritesMemory()) {
-            // Storage images / global stores B does not place.
-            VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+    {
+        Profile::FineScope presets_scope{Profile::Zone::StagePresets};
+        NotePoolsB(mb, seq);
+        if (params.command != StageCommand::None) {
+            // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
+            PreSetTargets(mb, seq);
+            if (pipeline->WritesMemory()) {
+                // Storage images / global stores B does not place.
+                VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+            }
         }
     }
     SendStageDraw();
@@ -5335,6 +5354,12 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         Profile::Add(state_ok ? Profile::Counter::LightRepairsTexture
                               : Profile::Counter::LightRepairsState,
                      1);
+        if (!state_ok) {
+            Profile::Add(!anchor.followable                ? Profile::Counter::RepairsNotFollowable
+                         : anchor.pipeline != head.pipeline ? Profile::Counter::RepairsPipeline
+                                                            : Profile::Counter::RepairsRecords,
+                         1);
+        }
         if (anchor.pipeline != &pipeline || (plain && anchor.payload.empty())) {
             // No anchor here to repair with (its setup failed, or the stages just began).
             return false;

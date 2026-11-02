@@ -388,6 +388,9 @@ private:
     void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
     /// B: the seq of the next packet (work sent between packets runs before it).
     [[nodiscard]] u64 NextStageSeq() const noexcept;
+    /// B, inside a draw packet: every vertex stream the draw reads marked used
+    /// (BufferCache::MarkVertexStreamsUsed, geo-markusage-1).
+    void MarkStreamsB();
     /// B (omur-1): the texture header and sampler pools C reads for work `seq` (a packet, or
     /// DrawTexture before the next one), kept until C ran it.
     void NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq);

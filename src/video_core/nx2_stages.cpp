@@ -115,6 +115,7 @@ struct GpuHandler {
     }
     void CbData(u8 stage, u64 address, const u32* data, u32 count) {
         if (Maxwell3D* const replica = Replica(stage)) {
+            Nx2Profile::FineScope scope{Zone::CbData};
             if (g_cb_write_check != nullptr && stage == StageIdB &&
                 CbWriteJoins(*replica, address, count)) [[unlikely]] {
                 // Into a pool C may still read for work B sent before (omur-1): C parked having
@@ -555,7 +556,10 @@ void JoinFromB(FunctionRef op) {
             entered = DiagNowNs();
         }
         g_owner.store(StageIdB, std::memory_order_release);
-        op();
+        {
+            Nx2Profile::FineScope scope{Zone::JoinOp};
+            op();
+        }
         g_owner.store(g_default_owner, std::memory_order_release);
     });
     if (g_join_diag) {
@@ -581,7 +585,10 @@ void JoinFromBLocked(FunctionRef op) {
         }
         t_locked_join = false;
         g_owner.store(StageIdB, std::memory_order_release);
-        op();
+        {
+            Nx2Profile::FineScope scope{Zone::JoinOp};
+            op();
+        }
         g_owner.store(g_default_owner, std::memory_order_release);
     });
     t_locked_join = false;

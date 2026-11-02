@@ -73,6 +73,15 @@ enum class Zone : u32 {
     PacketBuild,  ///< A draw record built (side state, arguments)
     ListReplay,   ///< C replays B's record list (cut c)
     LightRepair,  ///< C repairs a light draw B decided (cut c)
+    // Cut c, B's draw path in finer parts (EDEN_NX2_PROFILE_FINE, on with the profile; FineScope):
+    LightGeometry, ///< A plain light draw's geometry buffers (UpdateGeometryBuffers, binds)
+    LightUniform,  ///< A light draw's uniform buffers (ConfigureUniformsBuffers)
+    MarkStreams,   ///< Every vertex stream marked used (MarkVertexStreamsUsed)
+    LightDecide,   ///< The light decision on B's replica (LightUniformOkB included)
+    StagePresets,  ///< The page summary's presets and the pools in flight (T8: PreSetTargets)
+    PacketSend,    ///< A draw packet written to ring 3 (SendStageDraw)
+    JoinOp,        ///< A join's op run on B (JoinFromB, JoinFromBLocked)
+    CbData,        ///< A ring 2 constant buffer data record on B (its pool check included)
     Count,
 };
 
@@ -85,7 +94,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait", "parameter flush", "light draw",
     "stage in wait", "stage out wait", "join wait", "park wait", "replica apply",
-    "packet build", "list replay", "light repair",
+    "packet build", "list replay", "light repair", "light geometry", "light uniform",
+    "mark streams", "light decide", "stage presets", "packet send", "join op", "cb data",
 };
 
 /// Report's thread names for the back stages (nx2_stages.h): A, B (BC with cut a alone), C.
@@ -100,6 +110,17 @@ inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 
 inline bool Enabled() {
     return g_enabled;
+}
+
+// EDEN_NX2_PROFILE_FINE=0: the finer zones of cut c's draw path off (FineScope; each costs two
+// counter reads, ~10-20 ns, a few times a draw). On with the profile otherwise.
+inline const bool g_fine = g_enabled && [] {
+    const char* value = std::getenv("EDEN_NX2_PROFILE_FINE");
+    return value == nullptr || value[0] != '0';
+}();
+
+inline bool FineEnabled() {
+    return g_fine;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones
@@ -163,7 +184,10 @@ inline thread_local ThreadData t_data;
 
 class Scope {
 public:
-    explicit Scope(Zone zone_) : zone{zone_}, enabled{Enabled()} {
+    explicit Scope(Zone zone_) : Scope{zone_, Enabled()} {}
+
+    /// Timed only when `on` (FineScope: FineEnabled()).
+    Scope(Zone zone_, bool on) : zone{zone_}, enabled{on} {
         if (!enabled) {
             return;
         }
@@ -192,6 +216,12 @@ private:
     bool enabled;
     u64 start{};
     u64 parent_child_ticks{};
+};
+
+/// A finer zone (EDEN_NX2_PROFILE_FINE): timed with the profile unless the switch is 0.
+class FineScope : public Scope {
+public:
+    explicit FineScope(Zone zone_) : Scope{zone_, FineEnabled()} {}
 };
 
 /// Amounts counted on the GPU thread, logged per second with the zones.
@@ -367,6 +397,14 @@ enum class Counter : u32 {
     MemoryDirtyQueries,    ///< MemoryManager::IsMemoryDirty calls
     MemoryDirtyThunks,     ///< Of them: DmaPusher's deferred ones
     ConditionalRenderings, ///< AccelerateConditionalRendering calls (S1)
+    // Cut c, what B's and C's draw paths took the short way for (stage costs):
+    RepairsNotFollowable, ///< Of LightRepairsState: C's anchor could not be followed (C's part)
+    RepairsPipeline,      ///< ... C's anchor had another pipeline (or none)
+    RepairsRecords,       ///< ... commands recorded since C's anchor (a submit, other work)
+    PresetsKept,          ///< PreSetTargets of a light draw: the targets' ranges reused
+    StreamMarks,          ///< Vertex streams MarkVertexStreamsUsed saw
+    StreamMarksStamped,   ///< Of them: tracked before, only stamped (the range and its buffer's
+                          ///< usage generation unchanged)
     Count,
 };
 
@@ -588,16 +626,26 @@ inline void Report(const char* thread_name = "GPU thread") {
     };
     const auto counter = [&](Counter c) { return rate(static_cast<size_t>(c)); };
     const auto method = [](s64 value) { return fmt::format("{:#x}", value); };
-    if (draws_classified != 0) {
-        line += fmt::format(" | draw changes direct/indirect: nothing {}, vertex streams {}, + index "
-                            "buffer {}, + uniforms {}, + textures {}, + state {}, other work {} "
-                            "(first blocking register: {})",
-                            changes(DrawChange::Nothing), changes(DrawChange::VertexStreams),
-                            changes(DrawChange::IndexBuffer), changes(DrawChange::Uniforms),
-                            changes(DrawChange::Textures), changes(DrawChange::State),
-                            changes(DrawChange::OtherWork),
-                            TopValues(histograms[static_cast<size_t>(Histogram::LightBlocking)],
-                                      method, 6));
+    // Cut c: B decides light draws without classifying them (PrepareDrawB): its light counters
+    // alone.
+    const bool light_counted =
+        draws_classified != 0 ||
+        data.counters[static_cast<size_t>(Counter::LightDraws)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::LightUniformDraws)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::LightNotArmed)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::LightStateChanged)] != 0;
+    if (light_counted) {
+        if (draws_classified != 0) {
+            line += fmt::format(" | draw changes direct/indirect: nothing {}, vertex streams {}, "
+                                "+ index buffer {}, + uniforms {}, + textures {}, + state {}, "
+                                "other work {} (first blocking register: {})",
+                                changes(DrawChange::Nothing), changes(DrawChange::VertexStreams),
+                                changes(DrawChange::IndexBuffer), changes(DrawChange::Uniforms),
+                                changes(DrawChange::Textures), changes(DrawChange::State),
+                                changes(DrawChange::OtherWork),
+                                TopValues(histograms[static_cast<size_t>(Histogram::LightBlocking)],
+                                          method, 6));
+        }
         line += fmt::format(" | light draws {:.0f} ({:.0f} indirect); full: {:.0f} not after one, "
                             "{:.0f} state, {:.0f} other work, {:.0f} draw kind, {:.0f} fell back; "
                             "not followable: {:.0f} shape, {:.0f} memory writes (uniform way only), "
@@ -752,6 +800,15 @@ inline void Report(const char* thread_name = "GPU thread") {
                             counter(Counter::HazardPages), counter(Counter::HazardUntracked),
                             counter(Counter::HazardEpoch), counter(Counter::VerifyChecks),
                             counter(Counter::VerifyMismatches));
+    }
+    if (any(Counter::RepairsNotFollowable, Counter::StreamMarksStamped)) {
+        line += fmt::format(" | stage costs: light repairs not followable {:.0f}, pipeline "
+                            "{:.0f}, records {:.0f}; presets kept {:.0f}; stream marks {:.0f} "
+                            "({:.0f} stamped only)",
+                            counter(Counter::RepairsNotFollowable),
+                            counter(Counter::RepairsPipeline), counter(Counter::RepairsRecords),
+                            counter(Counter::PresetsKept), counter(Counter::StreamMarks),
+                            counter(Counter::StreamMarksStamped));
     }
     if (any(Counter::TextureBufferDraws, Counter::ConditionalRenderings)) {
         line += fmt::format(
