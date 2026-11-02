@@ -168,6 +168,8 @@ TEST_CASE("Nx2StageCosts: held marks across skipped resets leave the tracker as 
     // As "skipping held marks" with b-hiz's reset skip in play: packets that mark only some
     // streams or none, and resets back to back (a free buffer TickFrame resets again with
     // nothing tracked since), so many of the resets are skipped.
+    const char* env = std::getenv("EDEN_NX2_USAGE_RESET_SKIP");
+    const bool skip = env == nullptr || env[0] != '0';
     for (u64 seed = 1; seed <= 6; ++seed) {
         Lcg rng{seed * 7919};
         UsageTracker every{1 << 20};
@@ -179,11 +181,14 @@ TEST_CASE("Nx2StageCosts: held marks across skipped resets leave the tracker as 
         }
         u32 skipped = 0;
         u32 resets = 0;
+        u32 kept_generations = 0; // Resets the switch skipped (generation unchanged)
         for (u32 packet = 0; packet < 600; ++packet) {
             const u32 roll = rng.Next() % 100;
             if (roll < 15) {
                 every.Reset();
+                const u64 before = memoed.Generation();
                 memoed.Reset();
+                kept_generations += memoed.Generation() == before ? 1 : 0;
                 ++resets;
                 REQUIRE(SameUse(every, memoed));
                 continue;
@@ -214,6 +219,7 @@ TEST_CASE("Nx2StageCosts: held marks across skipped resets leave the tracker as 
         REQUIRE(SameUse(every, memoed));
         REQUIRE(resets > 50);
         REQUIRE(skipped > 0);
+        REQUIRE((kept_generations > 0) == skip);
     }
 }
 
