@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <windows.h>
 #endif
 
+#include "common/assert.h"
 #include "common/logging.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -187,6 +189,16 @@ void ReportStack(const char* check, const char* where) {
 #endif
 }
 
+/// A record's producer (K4, K9): never A inside a join, and 1 + payload words at most
+/// MaxBodyWords. The asserts only when one fails: Reserve runs for each record.
+void CheckRecord(u32 payload_words) {
+    if (InJoin() || payload_words >= MaxBodyWords) [[unlikely]] {
+        ASSERT_MSG(!InJoin(), "GPU stages: a record from A inside a join");
+        ASSERT_MSG(1 + payload_words <= MaxBodyWords, "GPU stages: a record of {} words",
+                   1 + payload_words);
+    }
+}
+
 u64* BeginRecord(Ring ring, RecordKind kind, u32 body_words, u32 flags = 0) {
     return ring == Ring::ToB ? g_pipeline.BeginB(kind, body_words, flags)
                              : g_pipeline.BeginC(kind, body_words, flags);
@@ -219,6 +231,7 @@ const Config& Get() {
 }
 
 u64* Reserve(Ring ring, Thunk thunk, u32 payload_words) {
+    CheckRecord(payload_words);
     u64* const body = BeginRecord(ring, RecordKind::Call, 1 + payload_words);
     body[0] = reinterpret_cast<u64>(thunk);
     return body + 1;
@@ -237,6 +250,7 @@ void Publish(Ring ring) {
 }
 
 void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words) {
+    CheckRecord(payload_words);
     u64* const body = BeginRecord(ring, RecordKind::Forward, 1 + payload_words);
     body[0] = reinterpret_cast<u64>(thunk);
     std::memcpy(body + 1, payload, size_t{payload_words} * sizeof(u64));
@@ -245,37 +259,47 @@ void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words)
 
 void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address, const u32* data,
                 u32 count) {
+    CheckRecord(0);
     Capture().SelectTarget(primary);
     if (ring == Ring::ToB) {
         g_pipeline.PostCbData(address, data, count);
         return;
     }
-    const u32 bytes = count * static_cast<u32>(sizeof(u32));
-    const u32 data_words = (bytes + 7) / 8;
-    u64* const body = BeginRecord(ring, RecordKind::CbData, 2 + data_words);
-    body[0] = address;
-    body[1] = bytes;
-    if (data_words != 0) {
-        body[1 + data_words] = 0;
-    }
-    std::memcpy(body + 2, data, bytes);
-    EndRecord(ring);
+    do {
+        const u32 part = (std::min)(count, decltype(g_pipeline)::MaxCbDataCount);
+        const u32 bytes = part * static_cast<u32>(sizeof(u32));
+        const u32 data_words = (bytes + 7) / 8;
+        u64* const body = BeginRecord(ring, RecordKind::CbData, 2 + data_words);
+        body[0] = address;
+        body[1] = bytes;
+        if (data_words != 0) {
+            body[1 + data_words] = 0;
+        }
+        std::memcpy(body + 2, data, bytes);
+        EndRecord(ring);
+        address += bytes;
+        data += part;
+        count -= part;
+    } while (count != 0);
 }
 
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary) {
+    CheckRecord(1);
     u64* const body = BeginRecord(ring, RecordKind::Target, 1);
     body[0] = reinterpret_cast<u64>(primary);
     EndRecord(ring);
 }
 
 void PostMark(Ring ring, u64 ring1_position) {
+    CheckRecord(1);
     u64* const body = BeginRecord(ring, RecordKind::Mark, 1);
     body[0] = ring1_position;
     EndRecord(ring);
 }
 
 void JoinFromA(JoinReason reason, FunctionRef op) {
-    if (!Forwarding()) {
+    // Nested, from another thread, off or =3 (K4): at once, no record, no wait, not counted.
+    if (!Forwarding() || !Active() || g_pipeline.Options().mode == 3) {
         op();
         return;
     }
@@ -310,11 +334,11 @@ void JoinFromB(FunctionRef op) {
         return;
     }
     Nx2Profile::Add(Counter::JoinsB, 1);
-    const u32 join = g_pipeline.JoinBBegin();
-    g_owner.store(StageIdB, std::memory_order_release);
-    op();
-    g_owner.store(g_default_owner, std::memory_order_release);
-    g_pipeline.JoinBEnd(join);
+    g_pipeline.JoinFromB([&] {
+        g_owner.store(StageIdB, std::memory_order_release);
+        op();
+        g_owner.store(g_default_owner, std::memory_order_release);
+    });
 }
 
 void ParkB(FunctionRef op) {
@@ -365,7 +389,8 @@ void Start(Core::System& system) {
     // EDEN_NX2_BACK_CPU: the front on a core of its own too (S19); before B starts and pins.
     Nx2BackCpu::StartFront();
     g_pipeline.Start(options);
-    // =3 runs the engines on B as the unstaged back did: no proxy, no replica.
+    // =1 and =2 only (K1): =3 runs the primaries on BC as the unstaged back did, with no proxy
+    // and no staged channel (a staged channel's hooks would send records from BC to its own ring).
     if (config.mode != 3) {
         InstallProxy(system, *g_real);
     }
@@ -386,6 +411,7 @@ void Stop() {
     // nothing left after a drain, and at shutdown without running what they hold.
     g_pipeline.Stop();
     if (Get().mode != 3) {
+        // As Start: only what it installed (K1).
         UninstallProxy(*g_system);
     }
     Capture().Reset();

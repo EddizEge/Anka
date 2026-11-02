@@ -62,6 +62,11 @@ namespace Detail {
                  words, delta_words, flags);
     std::abort();
 }
+/// A record from A inside its join (K4): the stages are parked, it would run after the join.
+[[noreturn]] inline void RecordInJoin() {
+    std::fputs("Nx2Stages: a record from A inside a join\n", stderr);
+    std::abort();
+}
 } // namespace Detail
 
 /// Record header, one u64:
@@ -399,6 +404,45 @@ inline void Signal(std::atomic<u32>& word, u32 value) {
     word.notify_one();
 }
 
+/// Wakes the one sleeping in AwaitServing on `wake` to look again (a request for it, or the value
+/// it waits for stored before this).
+inline void Nudge(std::atomic<u32>& wake) {
+    wake.fetch_add(1, std::memory_order_seq_cst);
+    wake.notify_all();
+}
+
+/// A park point's wait (K3): until `done()`, calling `serve` meanwhile (true: it served a
+/// request, the wait starts over). Spins briefly, then sleeps on `wake`, which the side making
+/// `done` true and anyone asking bump (Nudge) after their store.
+template <typename Scope, typename Done, typename Serve>
+void AwaitServing(Done&& done, std::atomic<u32>& wake, Serve&& serve) {
+    if (done()) {
+        return;
+    }
+    [[maybe_unused]] Scope scope;
+    for (u32 spins = 0;; ++spins) {
+        if (done()) {
+            return;
+        }
+        if (serve()) {
+            spins = 0;
+            continue;
+        }
+        if (spins < 8192) {
+            RingPause();
+            continue;
+        }
+        // Read `wake` before the last looks: a store and Nudge in between end the wait at once.
+        const u32 seen = wake.load(std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (done() || serve()) {
+            spins = 0;
+            continue;
+        }
+        wake.wait(seen, std::memory_order_seq_cst);
+    }
+}
+
 /// How the stages run: EDEN_NX2_BACK_STAGES (mode: 0 off, 1 on, 2 verify, 3 pass-through),
 /// EDEN_NX2_BACK_CUTS (cut c: B | C; never with 3), EDEN_NX2_STAGE_CHECK=1,
 /// EDEN_NX2_BACK_STAGES_EVERY=n (=2 compares every n-th record). Nx2Stages::Get's source.
@@ -431,16 +475,21 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 /// them. Header-only so the unit tests run it with a handler of their own; nx2_stages.cpp runs it
 /// with the GPU's. What a stage does with a record (Nx2Stages::RecordKind):
 /// - first the register deltas at its start, for the stage's current target (Handler::Apply);
-///   B with cut c passes them on to C, in the next record it sends there;
+///   B with cut c passes them on to C, in the next record it sends there (K11);
 /// - Call / Forward: the thunk, with the payload; Target: Handler::Target (B passes it on);
 ///   CbData: Handler::CbData; ExecA: Handler::ExecA (=3);
 /// - Mark: the last stage stores it (Handler::Mark), B with cut c passes it on (D1);
 /// - Join: B with cut c makes C park first; then the stage acks the producer and waits for its
 ///   release (park).
-/// =2 (lockstep, depth 1): a producer waits after each record until it ran (Handler::Verify ran
-/// then), but for a Join, where the joiner waits for the park ack instead (S8). A stage stops at
-/// a record boundary once asked (Stop): with nothing left after a drain, and at shutdown without
-/// running what it holds.
+/// =2 (lockstep, depth 1): a producer waits after each record until it ran, Handler::Verify
+/// before its end; for a Join the joiner waits for the park ack instead, Verify before the ack
+/// (S8, K8). A stage stops at a record boundary once asked (Stop): with nothing left after a
+/// drain, and at shutdown without running what it holds.
+/// Between B and C (K2; S13, K3): JoinFromB and ParkB ask with flags outside the rings; the one
+/// asked answers at a park point (nx2_stages.h): B at each record boundary of ring 2, its wait
+/// for ring 2, and each of its waits on ring 3 (room, the =2 end of a record, C's ack of a Join
+/// it passes on); C at each record boundary of ring 3 (once it ran everything B sent before
+/// asking), its wait for ring 3, and its wait in ParkB. B's wait in JoinFromB is none.
 ///
 /// Handler (nx2_stages.cpp's GpuHandler; the unit tests' fake):
 ///   Scopes: InWait, OutWait, JoinWait, ParkWait (see RingWaitScopes)
@@ -450,11 +499,11 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   void CbData(u8 stage, u64 address, const u32* data, u32 count);
 ///   void ExecA(u64 ring1_position, u64 words);
 ///   void Mark(u8 stage, u64 ring1_position, bool caught_up);
-///   void Verify(u8 stage);                                     =2, after a record
+///   void Verify(u8 stage);                                     =2, every verify_every records
 ///   void BadSequence(u8 stage, u16 expected, u16 seen);        =2 or STAGE_CHECK
 ///   void ThreadStart(u8 stage); void Report(u8 stage);         on the stage's thread
 ///   void Busy(u8 stage, bool busy);                            around a stage's batches
-///   void Wrote(u8 to_stage, size_t bytes); void Parked();      counters
+///   void Wrote(u8 to_stage, size_t bytes); void Parked();      counters (Parked: B for ParkB)
 template <typename Handler, size_t BWords = RingToBWords, size_t CWords = RingToCWords>
 class StagePipeline {
     using Scopes = typename Handler::Scopes;
@@ -484,6 +533,10 @@ public:
     using LinkB = Link<BWords>;
     using LinkC = Link<CWords>;
 
+    /// Most u32 of constant buffer data one CbData record holds (its address and bytes words
+    /// besides, MaxBodyWords; K9).
+    static constexpr u32 MaxCbDataCount = (MaxBodyWords - 2) * 2;
+
     explicit StagePipeline(Handler& handler_) : handler{handler_} {}
 
     StagePipeline(const StagePipeline&) = delete;
@@ -503,12 +556,18 @@ public:
         b = {};
         c = {};
         passed.clear();
+        a_in_join = false;
         park_request.store(0, std::memory_order_relaxed);
         park_ack.store(0, std::memory_order_relaxed);
         park_release.store(0, std::memory_order_relaxed);
         park_served = 0;
         park_count = 0;
-        b_join_pending.store(false, std::memory_order_relaxed);
+        join_request.store(0, std::memory_order_relaxed);
+        join_ack.store(0, std::memory_order_relaxed);
+        join_release.store(0, std::memory_order_relaxed);
+        join_target.store(0, std::memory_order_relaxed);
+        join_served = 0;
+        join_count = 0;
         stop_b.store(false, std::memory_order_relaxed);
         stop_c.store(false, std::memory_order_relaxed);
         b_running.store(true, std::memory_order_seq_cst);
@@ -549,8 +608,12 @@ public:
     // Ring 2's producer (A): a record of `kind` with `body_words` words after the deltas A's
     // capture holds (Handler::PendingDeltas, taken into it); returns where its body goes.
     // EndB commits it (=2: and waits for B to run it, but for a Join). PublishB publishes.
+    // Never inside a join (K4: the stages are parked, a record would run after it).
 
     u64* BeginB(RecordKind kind, u32 body_words, u32 flags = 0) {
+        if (a_in_join) [[unlikely]] {
+            Detail::RecordInJoin();
+        }
         CaptureDeltas deltas{handler};
         return Begin(*to_b, deltas, kind, body_words, flags, NoInterrupt{});
     }
@@ -561,8 +624,8 @@ public:
         to_b->ring.Publish();
     }
 
-    // Ring 3's producer (B, cut c): the same, with the deltas B passes on to C. While B waits
-    // there (room, =2) it parks for C if C asks (ParkB): B writes to ring 3 holding no cache lock.
+    // Ring 3's producer (B, cut c): the same, with the deltas B passes on to C. Its waits there
+    // (room, =2) are park points: B parks for C meanwhile if C asks (ParkB, K3).
 
     u64* BeginC(RecordKind kind, u32 body_words, u32 flags = 0) {
         PassedDeltas deltas{passed};
@@ -576,122 +639,126 @@ public:
     }
 
     /// A: constant buffer data for ring 2 (CbData: [address][bytes][data]). Joins the CbData
-    /// record just before when it is the last one written, not published yet and ends at
-    /// `address`, and A's capture holds at most one delta word: the const_buffer.offset A notes
-    /// after each write (T2), which B then applies after the joined data, not between (S5/3). A
-    /// joined record is one write for StageCbWrite (one IsLightSameWrite, SAME_SKIP decision).
+    /// record just before when it is the last one written, not published yet, ends at `address`,
+    /// A's capture holds no delta (K6: a register written between the two writes applies before
+    /// the second) and the sum fits one record (MaxBodyWords); a joined record is one write for
+    /// StageCbWrite (one IsLightSameWrite, SAME_SKIP decision). Else new records, as many as
+    /// `count` needs (MaxCbDataCount each, in order; K9).
     void PostCbData(u64 address, const u32* data, u32 count) {
         LinkB& link = *to_b;
-        const u32 bytes = count * static_cast<u32>(sizeof(u32));
         if (link.last_kind == RecordKind::CbData && link.cb_end == address &&
-            !link.ring.Published(link.last_start) && handler.PendingDeltas() <= 1) {
+            !link.ring.Published(link.last_start) && handler.PendingDeltas() == 0) {
             u64* const record = link.ring.At(link.last_start);
             const u64 header = record[0];
             const u32 delta_words = HeaderDeltaWords(header);
             u64* const body = record + 1 + delta_words;
             const u32 old_bytes = static_cast<u32>(body[1]);
-            const u32 data_words = (old_bytes + bytes + 7) / 8;
-            const u32 grow = data_words - (old_bytes + 7) / 8;
-            if (HeaderWords(header) + grow <= MaxRecordWords &&
-                link.ring.FitsAfter(link.last_start, grow)) {
+            const u64 bytes = u64{count} * sizeof(u32);
+            const u64 data_words = (old_bytes + bytes + 7) / 8;
+            const u64 grow = data_words - (old_bytes + 7) / 8;
+            if (2 + data_words <= MaxBodyWords && link.ring.FitsAfter(link.last_start, grow)) {
+                const u32 words = HeaderWords(header) + static_cast<u32>(grow);
                 if (grow != 0) {
                     body[1 + data_words] = 0;
                 }
                 std::memcpy(reinterpret_cast<u8*>(body + 2) + old_bytes, data, bytes);
                 body[1] = old_bytes + bytes;
-                record[0] = MakeHeader(RecordKind::CbData, HeaderWords(header) + grow, delta_words,
-                                       HeaderSeq(header), HeaderFlags(header));
+                record[0] = MakeHeader(RecordKind::CbData, words, delta_words, HeaderSeq(header),
+                                       HeaderFlags(header));
                 link.cb_end = address + bytes;
                 link.ring.Commit(grow);
-                handler.Wrote(StageIdB, size_t{grow} * sizeof(u64));
+                handler.Wrote(StageIdB, grow * sizeof(u64));
                 return;
             }
         }
-        const u32 data_words = (bytes + 7) / 8;
-        u64* const body = BeginB(RecordKind::CbData, 2 + data_words);
-        body[0] = address;
-        body[1] = bytes;
-        if (data_words != 0) {
-            body[1 + data_words] = 0;
-        }
-        std::memcpy(body + 2, data, bytes);
-        link.cb_end = address + bytes;
-        EndB();
+        do {
+            const u32 part = (std::min)(count, MaxCbDataCount);
+            const u32 bytes = part * static_cast<u32>(sizeof(u32));
+            const u32 data_words = (bytes + 7) / 8;
+            u64* const body = BeginB(RecordKind::CbData, 2 + data_words);
+            body[0] = address;
+            body[1] = bytes;
+            if (data_words != 0) {
+                body[1 + data_words] = 0;
+            }
+            std::memcpy(body + 2, data, bytes);
+            link.cb_end = address + bytes;
+            EndB();
+            address += bytes;
+            data += part;
+            count -= part;
+        } while (count != 0);
     }
 
     /// A: B (and C) run everything sent before and park; returns the join to end with JoinAEnd
-    /// once A's work is done.
+    /// once A's work is done. Inside a join (nested, K4) it sends nothing and returns 0: the
+    /// stages are parked already.
     u32 JoinABegin() {
+        if (a_in_join) {
+            return 0;
+        }
         LinkB& link = *to_b;
         const u32 id = ++link.joins;
         static_cast<void>(BeginB(RecordKind::Join, 0));
         EndB();
         link.ring.Publish();
         AwaitValue<typename Scopes::JoinWait>(link.ack, id);
+        a_in_join = true;
         return id;
     }
     void JoinAEnd(u32 id) {
+        if (id == 0) {
+            return;
+        }
+        a_in_join = false;
         Signal(to_b->release, id);
         to_b->ring.PublishSoon();
     }
 
-    /// B (cut c): C runs everything B sent before and parks; ends with JoinBEnd. While B waits,
-    /// a C waiting for B to park (ParkB) runs up to this join first (S13).
-    u32 JoinBBegin() {
+    /// B (cut c): C runs everything B sent before and parks; `op` runs on B; C goes on. The
+    /// deltas B has not passed on yet go to C first (a record of their own), so C's replica is
+    /// where B's is. A flag, not a record (K3): C answers at its next park point past what B
+    /// sent, or in its ParkB wait where it stands (S13: B's join first; that ParkB waits on).
+    /// This wait is no park point. Without cut c `op` runs at once.
+    template <typename Op>
+    void JoinFromB(Op&& op) {
+        if (!to_c) {
+            op();
+            return;
+        }
         LinkC& link = *to_c;
-        const u32 id = ++link.joins;
-        static_cast<void>(BeginC(RecordKind::Join, 0));
-        EndC();
+        if (!passed.empty()) {
+            FlushPassed();
+        }
         link.ring.Publish();
-        b_join_pending.store(true, std::memory_order_seq_cst);
-        AwaitValue<typename Scopes::JoinWait>(link.ack, id);
-        b_join_pending.store(false, std::memory_order_relaxed);
-        return id;
-    }
-    void JoinBEnd(u32 id) {
-        Signal(to_c->release, id);
-        to_c->ring.PublishSoon();
+        const u32 id = ++join_count;
+        join_target.store(link.ring.WritePosition(), std::memory_order_relaxed);
+        join_request.store(id, std::memory_order_seq_cst);
+        // C may sleep waiting for ring 3's records or in ParkB.
+        link.ring.Wake();
+        Nudge(c_wake);
+        AwaitValue<typename Scopes::JoinWait>(join_ack, id);
+        op();
+        Signal(join_release, id);
+        link.ring.PublishSoon();
     }
 
-    /// C (cut c): B stops at a record boundary (or where it waits for ring 3) and parks; `op` runs
-    /// on C; B goes on. If B waits for C to park first (a join from B, or one of A's passing
-    /// through), C runs its records up to that join and parks for it, then asks again (S13). The
-    /// record running ParkB stays put meanwhile (its room is not handed back); marks met on the
-    /// way are stored once it ends.
+    /// C (cut c): B parks at its next park point; `op` runs on C; B goes on. While C waits it
+    /// answers B's JoinFromB (S13: a join B asked first wins; C parks for it, then waits on, its
+    /// request standing). Without cut c, or once B stopped, `op` runs at once.
     template <typename Op>
     void ParkB(Op&& op) {
-        const u32 id = ++park_count;
-        RequestPark(id);
-        for (;;) {
-            bool join_first = false;
-            {
-                [[maybe_unused]] typename Scopes::ParkWait scope;
-                for (u32 spins = 0;; ++spins) {
-                    if (park_ack.load(std::memory_order_acquire) == id) {
-                        break;
-                    }
-                    if (!b_running.load(std::memory_order_seq_cst)) {
-                        // B stopped: nothing runs beside C.
-                        op();
-                        return;
-                    }
-                    if (b_join_pending.load(std::memory_order_seq_cst)) {
-                        join_first = true;
-                        break;
-                    }
-                    if (spins < 8192) {
-                        RingPause();
-                    } else {
-                        std::this_thread::yield();
-                    }
-                }
-            }
-            if (!join_first) {
-                break;
-            }
-            RunCUntilJoin();
-            RequestPark(id);
+        if (!to_c) {
+            op();
+            return;
         }
+        const u32 id = ++park_count;
+        park_request.store(id, std::memory_order_seq_cst);
+        // B may sleep waiting for ring 2's records, ring 3's room or C's ack of a join.
+        to_b->ring.Wake();
+        to_c->ring.WakeProducer();
+        Nudge(b_wake);
+        AwaitParkAck(id);
         op();
         Signal(park_release, id);
     }
@@ -702,15 +769,8 @@ private:
     struct Consumer {
         u64 read{};
         u64 available{};
-        /// Records running: more than one while C runs records inside one (ParkB, S13).
-        u32 depth{};
-        /// Where the outermost record running starts: no room is handed back past it.
-        u64 hold{};
         u32 joins_served{};
         u32 verify_count{};
-        bool mark_held{};
-        bool mark_caught_up{};
-        u64 mark_position{};
     };
 
     struct CaptureDeltas {
@@ -732,7 +792,7 @@ private:
             words.clear();
         }
     };
-    /// B waiting for ring 3 parks for C meanwhile (C waiting for that would never make room).
+    /// B's waits on ring 3 are park points (K3): C waiting in ParkB would never make room.
     struct ServeParkInterrupt {
         StagePipeline* pipeline;
         bool operator()() const {
@@ -743,10 +803,6 @@ private:
             return false;
         }
     };
-
-    /// Passed deltas at most before they go in a record of their own (each record from A holds
-    /// at most one per register, 0xE00): they always fit one header (MaxDeltaWords).
-    static constexpr size_t MaxPassed = 0xC000;
 
     static void NopThunk(const u64*, u32) {}
 
@@ -776,7 +832,7 @@ private:
     }
 
     [[nodiscard]] bool ParkRequested() const {
-        return park_request.load(std::memory_order_relaxed) != park_served;
+        return park_request.load(std::memory_order_acquire) != park_served;
     }
 
     /// B: parks for C's request (ParkB) until C released it.
@@ -785,22 +841,64 @@ private:
         park_served = id;
         handler.Parked();
         Signal(park_ack, id);
+        Nudge(c_wake);
         AwaitValue<typename Scopes::ParkWait>(park_release, id);
     }
 
-    void RequestPark(u32 id) {
-        park_request.store(id, std::memory_order_seq_cst);
-        // B may sleep waiting for ring 2's records or for ring 3's room.
-        to_b->ring.Wake();
-        to_c->ring.WakeProducer();
+    [[nodiscard]] bool JoinRequested() const {
+        return join_request.load(std::memory_order_acquire) != join_served;
+    }
+    /// C at a record boundary or its wait for ring 3: B asked, and C ran everything B sent before.
+    [[nodiscard]] bool JoinReached(u64 read) const {
+        return JoinRequested() && read >= join_target.load(std::memory_order_relaxed);
     }
 
+    /// C: parks for B's JoinFromB until B released it.
+    void ServeJoin() {
+        const u32 id = join_request.load(std::memory_order_acquire);
+        join_served = id;
+        Signal(join_ack, id);
+        AwaitValue<typename Scopes::ParkWait>(join_release, id);
+    }
+
+    /// C in ParkB: waits for B's ack, answering B's JoinFromB meanwhile (a park point). Ends
+    /// too once B stopped (RunB acked what it saw): nothing runs beside C any more.
+    void AwaitParkAck(u32 id) {
+        AwaitServing<typename Scopes::ParkWait>(
+            [this, id] {
+                return park_ack.load(std::memory_order_acquire) == id ||
+                       !b_running.load(std::memory_order_seq_cst);
+            },
+            c_wake,
+            [this] {
+                if (JoinRequested()) {
+                    ServeJoin();
+                    return true;
+                }
+                return false;
+            });
+    }
+
+    /// B: the deltas it ran that C has not got, at most one header's (MaxDeltaWords) before they
+    /// go in a record of their own; each record from A holds at most that many.
     void PassDeltas(const u64* words, u32 count) {
+        if (passed.size() + count > MaxDeltaWords) {
+            FlushPassed();
+        }
         passed.insert(passed.end(), words, words + count);
-        if (passed.size() > MaxPassed) {
-            u64* const body = BeginC(RecordKind::Call, 1);
-            body[0] = reinterpret_cast<u64>(&NopThunk);
-            EndC();
+    }
+
+    void FlushPassed() {
+        u64* const body = BeginC(RecordKind::Call, 1);
+        body[0] = reinterpret_cast<u64>(&NopThunk);
+        EndC();
+    }
+
+    /// =2: Handler::Verify every verify_every records, Joins included (K8).
+    void MaybeVerify(u8 stage, Consumer& self) {
+        if (++self.verify_count >= options.verify_every) {
+            self.verify_count = 0;
+            handler.Verify(stage);
         }
     }
 
@@ -818,17 +916,14 @@ private:
         }
         const u32 words = HeaderWords(header);
         const u32 delta_words = HeaderDeltaWords(header);
-        // Moved on first: records run inside this one (C in ParkB) go on from the next.
         self.read = start + 1 + words;
         if (options.mode == 2 || options.check) {
+            // Every record, in order: the 16 bits compared for equality (depth 1, K5).
             const u16 expected = ++in.seen_seq;
             if (HeaderSeq(header) != expected) [[unlikely]] {
                 handler.BadSequence(stage, expected, HeaderSeq(header));
                 in.seen_seq = HeaderSeq(header);
             }
-        }
-        if (self.depth++ == 0) {
-            self.hold = start;
         }
         if (delta_words != 0) {
             handler.Apply(stage, record + 1, delta_words);
@@ -864,7 +959,7 @@ private:
         case RecordKind::ExecA:
             handler.ExecA(body[0], body[1]);
             break;
-        case RecordKind::Mark: {
+        case RecordKind::Mark:
             if constexpr (IsB) {
                 if (to_c) {
                     u64* const out = BeginC(RecordKind::Mark, 1, HeaderFlags(header));
@@ -873,43 +968,33 @@ private:
                     break;
                 }
             }
-            const bool caught_up = (HeaderFlags(header) & MarkCaughtUp) != 0;
-            if (self.depth > 1) {
-                // Inside a record still running (C in ParkB): ring 1 is not run up to here yet.
-                self.mark_held = true;
-                self.mark_position = body[0];
-                self.mark_caught_up = caught_up;
-            } else {
-                handler.Mark(stage, body[0], caught_up);
-            }
+            handler.Mark(stage, body[0], (HeaderFlags(header) & MarkCaughtUp) != 0);
             break;
-        }
         case RecordKind::Join:
             Park<IsB>(in, self);
             break;
         default:
             break;
         }
-        --self.depth;
         if (options.mode == 2) {
             // Lockstep: the producer waits for this release, so the primaries are where this
-            // record left them (not after a join: its producer went on once released).
-            if (kind != RecordKind::Join && ++self.verify_count >= options.verify_every) {
-                self.verify_count = 0;
-                handler.Verify(stage);
+            // record left them (a Join verified before its ack, Park).
+            if (kind != RecordKind::Join) {
+                MaybeVerify(stage, self);
             }
-            in.ring.Release(self.depth == 0 ? self.read : self.hold);
-        }
-        if (self.depth == 0 && self.mark_held) {
-            self.mark_held = false;
-            handler.Mark(stage, self.mark_position, self.mark_caught_up);
+            in.ring.Release(self.read);
         }
     }
 
-    /// A Join record: B with cut c makes C park at the same point first; then ack, wait.
+    /// A Join record: =2 verifies first (the deltas applied, the joiner waiting; K8); B with
+    /// cut c makes C park at the same point; then ack, wait.
     template <bool IsB, typename L>
     void Park(L& in, Consumer& self) {
+        constexpr u8 stage = IsB ? StageIdB : StageIdC;
         const u32 id = ++in.joins_seen;
+        if (options.mode == 2) {
+            MaybeVerify(stage, self);
+        }
         [[maybe_unused]] u32 c_id = 0;
         if constexpr (IsB) {
             if (to_c) {
@@ -918,12 +1003,16 @@ private:
                 static_cast<void>(BeginC(RecordKind::Join, 0));
                 EndC();
                 out.ring.Publish();
-                b_join_pending.store(true, std::memory_order_seq_cst);
-                AwaitValue<typename Scopes::JoinWait>(out.ack, c_id);
-                b_join_pending.store(false, std::memory_order_relaxed);
+                // A park point (K3): C may be in ParkB inside a record before this Join.
+                AwaitServing<typename Scopes::JoinWait>(
+                    [&out, c_id] { return out.ack.load(std::memory_order_acquire) == c_id; },
+                    b_wake, ServeParkInterrupt{this});
             }
         }
         Signal(in.ack, id);
+        if constexpr (!IsB) {
+            Nudge(b_wake);
+        }
         AwaitValue<typename Scopes::ParkWait>(in.release, id);
         if constexpr (IsB) {
             if (to_c) {
@@ -932,6 +1021,24 @@ private:
             }
         }
         ++self.joins_served;
+    }
+
+    /// The other stage's request this one answers at a park point: B parks for C's ParkB, C for
+    /// B's JoinFromB once it ran what B sent before. Whether it served one.
+    template <bool IsB>
+    bool ServeRequest(const Consumer& self) {
+        if constexpr (IsB) {
+            if (to_c && ParkRequested()) {
+                ServePark();
+                return true;
+            }
+        } else {
+            if (JoinReached(self.read)) {
+                ServeJoin();
+                return true;
+            }
+        }
+        return false;
     }
 
     /// The loop of B and C: batches of the records published, room handed back every 4096 words
@@ -944,17 +1051,18 @@ private:
                 if (to_c && ParkRequested()) {
                     return true;
                 }
+            } else {
+                if (JoinReached(self.read)) {
+                    return true;
+                }
             }
             return stop.load(std::memory_order_relaxed);
         };
         for (;;) {
             handler.Report(stage);
             self.available = in.ring.WaitForWork(self.read, stopping);
-            if constexpr (IsB) {
-                if (to_c && ParkRequested()) {
-                    ServePark();
-                    continue;
-                }
+            if (ServeRequest<IsB>(self)) {
+                continue;
             }
             if (stop.load(std::memory_order_relaxed)) {
                 return;
@@ -966,11 +1074,7 @@ private:
             u64 handed = self.read;
             while (self.read != self.available) {
                 Step<IsB>(in, self);
-                if constexpr (IsB) {
-                    if (to_c && ParkRequested()) {
-                        ServePark();
-                    }
-                }
+                ServeRequest<IsB>(self);
                 if (stop.load(std::memory_order_relaxed)) [[unlikely]] {
                     break;
                 }
@@ -995,29 +1099,14 @@ private:
             park_served = id;
             Signal(park_ack, id);
         }
+        if (to_c) {
+            Nudge(c_wake);
+        }
     }
 
     void RunC() {
         handler.ThreadStart(StageIdC);
         Loop<false>(*to_c, c, stop_c);
-    }
-
-    /// C, inside a record waiting for B to park: runs the next records up to B's join (already
-    /// published, b_join_pending) and parks there.
-    void RunCUntilJoin() {
-        LinkC& in = *to_c;
-        const u32 served = c.joins_served;
-        while (c.joins_served == served) {
-            if (c.read == c.available) {
-                c.available = in.ring.Available();
-                if (c.read == c.available) {
-                    RingPause();
-                    continue;
-                }
-            }
-            Step<false>(in, c);
-        }
-        in.ring.Release(c.hold);
     }
 
     Handler& handler;
@@ -1029,6 +1118,8 @@ private:
     Consumer c;
     /// B: the deltas it ran that C has not got yet (cut c).
     std::vector<u64> passed;
+    /// A: inside JoinABegin / JoinAEnd.
+    bool a_in_join{};
 
     // ParkB: C asks (park_request), B acks once parked, C releases.
     alignas(64) std::atomic<u32> park_request{};
@@ -1036,8 +1127,16 @@ private:
     alignas(64) std::atomic<u32> park_release{};
     u32 park_served{}; ///< B: the last request it served
     u32 park_count{};  ///< C: requests made
-    /// B wrote a Join to ring 3 and waits for C to park there (its JoinFromB, or A's join).
-    alignas(64) std::atomic<bool> b_join_pending{};
+    // JoinFromB: B asks (join_request, for ring 3 up to join_target), C acks parked, B releases.
+    alignas(64) std::atomic<u32> join_request{};
+    std::atomic<u64> join_target{};
+    alignas(64) std::atomic<u32> join_ack{};
+    alignas(64) std::atomic<u32> join_release{};
+    u32 join_served{}; ///< C: the last request it served
+    u32 join_count{};  ///< B: requests made
+    /// Where B sleeps waiting for C's ack of a join it passes on, and C in ParkB (AwaitServing).
+    alignas(64) std::atomic<u32> b_wake{};
+    alignas(64) std::atomic<u32> c_wake{};
     std::atomic<bool> b_running{};
     alignas(64) std::atomic<bool> stop_b{};
     std::atomic<bool> stop_c{};
