@@ -506,6 +506,10 @@ private:
     /// Cut c, C: the handles of the last ConfigureTextures (LastHandles).
     std::vector<u32> last_handles;
 
+    /// EDEN_NX2_DESC_HULL: descriptor_words in runs of one slot (CheckDescriptorWords, built at
+    /// its first call).
+    mutable std::vector<VideoCommon::DescriptorWordRun> descriptor_word_runs;
+
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};

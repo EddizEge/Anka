@@ -72,6 +72,7 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
+std::atomic<u32> g_nx2_session{};
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {

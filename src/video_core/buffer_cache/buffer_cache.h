@@ -32,6 +32,11 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
+    // EDEN_NX2_GPU_WRITTEN_FILTER: read once, here (after the switches file is loaded).
+    const int written_filter = Nx2GpuWrittenFilter();
+    gpu_modified_ranges.SetMode(written_filter);
+    uncommitted_gpu_modified_ranges.SetMode(written_filter);
+    cpu_read_ranges.SetMode(written_filter);
     inline_buffer_id = NULL_BUFFER_ID;
 #ifdef YUZU_LEGACY
     immediately_free = (Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive);
@@ -149,6 +154,11 @@ void BufferCache<P>::TickFrame() {
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
+    }
+    // EDEN_NX2_GPU_WRITTEN_FILTER: the page summary only grows between subtractions that cover
+    // whole pages; make it exact again once it lets many queries through to nothing.
+    if (gpu_modified_ranges.WantsRebuild()) {
+        gpu_modified_ranges.Rebuild();
     }
     ++frame_tick;
     delayed_destruction_ring.Tick();
@@ -410,6 +420,35 @@ template <class P>
 void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr,
                                                u32 size) {
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (const int skip = Nx2UboBindSkip(); skip != 0) {
+        static u64 binds{};
+        static u64 kept{};
+        if ((++binds & ((u64{1} << 22) - 1)) == 0) {
+            LOG_INFO(HW_GPU, "Uniform buffer binds: {} of {} to the binding already resolved",
+                     kept, binds);
+        }
+        if (!device_addr) {
+            channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+            return;
+        }
+        // Kept only where UpdateUniformBuffers' FindBuffer would find that buffer: page_table
+        // still names it (live, registered there) and it holds the range; it may wait with the
+        // accurate GPU fence, so not then. Not with persistent bindings (OpenGL), which
+        // UpdateUniformBuffers marks dirty for the bind.
+        if constexpr (!HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+            const Binding& current = channel_state->uniform_buffers[stage][index];
+            if (current.device_addr == *device_addr && current.size == size &&
+                current.buffer_id && current.buffer_id != NULL_BUFFER_ID &&
+                page_table[*device_addr >> CACHING_PAGEBITS] == current.buffer_id &&
+                slot_buffers[current.buffer_id].IsInBounds(*device_addr, size) &&
+                !Settings::IsGPUFenceBehaviorAccurate()) {
+                ++kept;
+                if (skip != 2) {
+                    return;
+                }
+            }
+        }
+    }
     const Binding binding{
         .device_addr = *device_addr,
         .size = size,
@@ -524,6 +563,7 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
     }
     channel_state->enabled_storage_buffers[stage] = 0;
     channel_state->written_storage_buffers[stage] = 0;
+    channel_state->storage_resolved[stage].valid = false;
 }
 
 template <class P>
@@ -544,6 +584,7 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     }
     channel_state->enabled_storage_buffers[stage] |= 1U << ssbo_index;
     channel_state->written_storage_buffers[stage] |= (is_written ? 1U : 0U) << ssbo_index;
+    channel_state->storage_resolved[stage].valid = false;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_graphics_storage_buffers;
@@ -705,7 +746,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     boost::container::small_vector<std::pair<BufferCopy, BufferId>, 16> downloads;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
-    for (const Common::RangeSet<DAddr>& range_set : committed_gpu_modified_ranges) {
+    for (const auto& range_set : committed_gpu_modified_ranges) {
         range_set.ForEach([&](DAddr interval_lower, DAddr interval_upper) {
             const std::size_t size = interval_upper - interval_lower;
             const DAddr device_addr = interval_lower;
@@ -827,6 +868,25 @@ template <class P>
 bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).
+    if (gpu_modified_ranges.Mode() != 0) {
+        const auto& stats = gpu_modified_ranges.GetStats();
+        if ((stats.queries & ((u64{1} << 20) - 1)) == 0 && stats.queries != 0) {
+            LOG_INFO(HW_GPU,
+                     "GPU-written ranges: {} ranges; {} queries, {} answered by the summary, {} "
+                     "let through to nothing; {} adds, {} subtracts ({} answered by the summary); "
+                     "{} disagreements",
+                     gpu_modified_ranges.Count(), stats.queries, stats.query_misses,
+                     stats.false_positives, stats.adds, stats.subtracts, stats.subtract_misses,
+                     stats.mismatches);
+        }
+        if (stats.mismatches != 0) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                LOG_ERROR(HW_GPU, "EDEN_NX2_GPU_WRITTEN_FILTER: the summary missed a range");
+            }
+        }
+    }
     return gpu_modified_ranges.Intersects(addr, size);
 }
 
@@ -1040,11 +1100,14 @@ void BufferCache<P>::BindHostVertexBuffers() {
             // write that was made (not skipped) marks its page so at the next flush, untracking
             // it, and CPU writes there then reach neither the tracker nor the light epoch.
             // Otherwise the stream is synchronized as below, as before.
-            if (plain_light_draw && !flags[Dirty::VertexBuffer0 + index]) {
+            // EDEN_NX2_UNIFORM_SYNC_SKIP: a uniform light draw too; it follows the same anchor
+            // chain in the same frame and epoch, and its constant buffer writes mark their pages
+            // at FlushCaching like any other (so UnsetSince fails where they landed).
+            if ((plain_light_draw || uniform_light_draw) && !flags[Dirty::VertexBuffer0 + index]) {
                 const Binding& clean = v_buffer[index];
                 if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
                                               vertex_synced_epoch[index])) {
-                    if (Nx2LightSyncSkip() != 2) {
+                    if ((uniform_light_draw ? Nx2UniformSyncSkip() : Nx2LightSyncSkip()) != 2) {
                         ++sync_skipped;
                     } else {
                         ++sync_would_skip;
@@ -1053,8 +1116,9 @@ void BufferCache<P>::BindHostVertexBuffers() {
                             static u32 reported{};
                             if (reported++ < 16) {
                                 LOG_ERROR(HW_GPU,
-                                          "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain "
-                                          "light draw uploaded",
+                                          "{}: clean stream {} of a light draw uploaded",
+                                          uniform_light_draw ? "EDEN_NX2_UNIFORM_SYNC_SKIP"
+                                                             : "EDEN_NX2_LIGHT_SYNC_SKIP",
                                           index);
                             }
                         }
@@ -1343,6 +1407,22 @@ void BufferCache<P>::ResolveMultiRangeStorage(Binding& binding, bool is_written,
         }
         if (is_written && !runtime.PrefersSparseSources()) {
             return;
+        }
+        // EDEN_NX2_SSBO_FAST: within one 4 KiB page the range is one GPU page's, mapped to one
+        // device page: one segment or none, for which QueryMultiRange returns null (its lookup
+        // and, for a new range, the change count that drops every remembered answer are left).
+        if (const int fast = Nx2SsboFast();
+            fast != 0 && (binding.gpu_addr >> 12) == ((binding.gpu_addr + binding.size - 1) >> 12)) {
+            if (fast == 2 &&
+                virtual_ranges.QueryMultiRange(*gpu_memory, binding.gpu_addr, binding.size)) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU, "EDEN_NX2_SSBO_FAST: {:#x}+{:#x} has several segments",
+                              binding.gpu_addr, binding.size);
+                }
+            } else {
+                return;
+            }
         }
         // Null unless the range has two or more segments (EDEN_NX2_SSBO_MEMO remembers it).
         const VirtualSegments* found =
@@ -1657,11 +1737,17 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
-            // As DeleteBuffer: memo entries naming this id are stale from here on.
-            if (inline_buffer_id.Value() < vertex_memo_generations.size()) {
-                ++vertex_memo_generations[inline_buffer_id.Value()];
+            if (Nx2InlineFix()) {
+                // DeleteBuffer drops it from page_table (a later CreateBuffer would join a
+                // freed slot found there) and the LRU list, and keeps it until the GPU is done.
+                DeleteBuffer(inline_buffer_id, true);
+            } else {
+                // As DeleteBuffer: memo entries naming this id are stale from here on.
+                if (inline_buffer_id.Value() < vertex_memo_generations.size()) {
+                    ++vertex_memo_generations[inline_buffer_id.Value()];
+                }
+                slot_buffers.erase(inline_buffer_id);
             }
-            slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         channel_state->index_buffer = Binding{
@@ -1968,6 +2054,29 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
+    // EDEN_NX2_STORAGE_KEEP: a uniform light draw that did not bind storage buffers again
+    // resolves the same bindings as the draw before. page_table is unchanged while
+    // buffer_layout_epoch is (every Register / Unregister bumps it, DeleteBuffer's included), so
+    // FindBuffer would return each binding's buffer again (with the accurate GPU fence it may wait
+    // too: not skipped then); the GPU mappings and address space decide the segments, none then.
+    auto& resolved = channel_state->storage_resolved[stage];
+    const int keep = Nx2StorageKeep();
+    const u64 layout_epoch = buffer_layout_epoch;
+    const u64 map_epoch = gpu_memory->MappingEpoch();
+    const size_t owner = gpu_memory->GetID();
+    const bool unchanged = keep != 0 && resolved.valid && resolved.layout_epoch == layout_epoch &&
+                           resolved.map_epoch == map_epoch && resolved.owner == owner &&
+                           !Settings::IsGPUFenceBehaviorAccurate();
+    if (unchanged && keep != 2) {
+        return;
+    }
+    std::array<BufferId, NUM_STORAGE_BUFFERS> kept_ids{};
+    if (unchanged) {
+        for (u32 index = 0; index < NUM_STORAGE_BUFFERS; ++index) {
+            kept_ids[index] = channel_state->storage_buffers[stage][index].buffer_id;
+        }
+    }
+    bool segmented = false;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         // Resolve buffer
         Binding& binding = channel_state->storage_buffers[stage][index];
@@ -1975,7 +2084,26 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
         binding.buffer_id = buffer_id;
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
         ResolveMultiRangeStorage(binding, is_written, graphics_segments);
+        segmented |= binding.segment_count != 0;
+        if (unchanged && kept_ids[index] != buffer_id) {
+            static u32 reported{};
+            if (reported++ < 16) {
+                LOG_ERROR(HW_GPU,
+                          "EDEN_NX2_STORAGE_KEEP: stage {} storage buffer {} resolved to {} "
+                          "instead of {}",
+                          stage, index, buffer_id.index, kept_ids[index].index);
+            }
+        }
     });
+    // Kept only when resolving changed no layout (a buffer created on the way) and found no
+    // segments (graphics_segments is cleared for every update).
+    resolved = {
+        .layout_epoch = layout_epoch,
+        .map_epoch = map_epoch,
+        .owner = owner,
+        .valid = keep != 0 && !segmented && buffer_layout_epoch == layout_epoch &&
+                 gpu_memory->MappingEpoch() == map_epoch,
+    };
 }
 
 template <class P>
@@ -2323,6 +2451,10 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
         bool memo_missed = false; // Counted only while profiling (EDEN_NX2_GPU_PROFILE)
+        // EDEN_NX2_SYNC_SETS: the range's pages, looked up in sync_sets instead of sync_memo.
+        SyncMemoSets::Set* memo_set = nullptr;
+        u32 first_page{};
+        u32 end_page{};
         if (Nx2SyncMemo() && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
@@ -2330,29 +2462,56 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
                 LOG_INFO(HW_GPU, "Buffer sync memo: {} of {} synchronizations skipped", skipped,
                          syncs);
             }
-            memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
-                              (SYNC_MEMO_SIZE - 1)];
-            // Only the range's own regions: one stamped elsewhere in a joined memo is no change
-            // here.
-            if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
-                memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
-                ++skipped;
-                Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
-                if (g_nx2_sync_skip_mode != 2) {
-                    return true;
+            const int sets_mode = Nx2SyncSets();
+            if (sets_mode != 0 && SyncMemoSets::Pages(device_addr, size, first_page, end_page)) {
+                memo_set = &sync_sets.SetOf(device_addr);
+                const auto query_holds = [&](u64 epoch) {
+                    return memory_tracker.UnsetSince(device_addr, size, epoch);
+                };
+                if (SyncMemoSets::Find(*memo_set, first_page, end_page, query_holds) != nullptr) {
+                    ++skipped;
+                    Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
+                    if (g_nx2_sync_skip_mode != 2 && sets_mode != 2) {
+                        return true;
+                    }
+                    memo_hit = true;
+                } else if (Nx2Profile::Enabled()) {
+                    memo_missed = true;
+                    static constexpr std::array kinds{
+                        Nx2Profile::Counter::SyncMemoMissEmpty,
+                        Nx2Profile::Counter::SyncMemoMissStamped,
+                        Nx2Profile::Counter::SyncMemoMissPartial,
+                        Nx2Profile::Counter::SyncMemoMissOther,
+                    };
+                    Nx2Profile::Add(kinds[SyncMemoSets::MissKind(*memo_set, first_page, end_page)],
+                                    1);
                 }
-                memo_hit = true;
-            } else if (Nx2Profile::Enabled()) {
-                // Why: no range yet, another range in the slot (a collision), one overlapping or
-                // touching this (not covering it), or this range's regions stamped since.
-                memo_missed = true;
-                Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
-                                : memo->begin <= device_addr && range_end <= memo->end
-                                    ? Nx2Profile::Counter::SyncMemoMissStamped
-                                : memo->begin <= range_end && device_addr <= memo->end
-                                    ? Nx2Profile::Counter::SyncMemoMissPartial
-                                    : Nx2Profile::Counter::SyncMemoMissOther,
-                                1);
+            } else if (sets_mode == 0) {
+                memo = &sync_memo[((device_addr >> CACHING_PAGEBITS) ^ (device_addr >> 26)) &
+                                  (SYNC_MEMO_SIZE - 1)];
+                // Only the range's own regions: one stamped elsewhere in a joined memo is no
+                // change here.
+                if (memo->epoch != 0 && memo->begin <= device_addr && range_end <= memo->end &&
+                    memory_tracker.UnsetSince(device_addr, size, memo->epoch)) {
+                    ++skipped;
+                    Nx2Profile::Add(Nx2Profile::Counter::SyncMemoHits, 1);
+                    if (g_nx2_sync_skip_mode != 2) {
+                        return true;
+                    }
+                    memo_hit = true;
+                } else if (Nx2Profile::Enabled()) {
+                    // Why: no range yet, another range in the slot (a collision), one
+                    // overlapping or touching this (not covering it), or this range's regions
+                    // stamped since.
+                    memo_missed = true;
+                    Nx2Profile::Add(memo->epoch == 0 ? Nx2Profile::Counter::SyncMemoMissEmpty
+                                    : memo->begin <= device_addr && range_end <= memo->end
+                                        ? Nx2Profile::Counter::SyncMemoMissStamped
+                                    : memo->begin <= range_end && device_addr <= memo->end
+                                        ? Nx2Profile::Counter::SyncMemoMissPartial
+                                        : Nx2Profile::Counter::SyncMemoMissOther,
+                                    1);
+                }
             }
         }
         upload_copies.clear();
@@ -2378,6 +2537,14 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             });
             add_upload(upload_start, device_addr_out + range_size);
         });
+        if (memo_set != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
+            // ForEachUploadRange cleared the CPU and untracked bits of every page the range
+            // touches (whole-page masks) and nothing could set one since.
+            SyncMemoSets::Store(*memo_set, first_page, end_page, sync_epoch,
+                                [&](u64 begin, u64 bytes, u64 epoch) {
+                                    return memory_tracker.UnsetSince(begin, bytes, epoch);
+                                });
+        }
         if (memo != nullptr && memory_tracker.CpuSetEpoch() == sync_epoch) {
             // ForEachUploadRange cleared the CPU and untracked bits of every page in the range and
             // nothing could set one since. A remembered range that overlaps or touches it and
@@ -2741,6 +2908,11 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    if (buffer_id == inline_buffer_id && Nx2InlineFix()) {
+        // EDEN_NX2_INLINE_FIX: the collector may take the inline index buffer; made again at its
+        // next use.
+        inline_buffer_id = NULL_BUFFER_ID;
+    }
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }
@@ -2869,9 +3041,37 @@ Binding BufferCache<P>::MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_in
 template <class P>
 Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword, u32 cbuf_index,
                                                bool is_written) const {
+    const int fast = Nx2SsboFast();
+    const auto layout_size = [&]() -> u64 {
+        if (fast == 0) {
+            return gpu_memory->GetMemoryLayoutSize(gpu_addr);
+        }
+        const size_t owner = gpu_memory->GetID();
+        // Read before the lookup: a change meanwhile leaves a run no later call matches.
+        const u64 epoch = gpu_memory->MappingEpoch();
+        u64 run_size{};
+        if (layout_runs.Find(owner, epoch, gpu_addr, run_size)) {
+            if (fast == 2) {
+                const u64 looked_up = gpu_memory->GetMemoryLayoutSize(gpu_addr);
+                if (looked_up != run_size) {
+                    static u32 reported{};
+                    if (reported++ < 16) {
+                        LOG_ERROR(HW_GPU,
+                                  "EDEN_NX2_SSBO_FAST: layout size of {:#x} is {:#x}, the run "
+                                  "gave {:#x}",
+                                  gpu_addr, looked_up, run_size);
+                    }
+                    return looked_up;
+                }
+            }
+            return run_size;
+        }
+        const u64 looked_up = gpu_memory->GetMemoryLayoutSize(gpu_addr);
+        layout_runs.Store(owner, epoch, gpu_addr, looked_up);
+        return looked_up;
+    };
     const auto size = [&]() {
-        const u32 memory_layout_size =
-            static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+        const u32 memory_layout_size = static_cast<u32>(layout_size());
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
@@ -2892,7 +3092,25 @@ Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword
         LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
         return NULL_BINDING;
     }
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    // EDEN_NX2_SSBO_FAST: on the aligned address's 4 KiB page (alignments divide 4 KiB) both
+    // translate through one GPU page, mapped to consecutive device pages: one translation.
+    std::optional<DAddr> device_addr;
+    if (fast != 0 && (aligned_gpu_addr >> 12) == (gpu_addr >> 12)) {
+        device_addr = *aligned_device_addr + (gpu_addr - aligned_gpu_addr);
+        if (fast == 2) {
+            const std::optional<DAddr> translated = gpu_memory->GpuToCpuAddress(gpu_addr);
+            if (translated != device_addr) {
+                static u32 reported{};
+                if (reported++ < 16) {
+                    LOG_ERROR(HW_GPU, "EDEN_NX2_SSBO_FAST: {:#x} translates to {:#x}, not {:#x}",
+                              gpu_addr, translated.value_or(0), *device_addr);
+                }
+                device_addr = translated;
+            }
+        }
+    } else {
+        device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    }
     ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
                cbuf_index);
     // The end address used for size calculation does not need to be aligned

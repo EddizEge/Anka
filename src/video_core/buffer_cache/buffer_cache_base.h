@@ -32,6 +32,7 @@
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/nx2_draw_memo.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
@@ -70,6 +71,61 @@ inline bool Nx2VertexSkip() {
 inline bool Nx2SyncMemo() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SYNC_MEMO") != 0;
+}
+/// EDEN_NX2_SYNC_SETS (with EDEN_NX2_SYNC_MEMO): ranges are remembered as the 4 KiB pages they
+/// left clean, four to a set (SyncMemoSets). =0 the direct-mapped byte ranges as before; =2 still
+/// walks a remembered range and reports any upload found there (as EDEN_NX2_SYNC_SKIP=2).
+inline int Nx2SyncSets() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SYNC_SETS");
+}
+/// EDEN_NX2_SSBO_FAST: a storage buffer binding's layout size from a remembered run of one page
+/// kind (LayoutRunMemo), its device address from the aligned one's when both lie on one 4 KiB
+/// page, and no multi-range query for a range within one 4 KiB page (one segment at most). =0
+/// as before; =2 also does each the old way and logs any difference ("EDEN_NX2_SSBO_FAST: ...").
+inline int Nx2SsboFast() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
+}
+/// EDEN_NX2_GPU_WRITTEN_FILTER: the GPU-written ranges and the download range sets answer queries
+/// far from their ranges from a summary instead of their trees (SummarizedRangeSet: hull, and for
+/// gpu_modified_ranges a 4 KiB page bitmap). =0 as before; =2 also asks the trees and counts any
+/// disagreement (the "GPU-written ranges" line, every 2^20 queries, shows it).
+inline int Nx2GpuWrittenFilter() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_GPU_WRITTEN_FILTER");
+}
+/// EDEN_NX2_UNIFORM_SYNC_SKIP: EDEN_NX2_LIGHT_SYNC_SKIP for the uniform way's light draws too
+/// (GraphicsPipeline::ConfigureUniforms; same anchor chain, frame and epoch guard). =0 as before;
+/// =2 synchronizes the streams it would skip and logs any that uploaded.
+inline int Nx2UniformSyncSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_UNIFORM_SYNC_SKIP");
+}
+/// EDEN_NX2_STORAGE_KEEP: UpdateStorageBuffers leaves a stage whose storage bindings are as it
+/// resolved them last (no bind or unbind since, page_table, the GPU mappings and the address space
+/// unchanged, no binding over several segments): FindBuffer would return the same buffers and
+/// ResolveMultiRangeStorage no segments again. =0 as before; =2 resolves anyway and logs a
+/// binding that resolved differently.
+inline int Nx2StorageKeep() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_STORAGE_KEEP");
+}
+/// EDEN_NX2_UBO_BIND_SKIP (elBart0 0015): BindGraphicsUniformBuffer keeps a binding resolved to
+/// the same device address and size whose buffer FindBuffer would return again, instead of
+/// clearing it for UpdateUniformBuffers to find; an unmapped address binds NULL_BINDING. =0 as
+/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds).
+inline int Nx2UboBindSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_UBO_BIND_SKIP");
+}
+/// EDEN_NX2_INLINE_FIX (Duck912 4a6b890171): the inline index buffer, when it grows or the
+/// collector takes it, is deleted as any other buffer (DeleteBuffer: unregistered from page_table
+/// and the LRU list, destroyed after the GPU is done with it). =0 erases its slot as before, which
+/// left page_table entries and an LRU item naming a freed slot and destroyed the buffer at once.
+inline bool Nx2InlineFix() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_INLINE_FIX") != 0;
 }
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
@@ -225,6 +281,15 @@ public:
     u32 uniform_buffer_skip_cache_size = DEFAULT_SKIP_CACHE_SIZE;
 
     bool has_deleted_buffers = false;
+
+    /// EDEN_NX2_STORAGE_KEEP: what each stage's storage bindings were last resolved under.
+    struct StorageResolved {
+        u64 layout_epoch;
+        u64 map_epoch;
+        size_t owner;
+        bool valid;
+    };
+    std::array<StorageResolved, NUM_STAGES> storage_resolved{};
 
     std::array<u32, NUM_STAGES> dirty_uniform_buffers{};
     std::array<u32, NUM_STAGES> fast_bound_uniform_buffers{};
@@ -468,6 +533,8 @@ public:
     /// EDEN_NX2_LIGHT_SYNC_SKIP: set by the rasterizer around a plain light draw's
     /// BindHostGeometryBuffers only.
     bool plain_light_draw = false;
+    /// EDEN_NX2_UNIFORM_SYNC_SKIP: the same, set by GraphicsPipeline::ConfigureUniforms.
+    bool uniform_light_draw = false;
     /// EDEN_NX2_VERTEX_CLEAN=2: streams whose flag UpdateVertexBuffer cleared as disabled.
     u32 vertex_clean_mask = 0;
 
@@ -762,6 +829,8 @@ private:
     };
     static constexpr size_t SYNC_MEMO_SIZE = 2048;
     std::array<SyncMemo, SYNC_MEMO_SIZE> sync_memo{};
+    /// EDEN_NX2_SYNC_SETS: the same, in pages and sets (Nx2SyncSets).
+    SyncMemoSets sync_sets;
 
     /// EDEN_NX2_SSBO_MEMO (BindGraphicsStorageBuffer): bindings StorageBufferBindingAt resolved,
     /// keyed by the two constant buffer words it read (address, then the size when packed), the
@@ -780,9 +849,11 @@ private:
     };
     static constexpr size_t STORAGE_BINDING_MEMO_SIZE = 256;
     std::array<StorageBindingMemo, STORAGE_BINDING_MEMO_SIZE> storage_binding_memo{};
+    /// EDEN_NX2_SSBO_FAST: GetMemoryLayoutSize answers (StorageBufferBindingAt).
+    mutable LayoutRunMemo layout_runs;
 
     MemoryTracker memory_tracker;
-    Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;
+    SummarizedRangeSet<false> uncommitted_gpu_modified_ranges;
 
     /// Whether GPU-written buffer ranges are copied back to guest memory at the next fence;
     /// otherwise only when something flushes them (as upstream yuzu below High GPU accuracy).
@@ -803,14 +874,14 @@ private:
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling() ||
                Tegra::Nx2NeedsBufferDownloads();
     }
-    Common::RangeSet<DAddr> gpu_modified_ranges;
-    std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
+    SummarizedRangeSet<true> gpu_modified_ranges;
+    std::deque<SummarizedRangeSet<false>> committed_gpu_modified_ranges;
     /// Buffer pages the guest CPU reads (NoteCpuRead). Without AsyncBufferDownloads, GPU writes
     /// to them are still copied back at fences: Pokemon Pokopia builds its sky, fog and exposure
     /// constants from values the GPU computes, and drew a black, flickering sky without them.
     /// Copying every GPU-written range back instead (each written native storage binding is an
     /// 8 MiB window) dropped it from 60 to about 42 frames a second.
-    Common::RangeSet<DAddr> cpu_read_ranges;
+    SummarizedRangeSet<false> cpu_read_ranges;
 
     /// Queues the parts of a GPU write to [addr, addr + size) that are copied back at the next
     /// fence.

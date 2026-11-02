@@ -470,7 +470,24 @@ size_t GraphicsPipelineCacheKey::Hash() const noexcept {
 }
 
 bool GraphicsPipelineCacheKey::operator==(const GraphicsPipelineCacheKey& rhs) const noexcept {
-    return std::memcmp(&rhs, this, Size()) == 0;
+    // EDEN_NX2_KEY_CMP (elBart0 0017): the shader hashes as six words first, then the state's
+    // bytes in use; the same bytes as one memcmp of Size() (no padding between them). =0 one
+    // memcmp as before; =2 both, logging a different answer.
+    static std::atomic<s8> mode{-1};
+    const int compare = VideoCommon::ReadNx2Mode(mode, "EDEN_NX2_KEY_CMP");
+    if (compare == 0) {
+        return std::memcmp(&rhs, this, Size()) == 0;
+    }
+    const bool equal = unique_hashes == rhs.unique_hashes &&
+                       std::memcmp(&state, &rhs.state, state.Size()) == 0;
+    if (compare == 2 && equal != (std::memcmp(&rhs, this, Size()) == 0)) {
+        static u32 reported{};
+        if (reported++ < 16) {
+            LOG_ERROR(Render_Vulkan, "EDEN_NX2_KEY_CMP: the comparisons differ");
+        }
+        return !equal;
+    }
+    return equal;
 }
 
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
@@ -1004,7 +1021,17 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
-    if (maxwell3d->GetNativeMacroEngine().native_turing || !use_asynchronous_shaders) {
+    // EDEN_NX2_ASYNC_SKIP=1 (Selevet 8b076b167f; off by default, as what is skipped pops in
+    // later): native (Switch 2) draws wait for their pipeline, and in Donkey Kong Bananza those
+    // waits reached ~3 s in 10 s of new scenery (255 ms at once), the game running slow and then
+    // catching up. With it, with asynchronous shaders on, the draws CanSkipDraw allows are skipped
+    // while the pipeline builds, as for other titles (PrepareDraw finds no pipeline).
+    static const bool async_skip = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_SKIP");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!use_asynchronous_shaders ||
+        (maxwell3d->GetNativeMacroEngine().native_turing && !async_skip)) {
         return pipeline;
     }
     return CanSkipDraw() ? nullptr : pipeline;
