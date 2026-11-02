@@ -403,12 +403,14 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
         buffer_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
         pipeline_cache.SetStageRole(VideoCommon::Nx2Stages::Role::Memory);
         VideoCommon::Nx2Stages::SetStageHooks(&BeginStagesHook, &EndStagesHook, this);
+        VideoCommon::Nx2Stages::SetCbWriteCheck(&CbWriteCheckHook, this);
     }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
     if (split_draws) {
         VideoCommon::Nx2Stages::SetStageHooks(nullptr, nullptr, nullptr);
+        VideoCommon::Nx2Stages::SetCbWriteCheck(nullptr, nullptr);
     }
     scheduler.WaitWorker();
     scheduler.Finish();
@@ -4112,7 +4114,7 @@ void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) 
     const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
     const auto note = [&](GPUVAddr pool, u32 limit) {
         if (pool != 0) {
-            stage_pools.Note(pool, pool + (u64{limit} + 1) * 32, seq, ran);
+            stage_pools.Note(pool, VideoCommon::Nx2Stages::PoolEnd(pool, limit), seq, ran);
         }
     };
     const auto& regs = mb.regs;
@@ -4123,6 +4125,39 @@ void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) 
 bool RasterizerVulkan::WritesPoolsB(GPUVAddr address, u64 size) {
     return stage_pools.Overlaps(address, address + size,
                                 VideoCommon::Nx2Stages::GpuPages().RanSeq());
+}
+
+bool RasterizerVulkan::WritesAnyPoolB(const Tegra::Engines::Maxwell3D& mb, GPUVAddr address,
+                                      u64 size) {
+    using VideoCommon::Nx2Stages::WritesPool;
+    const auto& regs = mb.regs;
+    return WritesPool(regs.tex_header.Address(), regs.tex_header.limit, address, size) ||
+           WritesPool(regs.tex_sampler.Address(),
+                      (std::max)(regs.tex_sampler.limit, regs.tex_header.limit), address, size) ||
+           WritesPoolsB(address, size);
+}
+
+bool RasterizerVulkan::CbWriteCheckHook(void* context, Tegra::Engines::Maxwell3D& replica,
+                                        GPUVAddr address, u64 size) {
+    return static_cast<RasterizerVulkan*>(context)->CbWriteJoinsB(replica, address, size);
+}
+
+bool RasterizerVulkan::CbWriteJoinsB(Tegra::Engines::Maxwell3D& replica, GPUVAddr address,
+                                     u64 size) {
+    // omur-1's constant buffer data path (T9c's check, GpuHandler::CbData): B writes the data to
+    // guest memory itself (Maxwell3D::StageCbWrite). Into a pool C may still read: the write in a
+    // join, as InlineToMemoryB's.
+    if (WritesAnyPoolB(replica, address, size)) {
+        return true;
+    }
+    // Over a payload release C has not written yet (qw-cbdata, T7c review finding 3): C writes it
+    // first. A counter C writes from a later fence is cancelled where the old path cancels it: by
+    // the invalidation at the memory manager's next FlushCaching (InnerInvalidationB, in ring 3's
+    // order).
+    if (stage_query_writes.Size() != 0) [[unlikely]] {
+        GuardQueryWritesB(replica.GetMemoryManager().GpuToCpuAddress(address), size, false);
+    }
+    return false;
 }
 
 void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
@@ -4981,17 +5016,8 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
         // draws B sent before this write (the pools they used: stage_pools; B's current ones).
         // One into them is made in a join: C parked having run those, the old body here, its
         // invalidations in order. Not covered here: images C uploads from guest memory (a
-        // summary of their pages from C), constant buffer data B writes into a pool (the CbData
-        // record: Maxwell3D::StageCbWrite on B, outside the rasterizer).
-        const auto& regs = EngineB().regs;
-        const auto pool_written = [&](GPUVAddr pool, u32 limit) {
-            const GPUVAddr end = pool + (u64{limit} + 1) * 32;
-            return pool != 0 && address < end && pool < address + copy_size;
-        };
-        if (pool_written(regs.tex_header.Address(), regs.tex_header.limit) ||
-            pool_written(regs.tex_sampler.Address(),
-                         (std::max)(regs.tex_sampler.limit, regs.tex_header.limit)) ||
-            WritesPoolsB(address, copy_size)) {
+        // summary of their pages from C). Constant buffer data B writes: CbWriteJoinsB.
+        if (WritesAnyPoolB(EngineB(), address, copy_size)) {
             JoinB([&] { AccelerateInlineToMemory(address, copy_size, memory); });
             return;
         }

@@ -82,6 +82,23 @@ TEST_CASE("Nx2StageSplit: a cached write's texture half goes to C, its buffer ha
     REQUIRE(SplitCaches(CacheType::QueryCache).b == CacheType::None);
 }
 
+TEST_CASE("Nx2StageSplit: a write into a pool C reads", "[video_core]") {
+    // omur-1: B's inline and constant buffer data writes (InlineToMemoryB, CbWriteJoinsB) against
+    // the texture header and sampler pools (limit + 1 entries of 32 bytes).
+    constexpr u64 Pool = 0x40000;
+    REQUIRE(PoolEnd(Pool, 0) == Pool + 32);
+    REQUIRE(PoolEnd(Pool, 15) == Pool + 16 * 32);
+    // The last entry's last word.
+    REQUIRE(WritesPool(Pool, 15, Pool + 16 * 32 - 4, 4));
+    REQUIRE(WritesPool(Pool, 15, Pool - 4, 8));
+    REQUIRE(WritesPool(Pool, 0, Pool - 0x100, 0x200));
+    // Right after it and right before it.
+    REQUIRE(!WritesPool(Pool, 15, Pool + 16 * 32, 4));
+    REQUIRE(!WritesPool(Pool, 15, Pool - 4, 4));
+    // No pool bound.
+    REQUIRE(!WritesPool(0, 15, 0, 0x1000));
+}
+
 TEST_CASE("Nx2StageSplit: a write over a report C has not run waits for it", "[video_core]") {
     // T7c review finding 3: B sends C a payload release to X (seq 5: before the next packet),
     // then writes X itself; C would write the release after B's bytes.

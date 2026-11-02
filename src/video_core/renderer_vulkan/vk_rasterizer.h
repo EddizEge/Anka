@@ -390,6 +390,16 @@ private:
     /// B: whether a write of [address, address + size) hits a pool C may still read for work
     /// B sent (the ones C ran dropped first).
     [[nodiscard]] bool WritesPoolsB(GPUVAddr address, u64 size);
+    /// B: the same, or `mb`'s current pools.
+    [[nodiscard]] bool WritesAnyPoolB(const Tegra::Engines::Maxwell3D& mb, GPUVAddr address,
+                                      u64 size);
+    /// Nx2Stages::SetCbWriteCheck (constructor), B: constant buffer data B writes to guest memory
+    /// (a CbData record) joins where it meets a pool (omur-1); over a release C has not written
+    /// yet, C writes it first (qw-cbdata).
+    static bool CbWriteCheckHook(void* context, Tegra::Engines::Maxwell3D& replica,
+                                 GPUVAddr address, u64 size);
+    [[nodiscard]] bool CbWriteJoinsB(Tegra::Engines::Maxwell3D& replica, GPUVAddr address,
+                                     u64 size);
     /// B, before a draw packet's buffer half: every vertex stream binds again where
     /// GeometryForced says so (nx2_stage_split.h), else only those B's replica has dirty.
     void ForceGeometryB(Tegra::Engines::Maxwell3D& mb);

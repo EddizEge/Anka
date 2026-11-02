@@ -81,6 +81,16 @@ struct CacheHalves {
     return {.c = which & on_c, .b = which & CacheType(~static_cast<u32>(on_c))};
 }
 
+/// The end of a texture header or sampler pool of `limit` + 1 entries (32 bytes each) at `pool`.
+[[nodiscard]] constexpr u64 PoolEnd(u64 pool, u32 limit) noexcept {
+    return pool + (u64{limit} + 1) * 32;
+}
+
+/// Whether a write of [address, address + size) meets that pool (none at address 0).
+[[nodiscard]] constexpr bool WritesPool(u64 pool, u32 limit, u64 address, u64 size) noexcept {
+    return pool != 0 && address < PoolEnd(pool, limit) && pool < address + size;
+}
+
 /// B: address ranges [begin, end) of work it sent C that C may not have run yet, each with the
 /// last seq it goes with (a packet's, or the next packet's for work sent between packets). A
 /// range is done once C ran its seq (`ran`: Nx2GpuPages::RanSeq), all are once B joined (C
