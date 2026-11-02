@@ -155,13 +155,18 @@ void PostEvent(Event event, bool is_indexed, u32 count) {
     Commit(Ring::ToB);
 }
 
-/// Words 0-2: GPU address, copy size, bytes; then the bytes.
+/// Words 0-2: GPU address, copy size, bytes; then the bytes. Cut c (R2 kayit-3, v1): in a join
+/// from B. B writes guest memory at once, C reads it later for the draws B sent before (texture
+/// uploads, the pools): parked, it has run them; B the record owner runs the old body, every
+/// cache told in place. Each upload is a join (JoinsB); K1: at once, as before.
 void InlineThunk(const u64* payload, [[maybe_unused]] u32 words) {
-    OnBc("Nx2StageProxy::AccelerateInlineToMemory")
-        .AccelerateInlineToMemory(
-            payload[0], static_cast<size_t>(payload[1]),
-            std::span<const u8>{reinterpret_cast<const u8*>(payload + 3),
-                                static_cast<size_t>(payload[2])});
+    JoinFromB([payload] {
+        OnBc("Nx2StageProxy::AccelerateInlineToMemory")
+            .AccelerateInlineToMemory(
+                payload[0], static_cast<size_t>(payload[1]),
+                std::span<const u8>{reinterpret_cast<const u8*>(payload + 3),
+                                    static_cast<size_t>(payload[2])});
+    });
 }
 
 void PostInline(GPUVAddr address, size_t copy_size, std::span<const u8> memory) {
