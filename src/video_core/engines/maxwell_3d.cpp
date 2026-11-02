@@ -42,8 +42,12 @@ constexpr u32 MacroRegistersStart = 0xE00;
 
 #if defined(_MSC_VER) && !defined(__clang__)
 #define MAXWELL3D_FORCE_INLINE __forceinline
+#define MAXWELL3D_NOINLINE __declspec(noinline)
+#define MAXWELL3D_INLINE_CALLS [[msvc::forceinline_calls]]
 #else
 #define MAXWELL3D_FORCE_INLINE inline __attribute__((always_inline))
+#define MAXWELL3D_NOINLINE __attribute__((noinline))
+#define MAXWELL3D_INLINE_CALLS
 #endif
 
 namespace {
@@ -145,7 +149,7 @@ const bool g_same_skip = [] {
     return value == nullptr || value[0] != '0';
 }();
 
-void NoteSameWriteSkipped() {
+MAXWELL3D_FORCE_INLINE void NoteSameWriteSkipped() {
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesSkipped, 1);
     thread_local u64 skipped{};
     if ((++skipped & ((u64{1} << 22) - 1)) == 0) {
@@ -1111,16 +1115,27 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
     rasterizer->BindGraphicsUniformBuffer(stage_index, bind_data.shader_slot, gpu_addr, size);
 }
 
-void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
-    if (stage_capture) [[unlikely]] return StageCbForward(start_base, amount);
-    // Write the input value to the current const buffer at the current position.
-    const GPUVAddr buffer_address = regs.const_buffer.Address();
-    ASSERT(buffer_address != 0);
+// ProcessCBMultiData's write (CbWriteImpl) and the light helpers it calls are forced inline:
+// ProcessCBMultiData inlines all of them as it did before StageCbWrite made the same write (with
+// two callers MSVC calls the helpers; T2, R1 sifir-1).
+MAXWELL3D_FORCE_INLINE void Maxwell3D::NoteLightWrite(GPUVAddr address, u32 size) {
+    ++light.cb_writes;
+    auto& written = light.written;
+    if (light.written_count != 0 && light.written_count <= written.size()) {
+        auto& [last_address, last_size] = written[light.written_count - 1];
+        if (last_address + last_size == address) {
+            last_size += size;
+            return;
+        }
+    }
+    if (light.written_count < written.size()) {
+        written[light.written_count] = {address, size};
+    }
+    light.written_count = (std::min)(light.written_count + 1, static_cast<u32>(written.size()) + 1);
+}
 
-    // Don't allow writing past the end of the buffer.
-    ASSERT(regs.const_buffer.offset <= regs.const_buffer.size);
-
-    const GPUVAddr address{buffer_address + regs.const_buffer.offset};
+MAXWELL3D_FORCE_INLINE void Maxwell3D::CbWriteImpl(GPUVAddr address, const u32* start_base,
+                                                   u32 amount) {
     const size_t copy_size = amount * sizeof(u32);
     bool skip_write = false;
     if (LightTrackingEnabled()) {
@@ -1167,11 +1182,24 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
     regs.const_buffer.offset += static_cast<u32>(copy_size);
 }
 
+void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
+    if (stage_capture) [[unlikely]] return StageCbForward(start_base, amount);
+    // Write the input value to the current const buffer at the current position.
+    const GPUVAddr buffer_address = regs.const_buffer.Address();
+    ASSERT(buffer_address != 0);
+
+    // Don't allow writing past the end of the buffer.
+    ASSERT(regs.const_buffer.offset <= regs.const_buffer.size);
+
+    CbWriteImpl(buffer_address + regs.const_buffer.offset, start_base, amount);
+}
+
 void Maxwell3D::ProcessCBData(u32 value) {
     ProcessCBMultiData(&value, 1);
 }
 
-bool Maxwell3D::IsLightSameWrite(GPUVAddr address, const u32* data, size_t size) {
+MAXWELL3D_FORCE_INLINE bool Maxwell3D::IsLightSameWrite(GPUVAddr address, const u32* data,
+                                                         size_t size) {
     // NVN's draw macros write the base vertex and instance into c[0][0x640] and reset them after
     // the draw; FrontIndirectDraw sends the resets. Mostly the bytes are already there. Such a
     // write still goes to memory and its range is invalidated at the next FlushCaching, but a
@@ -1197,7 +1225,11 @@ bool Maxwell3D::IsLightSameWrite(GPUVAddr address, const u32* data, size_t size)
         address < Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed);
     if (may_be_light && !sparse) {
         const std::optional<DAddr> device_address = memory_manager.GpuToCpuAddress(address);
-        if (device_address && Tegra::Nx2UntrackedWritten(*device_address, size)) {
+        bool untracked{};
+        // Inlined into ProcessCBMultiData as when this function was not forced inline.
+        MAXWELL3D_INLINE_CALLS untracked =
+            device_address && Tegra::Nx2UntrackedWritten(*device_address, size);
+        if (untracked) {
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesUntracked, 1);
         } else if (device_address && !rasterizer->HoldsGpuWrittenData(*device_address, size)) {
             ++light.same_writes;
@@ -1958,12 +1990,6 @@ static_assert(VideoCommon::Nx2RegReplica::CbDataCount == Maxwell3D::Regs::NumCBD
 static_assert(std::is_same_v<VideoCommon::Nx2RegReplica::DirtyFlags, Maxwell3D::DirtyState::Flags>);
 static_assert(std::is_same_v<VideoCommon::Nx2RegReplica::DirtyTables, Maxwell3D::DirtyState::Tables>);
 
-#if defined(_MSC_VER) && !defined(__clang__)
-#define MAXWELL3D_NOINLINE __declspec(noinline)
-#else
-#define MAXWELL3D_NOINLINE __attribute__((noinline))
-#endif
-
 MAXWELL3D_NOINLINE void Maxwell3D::StageNoteWrite(u32 method, u32 argument) {
     // ProcessDirtyRegisters' write: its dirty flags always, a light change as it notes one.
     stage_capture->Note(*this, method, argument, true,
@@ -1981,7 +2007,7 @@ MAXWELL3D_NOINLINE void Maxwell3D::StageNoteDirect(u32 method, bool note_primary
     }
 }
 
-void Maxwell3D::StageCbForward(const u32* start_base, u32 amount) {
+MAXWELL3D_NOINLINE void Maxwell3D::StageCbForward(const u32* start_base, u32 amount) {
     // ProcessCBMultiData while staged: the replica makes the write (StageCbWrite) with its own
     // light state and moves its offset on as A does here, before the record (=2 compares them
     // after it). No delta word for the offset: a CbData record may then join the one before
@@ -1995,7 +2021,7 @@ void Maxwell3D::StageCbForward(const u32* start_base, u32 amount) {
                                        start_base, amount);
 }
 
-void Maxwell3D::StageQueryCondition() {
+MAXWELL3D_NOINLINE void Maxwell3D::StageQueryCondition() {
     // The condition reads guest memory, and the accelerated way flushes the caches and asks the
     // query cache (S1): all of it with the stages parked, at this point of the stream.
     VideoCommon::Nx2Stages::JoinFromA(VideoCommon::Nx2Stages::JoinReason::Condition,
@@ -2004,33 +2030,7 @@ void Maxwell3D::StageQueryCondition() {
 
 void Maxwell3D::StageCbWrite(GPUVAddr address, const u32* start_base, u32 amount) {
     // ProcessCBMultiData's write as the primary would have made it here (at the address it had).
-    const size_t copy_size = amount * sizeof(u32);
-    bool skip_write = false;
-    if (LightTrackingEnabled()) {
-        const u64 same_writes = light.same_writes;
-        NoteLightChange(IsLightSameWrite(address, start_base, copy_size) ? LightChange::UniformSame
-                                                                         : LightChange::UniformData,
-                        MAXWELL3D_REG_INDEX(const_buffer.buffer));
-        bool skip = g_same_skip && light.same_writes != same_writes &&
-                    (address >> 12) == ((address + copy_size - 1) >> 12);
-        if (skip && !memory_manager.NoteSkippedWrite(address, light.same_device,
-                                                     static_cast<u32>(copy_size))) {
-            skip = false;
-            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesMade, 1);
-        }
-        if (skip) {
-            light.same_writes = same_writes;
-            skip_write = true;
-        } else {
-            NoteLightWrite(address, static_cast<u32>(copy_size));
-        }
-    }
-    if (skip_write) {
-        NoteSameWriteSkipped();
-    } else {
-        memory_manager.WriteBlockCached(address, start_base, copy_size);
-    }
-    regs.const_buffer.offset += static_cast<u32>(copy_size);
+    CbWriteImpl(address, start_base, amount);
 }
 
 void Maxwell3D::StageApplyDelta(const u64* words, u32 count) {
