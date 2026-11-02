@@ -15,6 +15,7 @@
 #include "video_core/control/scheduler.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
+#include "video_core/memory_manager.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
@@ -631,6 +632,15 @@ void StageBoundChannel(Tegra::Control::ChannelState& channel) {
     if (g_check) {
         CheckStaged(channel);
     }
+}
+
+void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::RasterizerInterface& real) {
+    channel.BindRasterizer(&real);
+}
+
+void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
+                         VideoCore::RasterizerInterface& real) {
+    memory_manager.BindRasterizer(&real);
 }
 
 } // namespace VideoCommon::Nx2Stages
