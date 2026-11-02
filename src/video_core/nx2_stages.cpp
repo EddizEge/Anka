@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -66,6 +67,10 @@ std::atomic<bool> g_record_busy{};
 /// The record side's begin and end of the stages (SetStageHooks).
 void (*g_hook_begin)(void*){};
 void (*g_hook_end)(void*){};
+/// SetCbWriteCheck's (B's CbData records with cut c).
+CbWriteCheck g_cb_write_check{};
+void* g_cb_write_context{};
+bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count);
 void* g_hook_context{};
 
 /// What B and C do with the records (StagePipeline's handler).
@@ -103,6 +108,13 @@ struct GpuHandler {
     }
     void CbData(u8 stage, u64 address, const u32* data, u32 count) {
         if (Maxwell3D* const replica = Replica(stage)) {
+            if (g_cb_write_check != nullptr && stage == StageIdB &&
+                CbWriteJoins(*replica, address, count)) [[unlikely]] {
+                // Into a pool C may still read for work B sent before (omur-1): C parked having
+                // run it, B the record owner.
+                JoinFromB([&] { StageCbWrite(*replica, address, data, count); });
+                return;
+            }
             StageCbWrite(*replica, address, data, count);
         }
     }
@@ -155,6 +167,7 @@ struct GpuHandler {
         Nx2Profile::Add(Counter::Parks, 1);
     }
     void Hazard(u8 stage, StageHazard what, u64 a, u64 b);
+    void JoinStall(u64 c_record, u64 target, u64 ms, bool stuck);
     /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
     void BoundaryWork() {
         g_system->GPU().TickWork();
@@ -164,9 +177,19 @@ struct GpuHandler {
 GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
 
+bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count) {
+    return g_pipeline.Options().cut_c &&
+           g_cb_write_check(g_cb_write_context, replica, address, u64{count} * sizeof(u32));
+}
+
 /// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
 /// and run the GPU's sync requests (StageTickWork).
 thread_local bool t_park_op{};
+/// B inside JoinFromBLocked (the buffer cache mutex held): JoinStall's report says so.
+thread_local bool t_locked_join{};
+/// The same for the other threads (CheckRecordOwner): C uses the caches and the scheduler, the
+/// front may not, caught up or not (C holds the mark until the op ran: T9b review protokol-1).
+std::atomic<bool> g_c_park_op{};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
 /// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
@@ -253,6 +276,38 @@ void GpuHandler::Hazard(u8 stage, StageHazard what, u64 a, u64 b) {
     }
     if (g_check) {
         ReportStack("stage hazard", text);
+    }
+}
+
+void GpuHandler::JoinStall(u64 c_record, u64 target, u64 ms, bool stuck) {
+    // STAGE_CHECK, on B while its join still waits (T9b review kilit-4). A deadlock never ends:
+    // C waiting on a lock B holds on its way to the join's target (K3 (a): the buffer cache mutex
+    // in a locked join), on one record. A C behind (a pipeline built on C, a wait for the GPU)
+    // goes on from record to record: a slow join, lines of its own and no stack, so slow joins
+    // leave the deadlock reports to a deadlock (R2c review).
+    const char* const locked = t_locked_join ? "locked " : "";
+    if (!stuck) {
+        static std::atomic<u32> slow{};
+        if (slow.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(HW_GPU,
+                        "GPU stages: a {}join from B has waited {} ms for C, at the record at "
+                        "{:#x} (the join's target {:#x}): a slow join",
+                        locked, ms, c_record, target);
+        }
+        return;
+    }
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) >= 8) {
+        return;
+    }
+    LOG_WARNING(HW_GPU,
+                "GPU stages: a {}join from B has waited {} ms for C, on the record at {:#x} since "
+                "the report before (the join's target {:#x}): K3 deadlock suspect",
+                locked, ms, c_record, target);
+    // B's stack once a wait: it does not change while B waits.
+    thread_local u64 t_stack_target = ~u64{0};
+    if (std::exchange(t_stack_target, target) != target) {
+        ReportStack("join from B waits", t_locked_join ? "JoinFromBLocked" : "JoinFromB");
     }
 }
 
@@ -411,24 +466,16 @@ void JoinFromBLocked(FunctionRef op) {
         return;
     }
     Nx2Profile::Add(Counter::JoinsB, 1);
-    const auto start =
-        g_check ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // B holds the buffer cache mutex while it waits: C reaching the join's target must not take
+    // it (K3 (a)). STAGE_CHECK reports a wait that lasts while it lasts (GpuHandler::JoinStall).
+    t_locked_join = true;
     g_pipeline.JoinFromBLocked([&] {
-        if (g_check) {
-            // B holds the buffer cache mutex while it waits: C reaching the join's target must
-            // not take it (K3 (a)); a long wait is the sign it does.
-            const auto waited = std::chrono::steady_clock::now() - start;
-            if (waited > std::chrono::milliseconds{50}) {
-                LOG_WARNING(HW_GPU,
-                            "GPU stages: a locked join from B waited {} ms for C to park "
-                            "(K3 deadlock suspect: C taking the buffer cache mutex)",
-                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
-            }
-        }
+        t_locked_join = false;
         g_owner.store(StageIdB, std::memory_order_release);
         op();
         g_owner.store(g_default_owner, std::memory_order_release);
     });
+    t_locked_join = false;
 }
 
 void ParkB(FunctionRef op) {
@@ -439,14 +486,24 @@ void ParkB(FunctionRef op) {
     g_pipeline.ParkB([&] {
         const bool was_park_op = t_park_op;
         t_park_op = true;
+        if (g_check) {
+            g_c_park_op.store(true, std::memory_order_seq_cst);
+        }
         op();
+        if (g_check) {
+            g_c_park_op.store(was_park_op, std::memory_order_seq_cst);
+        }
         t_park_op = was_park_op;
     });
 }
 
-bool StageTickWork(FunctionRef run) {
+bool StageTickWork(bool idle, FunctionRef run) {
     if (!Active() || !g_pipeline.Options().cut_c) {
         return false;
+    }
+    if (idle) {
+        // T9b review protokol-3: no ParkB for an empty queue (TICK_SKIP=0 ticks every draw).
+        return true;
     }
     if (OnStage(Stage::C)) {
         if (t_park_op) {
@@ -505,6 +562,11 @@ void SetStageHooks(void (*begin)(void*), void (*end)(void*), void* context) {
     g_hook_begin = begin;
     g_hook_end = end;
     g_hook_context = context;
+}
+
+void SetCbWriteCheck(CbWriteCheck check, void* context) {
+    g_cb_write_check = check;
+    g_cb_write_context = context;
 }
 
 void Start(Core::System& system) {
@@ -605,11 +667,12 @@ void CheckRecordOwner(const char* where) {
     if (OnStage(Stage::A) && !InJoin()) {
         // A reached the real rasterizer outside a join (S3).
         Nx2Profile::Add(Counter::StageUnproxied, 1);
-    } else if (t_stage == NoStage &&
+    } else if (t_stage == NoStage && !g_c_park_op.load(std::memory_order_seq_cst) &&
                (!g_record_busy.load(std::memory_order_acquire) || GpuSplit::Get().BackCaughtUp())) {
         // The front after a drain, CPU threads: the stages are idle (as GpuSplit::CheckOwner).
         // Caught up, the last stage may still end its batch (busy) after the mark it stored, a
-        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3).
+        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3). Not
+        // while C runs a ParkB's op: it does, past the marks it ran on to.
         return;
     }
     ReportStack("stages owner check", where);

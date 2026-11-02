@@ -169,8 +169,11 @@ struct GPU::Impl {
             return;
         }
         if (VideoCommon::Nx2Stages::Active()) [[unlikely]] {
-            // Back stages, cut c: on C at a record boundary in a ParkB, else left for one (R2 F4).
-            if (VideoCommon::Nx2Stages::StageTickWork([this] { RunSyncRequests(); })) {
+            // Back stages, cut c: on C at a record boundary in a ParkB, else left for one (R2 F4);
+            // nothing for an empty queue, whatever EDEN_NX2_TICK_SKIP says (no ParkB per draw).
+            const bool idle = requested_sync_fence.load(std::memory_order_acquire) ==
+                              current_sync_fence.load(std::memory_order_acquire);
+            if (VideoCommon::Nx2Stages::StageTickWork(idle, [this] { RunSyncRequests(); })) {
                 return;
             }
         }

@@ -148,7 +148,15 @@ void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address,
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// A ran ring 1 up to `ring1_position` (the end of each batch, every 4096 words). The last stage
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,
-/// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7).
+/// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7). K2: C holds
+/// it while its ParkB or boundary work is pending (StageTickWork's requests run after it in the
+/// stream), until their op ran. So the queries and semaphore releases B sent C before a mark are
+/// in C's query cache when the front's Drain ends, written or pending there: the puller's
+/// PendingSemaphoreRelease after its Drain sees them (a DMA read waits for the releases before
+/// it, PLAN §7/19). No stage holds a release of work before a mark outside the query cache. A
+/// release behind a fence (IsAFence) B runs in a join instead (T7d: the fence manager takes the
+/// buffer cache mutex, never in a record of C's): in the query cache's pending releases once B
+/// passed it, before the mark, after what B sent C before it (the join's).
 void PostMark(Ring ring, u64 ring1_position);
 
 /// Why A joins (counted: Counter::JoinsAEngine + reason).
@@ -225,8 +233,13 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 // - An `op` waits on no ring and no stage. The joiner writes no record inside its `op` (K4 for A;
 //   B inside a JoinFromB / JoinFromBLocked `op` is the record owner, RecordOwner() == Stage::B:
 //   it runs C's half of its work itself instead of sending it).
+// - Events: the proxy sends each to B, whose rasterizer runs it or its B half there and sends C
+//   the rest; B notes the engine work at its own point (NoteLightWork: B's light draws, S12)
+//   also for an event it sends on to C.
 // - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
-//   inside a record at =1; a JoinFromBLocked waiting past 50 ms (logged as a K3 deadlock suspect).
+//   inside a record at =1; a JoinFromB / JoinFromBLocked still waiting after 50 ms, reported
+//   while it waits (then every second): a slow join while C goes on from record to record, a K3
+//   deadlock suspect with B's stack once C stayed on one record from a report to the next.
 
 /// K2, B inside a record of ring 2, outside any packet and holding no cache lock (a draw's
 /// joined setup, RESETFIX's FlushRegion, a WaitForIdle with a query sync pending, an event whose
@@ -263,10 +276,12 @@ void ParkB(FunctionRef op);
 /// buffer cache and C's caches and scheduler alike. They run on C at a record boundary of ring 3
 /// inside a ParkB (`run` its `op`; R2 F4), never inside a record (PrepareDrawC's TickWork) nor on
 /// B. True when the stages took them: `run` ran so, or waits for C's next record boundary, which
-/// calls GPU::TickWork again (from C inside a record, B, A outside a join). False when the caller
-/// runs `run` now: cut c off (K1, =0, =3), C inside a ParkB op or A inside its join (the others
-/// parked already), a thread that is no stage.
-bool StageTickWork(FunctionRef run);
+/// calls GPU::TickWork again (from C inside a record, B, A outside a join), or `idle` (no request
+/// queued: nothing to run, no boundary work and no ParkB, whatever EDEN_NX2_TICK_SKIP says; one
+/// queued meanwhile runs at the next tick, as with the skip). False when the caller runs `run`
+/// now: cut c off (K1, =0, =3), C inside a ParkB op or A inside its join (the others parked
+/// already), a thread that is no stage.
+bool StageTickWork(bool idle, FunctionRef run);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and
 /// counts (Counter::StageViolations) a call of `where` from a thread other than `stage`'s; A
@@ -289,6 +304,17 @@ Stage RecordOwner();
 /// and C start and Stop calls `end` after they stopped; nothing runs behind either. One pair, set
 /// by its owner before the stages start; it outlives them. Null: none.
 void SetStageHooks(void (*begin)(void* context), void (*end)(void* context), void* context);
+
+/// K2 (cut c), B: whether constant buffer data B writes to guest memory at [address, address +
+/// size) for `replica`'s channel (a CbData record: StageCbWrite) hits what C may still read
+/// there for work B sent before, the texture header and sampler pools (T9c, omur-1; the
+/// rasterizer's check for its inline writes, RasterizerVulkan::WritesPoolsB). Then the write runs
+/// in a JoinFromB: C parked, having run that work.
+using CbWriteCheck = bool (*)(void* context, Tegra::Engines::Maxwell3D& replica, GPUVAddr address,
+                              u64 size);
+/// Sets the check (the Vulkan rasterizer: T7d), as SetStageHooks: by its owner before the stages
+/// start, outliving them. Null: no CbData write joins.
+void SetCbWriteCheck(CbWriteCheck check, void* context);
 
 /// GpuSplit::MaybeStart, before the back thread starts (nothing runs behind the front): when
 /// Get().mode != 0, makes the rings and starts B (and C); at =1 and =2 it also installs the proxy

@@ -5,11 +5,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -71,7 +74,7 @@ namespace Detail {
 
 /// Record header, one u64:
 ///   bits 0-3   kind (RecordKind)
-///   bits 4-7   flags (per kind; none defined yet)
+///   bits 4-7   flags (per kind: Mark MarkCaughtUp, Call CallNoVerify)
 ///   bits 8-31  words after the header (delta words included)
 ///   bits 32-47 delta words: the first words after the header are register deltas
 ///              (Nx2RegReplica delta words) for the current Target, applied before the record
@@ -120,6 +123,10 @@ constexpr bool SeqAtLeast(T a, T b) {
 /// Mark flag: A had run everything ring 1 held when it sent the mark (the end of its batch). The
 /// last stage storing it tells the busy clock (Nx2BusyClock::BackStored), as BackLoop did.
 inline constexpr u32 MarkCaughtUp = 1;
+/// Call flag (=2): no Handler::Verify after it. B wrote it at a ring 2 record boundary, A not
+/// waiting: the primaries may be past the deltas it brings (ServePark's; the next record checked
+/// has them too; T9b review protokol-2).
+inline constexpr u32 CallNoVerify = 1;
 
 /// The stages' values (Nx2Stages::Stage, nx2_stages.h, which includes this header).
 inline constexpr u8 StageIdA = 0;
@@ -412,6 +419,59 @@ inline void Signal(std::atomic<u32>& word, u32 value) {
     word.notify_one();
 }
 
+/// A handshake word's wait that tells when it lasts (STAGE_CHECK): AwaitValueWatched sleeps on
+/// the condition variable with a timeout instead of on the word, SignalWatched wakes it.
+struct WaitWatch {
+    std::mutex mutex;
+    std::condition_variable condition;
+};
+/// The first report of a watched wait (JoinStall), then one a second while it lasts.
+inline constexpr std::chrono::milliseconds WatchFirst{50};
+inline constexpr std::chrono::milliseconds WatchEvery{1000};
+
+/// AwaitValue that calls `stalled(milliseconds waited)` while it still waits: after WatchFirst,
+/// then every WatchEvery. The other side stores with SignalWatched.
+template <typename Scope, typename Stalled>
+void AwaitValueWatched(const std::atomic<u32>& word, u32 value, WaitWatch& watch,
+                       Stalled&& stalled) {
+    if (word.load(std::memory_order_acquire) == value) {
+        return;
+    }
+    [[maybe_unused]] Scope scope;
+    for (u32 spins = 0; spins < 8192; ++spins) {
+        if (word.load(std::memory_order_acquire) == value) {
+            return;
+        }
+        RingPause();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto next = start + WatchFirst;
+    std::unique_lock lock{watch.mutex};
+    for (;;) {
+        if (watch.condition.wait_until(lock, next, [&] {
+                return word.load(std::memory_order_acquire) == value;
+            })) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        // Without the mutex: the other side's SignalWatched does not wait for the report.
+        lock.unlock();
+        stalled(static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count()));
+        lock.lock();
+        next = now + WatchEvery;
+    }
+}
+/// Signal for a word AwaitValueWatched may wait on.
+inline void SignalWatched(std::atomic<u32>& word, u32 value, WaitWatch& watch) {
+    Signal(word, value);
+    // A waiter between its look and its sleep holds the mutex: it sees the value or the notify.
+    {
+        std::scoped_lock lock{watch.mutex};
+    }
+    watch.condition.notify_all();
+}
+
 /// Wakes the one sleeping in AwaitServing on `wake` to look again (a request for it, or the value
 /// it waits for stored before this).
 inline void Nudge(std::atomic<u32>& wake) {
@@ -486,13 +546,16 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   B with cut c passes them on to C, in the next record it sends there (K11);
 /// - Call / Forward: the thunk, with the payload; Target: Handler::Target (B passes it on);
 ///   CbData: Handler::CbData; ExecA: Handler::ExecA (=3);
-/// - Mark: the last stage stores it (Handler::Mark), B with cut c passes it on (D1);
+/// - Mark: the last stage stores it (Handler::Mark), B with cut c passes it on (D1); C holds
+///   the last one while its ParkB or boundary work is pending and stores it after (their op
+///   runs past the mark: the front's Drain waits for it);
 /// - Join: B with cut c makes C park first; then the stage acks the producer and waits for its
 ///   release (park).
 /// =2 (lockstep, depth 1): a producer waits after each record until it ran, Handler::Verify
-/// before its end; for a Join the joiner waits for the park ack instead, Verify before the ack
-/// (S8, K8). A stage stops at a record boundary once asked (Stop): with nothing left after a
-/// drain, and at shutdown without running what it holds.
+/// before its end (not after a Target or a CallNoVerify, which B writes as it parks with A going
+/// on); for a Join the joiner waits for the park ack instead, Verify before the ack (S8, K8). A
+/// stage stops at a record boundary once asked (Stop): with nothing left after a drain, and at
+/// shutdown without running what it holds.
 /// Between B and C (K2; S13, K3 as decided after R2, nx2_stages.h): JoinFromB, JoinFromBLocked
 /// and ParkB ask with flags outside the rings; the one asked answers at a park point:
 /// - B at each record boundary of ring 2 and its wait for ring 2, nothing else: there it passes
@@ -520,6 +583,12 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   void Busy(u8 stage, bool busy);                            around a stage's batches
 ///   void Wrote(u8 to_stage, size_t bytes); void Parked();      counters (Parked: B for ParkB)
 ///   void Hazard(u8 stage, StageHazard what, u64 a, u64 b);     K3 (on the stage's thread)
+///   void JoinStall(u64 c_record, u64 target, u64 ms,           STAGE_CHECK, on B: a join from B
+///                  bool stuck);                                waits that long (WatchFirst, then
+///                                                              every WatchEvery), C last began
+///                                                              the record at c_record; `stuck`:
+///                                                              at the report before too (C not
+///                                                              going on, a deadlock suspect)
 ///   void BoundaryWork();                                       C at a record boundary, asked
 ///                                                              (RequestBoundaryWork); may ParkB
 template <typename Handler, size_t BWords = RingToBWords, size_t CWords = RingToCWords>
@@ -586,9 +655,12 @@ public:
         join_release.store(0, std::memory_order_relaxed);
         join_target.store(0, std::memory_order_relaxed);
         join_read.store(0, std::memory_order_relaxed);
+        c_progress.store(0, std::memory_order_relaxed);
         park_position.store(0, std::memory_order_relaxed);
         boundary_work.store(false, std::memory_order_relaxed);
         c_in_record = false;
+        c_hold_marks = false;
+        mark_held = false;
         join_served = 0;
         join_count = 0;
         stop_b.store(false, std::memory_order_relaxed);
@@ -796,11 +868,16 @@ public:
             handler.Hazard(StageIdC, StageHazard::ParkInRecord, c.read, 0);
         }
         const u32 id = ++park_count;
+        // The marks C runs on to wait for the op (Step).
+        const bool was_holding = c_hold_marks;
+        c_hold_marks = true;
         park_request.store(id, std::memory_order_seq_cst);
         // B may sleep waiting for ring 2's records.
         to_b->ring.Wake();
         AwaitParked(id, !in_record);
         op();
+        c_hold_marks = was_holding;
+        StoreHeldMark();
         Signal(park_release, id);
     }
 
@@ -908,7 +985,7 @@ private:
         park_served = id;
         LinkC& link = *to_c;
         if (!passed.empty()) {
-            FlushPassed();
+            FlushPassed(CallNoVerify);
         }
         link.ring.Publish();
         park_position.store(link.ring.WritePosition(), std::memory_order_relaxed);
@@ -935,7 +1012,11 @@ private:
         const u32 id = join_request.load(std::memory_order_acquire);
         join_served = id;
         join_read.store(read, std::memory_order_relaxed);
-        Signal(join_ack, id);
+        if (options.check) {
+            SignalWatched(join_ack, id, join_watch);
+        } else {
+            Signal(join_ack, id);
+        }
         AwaitValue<typename Scopes::ParkWait>(join_release, id);
     }
 
@@ -950,7 +1031,19 @@ private:
         // C may sleep waiting for ring 3's records, in its ParkB wait too.
         link.ring.Wake();
         Nudge(c_wake);
-        AwaitValue<typename Scopes::JoinWait>(join_ack, id);
+        if (options.check) {
+            // A wait that lasts is reported while it lasts, with B's stack (a deadlock ends never;
+            // T9b review kilit-4). C on the record of the report before is stuck, not slow (R2c).
+            u64 last_record = ~u64{0};
+            AwaitValueWatched<typename Scopes::JoinWait>(join_ack, id, join_watch, [&](u64 ms) {
+                const u64 record = c_progress.load(std::memory_order_relaxed);
+                const bool stuck = record == last_record;
+                last_record = record;
+                handler.JoinStall(record, target, ms, stuck);
+            });
+        } else {
+            AwaitValue<typename Scopes::JoinWait>(join_ack, id);
+        }
         const u64 read = join_read.load(std::memory_order_relaxed);
         if (read < target) [[unlikely]] {
             handler.Hazard(StageIdB, StageHazard::JoinShort, read, target);
@@ -1005,6 +1098,17 @@ private:
     void RunBoundaryWork() {
         boundary_work.store(false, std::memory_order_seq_cst);
         handler.BoundaryWork();
+        StoreHeldMark();
+    }
+
+    /// C: stores the last mark it held (Step) once nothing it waited for is left: no ParkB of its
+    /// own pending, no boundary work asked. The front's Drain then means C ran everything up to
+    /// the mark and touches no cache and no scheduler for it any more (E7, R1 eszaman-3).
+    void StoreHeldMark() {
+        if (mark_held && !c_hold_marks && !boundary_work.load(std::memory_order_seq_cst)) {
+            mark_held = false;
+            handler.Mark(StageIdC, held_mark, held_caught_up);
+        }
     }
 
     /// B: the deltas it ran that C has not got, at most one header's (MaxDeltaWords) before they
@@ -1016,8 +1120,10 @@ private:
         passed.insert(passed.end(), words, words + count);
     }
 
-    void FlushPassed() {
-        u64* const body = BeginC(RecordKind::Call, 1);
+    /// B: its pending deltas to C in a record of their own (`flags`: CallNoVerify where A does
+    /// not wait for B, at a park point).
+    void FlushPassed(u32 flags = 0) {
+        u64* const body = BeginC(RecordKind::Call, 1, flags);
         body[0] = reinterpret_cast<u64>(&NopThunk);
         EndC();
     }
@@ -1048,6 +1154,12 @@ private:
         // C inside the record (ParkB's choice, CInRecord); the record may run inside C's ParkB
         // wait, at its boundary.
         [[maybe_unused]] const InRecord in_record{IsB ? nullptr : &c_in_record};
+        if constexpr (!IsB) {
+            if (options.check) {
+                // Where C is for a join's report (JoinStall), from B.
+                c_progress.store(start, std::memory_order_relaxed);
+            }
+        }
         if (options.mode == 2 || options.check) {
             // Every record, in order: the 16 bits compared for equality (depth 1, K5).
             const u16 expected = ++in.seen_seq;
@@ -1101,6 +1213,19 @@ private:
                     to_c->ring.Publish();
                     break;
                 }
+            } else {
+                // C's ParkB pending, or its boundary work asked before this mark (B and A ask
+                // before they send one): its op runs after the mark in the stream and uses the
+                // caches and the scheduler. The front's Drain ends once the last stage stored the
+                // mark and then uses them itself (R1 eszaman-3): C holds it until the op ran
+                // (StoreHeldMark; T9b review protokol-1).
+                if (c_hold_marks || boundary_work.load(std::memory_order_seq_cst)) [[unlikely]] {
+                    held_mark = body[0];
+                    held_caught_up = (HeaderFlags(header) & MarkCaughtUp) != 0;
+                    mark_held = true;
+                    break;
+                }
+                mark_held = false;
             }
             handler.Mark(stage, body[0], (HeaderFlags(header) & MarkCaughtUp) != 0);
             break;
@@ -1114,8 +1239,10 @@ private:
             // Lockstep: the producer waits for this release, so the primaries are where this
             // record left them (a Join verified before its ack, Park). Not after a Target: it
             // carries no state, and A may have touched the new target's primary before selecting
-            // it (its writes go with the next record); that record checks it (R1 dikis-4).
-            if (kind != RecordKind::Join && kind != RecordKind::Target) {
+            // it (its writes go with the next record); that record checks it (R1 dikis-4). Not
+            // after a CallNoVerify either: B wrote it with A going on (ServePark).
+            if (kind != RecordKind::Join && kind != RecordKind::Target &&
+                !(kind == RecordKind::Call && (HeaderFlags(header) & CallNoVerify) != 0)) {
                 MaybeVerify(stage, self);
             }
             in.ring.Release(self.read);
@@ -1263,6 +1390,11 @@ private:
     void RunC() {
         handler.ThreadStart(StageIdC);
         Loop<false>(*to_c, c, stop_c);
+        // Stopped (B before): nothing runs after the mark C held.
+        if (mark_held) {
+            mark_held = false;
+            handler.Mark(StageIdC, held_mark, held_caught_up);
+        }
     }
 
     // What A reads for each record (BeginB, EndB): one line, written by Start and Stop, and by
@@ -1288,6 +1420,10 @@ private:
     u32 park_count{};  ///< C: ParkB requests made
     u32 join_served{}; ///< C: the last JoinFromB request it served
     bool c_in_record{}; ///< C: inside a record of ring 3 (Step)
+    bool c_hold_marks{}; ///< C: in its ParkB, from the request to the op's end
+    bool mark_held{};    ///< C: a mark it ran and holds (Step, StoreHeldMark)
+    bool held_caught_up{};
+    u64 held_mark{};
 
     // ParkB: C asks (park_request), B acks once parked (ring 3 published up to park_position),
     // C runs ring 3 up to there, then releases.
@@ -1302,6 +1438,9 @@ private:
     alignas(64) std::atomic<u32> join_ack{};
     std::atomic<u64> join_read{};
     alignas(64) std::atomic<u32> join_release{};
+    /// STAGE_CHECK: B's watched wait for join_ack, and the record C began last (Step).
+    WaitWatch join_watch;
+    alignas(64) std::atomic<u64> c_progress{};
     /// Where C sleeps in ParkB inside a record (=1, a hazard: AwaitServing).
     alignas(64) std::atomic<u32> c_wake{};
     /// C's boundary work asked (RequestBoundaryWork).

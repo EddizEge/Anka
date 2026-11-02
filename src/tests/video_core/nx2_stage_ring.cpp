@@ -96,6 +96,11 @@ struct FakeHandler {
     void (*on_boundary)(){};
     /// Hazard reports by kind (StageHazard).
     std::array<std::atomic<u32>, 2> hazards{};
+    /// STAGE_CHECK's reports of a join from B that lasts (JoinStall), the last one's wait, the
+    /// ones with C stuck.
+    std::atomic<u32> join_stalls{};
+    std::atomic<u64> join_stall_ms{};
+    std::atomic<u32> join_stuck{};
 
     u32 PendingDeltas() {
         return static_cast<u32>(capture.size());
@@ -154,6 +159,14 @@ struct FakeHandler {
         if (on_boundary != nullptr) {
             on_boundary();
         }
+    }
+    void JoinStall(u64, u64, u64 ms, bool stuck) {
+        // A wait's first report (after WatchFirst, before WatchEvery) has no report before it.
+        Expect(!stuck || ms >= static_cast<u64>(WatchEvery.count()),
+               "a wait's first report finds C stuck on nothing", ms);
+        join_stall_ms = ms;
+        join_stuck += stuck ? 1 : 0;
+        ++join_stalls;
     }
 };
 
@@ -805,6 +818,146 @@ TEST_CASE("Nx2StagePipeline: C's boundary work runs when asked while C waits", "
 }
 
 namespace {
+// The wakes C's waits rely on (T9b review sinama-2): an ask or a park C must not sleep through.
+std::atomic<bool> g_c_ran{};
+void RunOnC(const u64*, u32) {
+    g_c_ran = true;
+}
+void SendRunToC(const u64*, u32) {
+    PostCallC(*g_pipe, &RunOnC, 0);
+    g_pipe->PublishC();
+}
+/// Waits (yielding: a sleep is a scheduler tick on Windows) until `done` or `seconds` passed.
+template <typename Done>
+bool WaitFor(Done&& done, u32 seconds) {
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{seconds};
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= give_up) {
+            // A last look: this thread may have been off the processor the whole time.
+            return done();
+        }
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+std::atomic<bool> g_b_second_record{};
+/// On C (its own boundary work, asked inside the record): ParkB once B is inside its next
+/// record, which sends nothing; C then sleeps in its ParkB wait for records.
+void ParkWhileBInSecond() {
+    while (!g_b_second_record.load()) {
+        std::this_thread::yield();
+    }
+    g_pipe->ParkB([] {
+        ++g_park_ops;
+        Order('c');
+    });
+}
+void AskBoundaryOnC(const u64*, u32) {
+    g_pipe->RequestBoundaryWork();
+}
+void SendBoundaryAskToC(const u64*, u32) {
+    PostCallC(*g_pipe, &AskBoundaryOnC, 0);
+    g_pipe->PublishC();
+}
+/// On B: long, nothing for C, no delta: B parks after it with nothing to publish.
+void SleepOnB(const u64*, u32) {
+    g_b_second_record = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+}
+
+std::atomic<u32> g_boundary_asks_inside{};
+void AskAgainInside() {
+    ++g_boundary_runs;
+    if (g_boundary_asks_inside.load() != 0) {
+        --g_boundary_asks_inside;
+        // Asked while it runs (StageTickWork's tick from inside): it runs again after.
+        g_pipe->RequestBoundaryWork();
+    }
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: boundary work asked around C's wait wakes it (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"boundary work around C's wait"};
+    std::mt19937 random{8086};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_boundary_runs = 0;
+        handler.on_boundary = [] { ++g_boundary_runs; };
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        for (u32 round = 0; round < 1000; ++round) {
+            g_c_ran = false;
+            PostCallB(pipe, &SendRunToC, 0);
+            pipe.PublishB();
+            // C ran its last record and heads for its wait: ask in its spin, before it reads the
+            // wake word or after.
+            REQUIRE(WaitFor([] { return g_c_ran.load(); }, 5));
+            Spin(random() % 16384);
+            pipe.RequestBoundaryWork();
+            REQUIRE(WaitFor([round] { return g_boundary_runs.load() == round + 1; }, 5));
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_boundary_runs == 1000);
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: B parking with nothing to publish wakes C in ParkB (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"park wakes C"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (u32 round = 0; round < 20; ++round) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            handler.on_boundary = &ParkWhileBInSecond;
+            g_b_second_record = false;
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            PostCallB(pipe, &SendBoundaryAskToC, 0);
+            PostCallB(pipe, &SleepOnB, 0);
+            pipe.PublishB();
+            REQUIRE(WaitFor([] { return g_park_ops.load() == 1; }, 10));
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(handler.parks == 1);
+            REQUIRE(g_order == std::vector<char>({'c'}));
+        }
+    }
+}
+
+TEST_CASE("Nx2StagePipeline: boundary work asked while it runs runs again after (sinama-2)",
+          "[video_core]") {
+    Watchdog watchdog{"boundary work asked inside"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_boundary_runs = 0;
+        handler.on_boundary = &AskAgainInside;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        for (u32 round = 0; round < 50; ++round) {
+            g_boundary_asks_inside = 1;
+            pipe.RequestBoundaryWork();
+            const bool twice =
+                WaitFor([round] { return g_boundary_runs.load() == 2 * round + 2; }, 2);
+            Expect(twice, "an ask made inside the boundary work runs it again",
+                   g_boundary_runs.load(), 2 * round + 2);
+            if (!twice) {
+                break;
+            }
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+    }
+}
+
+namespace {
 std::atomic<bool> g_hold_entered{};
 std::atomic<bool> g_hold_release{};
 void HoldOnB(const u64*, u32) {
@@ -925,6 +1078,74 @@ TEST_CASE("Nx2StagePipeline: a locked join while C asks ParkB, ring 3 full or no
 }
 
 namespace {
+/// On B: C asks to park, B sends counted records (more than ring 3 holds with `payload[0]`).
+void AskParkThenSendOnB(const u64* payload, u32) {
+    g_b_in_record = true;
+    PostCallC(*g_pipe, &AskLockedPark, 0);
+    for (u64 i = 0; i < payload[0]; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, 200);
+        ++g_b_progress;
+    }
+    g_expected_c = g_sent;
+    g_b_in_record = false;
+}
+/// On B, the record after (with a delta): it sends nothing, takes the buffer mutex and joins at
+/// once, as the buffer runtime's hook inside a packet whose draw has not gone to C yet.
+void LockedJoinPendingOnB(const u64*, u32) {
+    g_b_in_record = true;
+    {
+        std::scoped_lock lock{g_buffer_mutex};
+        const size_t wrote = g_handler->wrote[StageIdC];
+        g_pipe->JoinFromBLocked([wrote] {
+            Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
+                   g_handler->wrote[StageIdC], wrote);
+            Expect(g_handler->logs[StageIdC].deltas.size() + 1 ==
+                       g_handler->logs[StageIdB].deltas.size(),
+                   "JoinFromBLocked: the record's delta stays pending",
+                   g_handler->logs[StageIdC].deltas.size(),
+                   g_handler->logs[StageIdB].deltas.size());
+            Order('b');
+        });
+        ++g_b_progress;
+    }
+    g_b_in_record = false;
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: a locked join leaves B's pending deltas pending (sinama-1)",
+          "[video_core]") {
+    Watchdog watchdog{"locked join, deltas pending"};
+    std::mt19937 random{1357};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (u32 round = 0; round < 120; ++round) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            // Wide: C's ParkB served before the join's record or waiting through it.
+            g_spin_c = random() % 60000;
+            REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+            handler.capture = {u64{round} << 8 | 3};
+            PostCallB(pipe, &AskParkThenSendOnB, round % 2 == 0 ? 0 : 40);
+            handler.capture = {u64{round} << 8 | 4};
+            PostCallB(pipe, &LockedJoinPendingOnB, 0);
+            pipe.PublishB();
+            while (g_park_ops.load() == 0) {
+                std::this_thread::yield();
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_order.size() == 2);
+            REQUIRE(g_park_ops == 1);
+            REQUIRE(handler.hazards[1] == 0);
+            // The pending delta reached C afterwards (ServePark, A's join).
+            REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
+            REQUIRE(handler.logs[StageIdB].deltas.size() == 2);
+        }
+    }
+}
+
+namespace {
 std::atomic<bool> g_b_waits_record{};
 
 /// On C, inside a record: =2 runs the op at once (B waits for this record's end); =1 is a
@@ -998,11 +1219,14 @@ TEST_CASE("Nx2StagePipeline: ParkB inside a record, =2 lockstep and =1 hazard", 
 
 namespace {
 /// On B: maybe C asks to park, B sends `count` counted records, then joins (locked or not):
-/// the op runs after every record B sent before (R2 F1), with or without a ParkB waiting.
+/// the op runs after every record B sent before (R2 F1), with or without a ParkB waiting. Bare
+/// (locked, nothing sent first): the record's deltas still pending at the join, the buffer
+/// runtime's case (T9b review sinama-1).
 void SendThenJoinB(const u64* payload, u32) {
     const u32 count = static_cast<u32>(payload[0] & 0xff);
     const bool locked = ((payload[0] >> 8) & 1) != 0;
     const bool ask_park = ((payload[0] >> 9) & 1) != 0;
+    const bool bare = ((payload[0] >> 10) & 1) != 0;
     g_b_in_record = true;
     if (ask_park) {
         PostCallC(*g_pipe, &AskCheckedPark, 0);
@@ -1012,12 +1236,20 @@ void SendThenJoinB(const u64* payload, u32) {
     }
     const u64 expected = g_sent;
     const size_t wrote = g_handler->wrote[StageIdC];
-    const auto op = [locked, expected, wrote] {
+    const auto op = [locked, bare, expected, wrote] {
         Expect(g_c_count.load() == expected, "a join from B: C ran everything B sent before",
                g_c_count.load(), expected);
         if (locked) {
             Expect(g_handler->wrote[StageIdC] == wrote, "JoinFromBLocked: no ring 3 record",
                    g_handler->wrote[StageIdC], wrote);
+            if (bare) {
+                // C parked: its replica behind B's by this record's two deltas at least.
+                Expect(g_handler->logs[StageIdC].deltas.size() + 2 <=
+                           g_handler->logs[StageIdB].deltas.size(),
+                       "JoinFromBLocked: the deltas stay pending",
+                       g_handler->logs[StageIdC].deltas.size(),
+                       g_handler->logs[StageIdB].deltas.size());
+            }
         } else {
             Expect(g_handler->logs[StageIdC].deltas == g_handler->logs[StageIdB].deltas,
                    "JoinFromB: C's replica took B's deltas",
@@ -1050,11 +1282,13 @@ TEST_CASE("Nx2StagePipeline: a join from B runs after everything B sent before (
         for (u32 round = 0; round < 600; ++round) {
             g_spin_c = random() % 4000;
             const bool locked = round % 2 == 1;
+            const bool bare = locked && round % 6 == 1;
             const bool ask_park = round % 3 == 0;
             parks_asked += ask_park ? 1 : 0;
             handler.capture = {u64{round} << 8 | 1, u64{round} << 8 | 2};
             PostCallB(pipe, &SendThenJoinB,
-                      (round % 40) | (locked ? 0x100u : 0u) | (ask_park ? 0x200u : 0u));
+                      (bare ? 0 : round % 40) | (locked ? 0x100u : 0u) |
+                          (ask_park ? 0x200u : 0u) | (bare ? 0x400u : 0u));
             handler.capture = {u64{round} << 8 | 5};
             PostCallB(pipe, &RanOnB, round);
             if (round % 7 == 0) {
@@ -1093,6 +1327,14 @@ void SendAndParkOnB(const u64* payload, u32) {
 void ProgressOnB(const u64*, u32) {
     ++g_b_progress;
 }
+/// A (the main thread) waits for B: in BeginB / EndB or its join. =2 checks C's replica only
+/// then, the primaries where the record left them (T9b review protokol-2).
+std::atomic<bool> g_a_waiting{};
+void VerifyWhileAWaits(u8 stage) {
+    if (stage == StageIdC) {
+        Expect(g_a_waiting.load(), "=2: C verifies while A waits");
+    }
+}
 } // Anonymous namespace
 
 TEST_CASE("Nx2StagePipeline: a ParkB's op runs once C ran up to where B parked (K3, F2)",
@@ -1103,20 +1345,27 @@ TEST_CASE("Nx2StagePipeline: a ParkB's op runs once C ran up to where B parked (
         FakeHandler handler;
         TestPipeline pipe{handler};
         ResetK3(handler, pipe);
+        handler.on_verify = &VerifyWhileAWaits;
         REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
         for (u32 round = 0; round < 300; ++round) {
             g_spin_c = random() % 30000;
             handler.capture = {u64{round} << 8 | 6};
+            g_a_waiting = true;
             PostCallB(pipe, &SendAndParkOnB, random() % 60);
+            g_a_waiting = false;
             // Deltas B applies and has not passed on when C's park comes after this record (B
             // idle after it: A's join, which would pass them on, only once the park ran).
             handler.capture = {u64{round} << 8 | 7, u64{round} << 8 | 8};
+            g_a_waiting = true;
             PostCallB(pipe, &ProgressOnB, 0);
+            g_a_waiting = false;
             pipe.PublishB();
             while (g_park_ops.load() != round + 1) {
                 std::this_thread::yield();
             }
+            g_a_waiting = true;
             Drain(pipe);
+            g_a_waiting = false;
         }
         pipe.Stop();
         REQUIRE(g_failures == 0);
@@ -1144,6 +1393,127 @@ void SendSlowAsk(const u64* payload, u32) {
     ++g_b_progress;
 }
 } // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: =2 checks no record B writes as it parks, A going on (protokol-2)",
+          "[video_core]") {
+    Watchdog watchdog{"park deltas check"};
+    FakeHandler handler;
+    TestPipeline pipe{handler};
+    ResetK3(handler, pipe);
+    handler.on_verify = &VerifyWhileAWaits;
+    REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = true}));
+    for (u32 round = 0; round < 200; ++round) {
+        // Deltas B applies and keeps: the record sends nothing to C.
+        handler.capture = {u64{round} << 8 | 9, u64{round} << 8 | 10};
+        g_a_waiting = true;
+        PostCallB(pipe, &ProgressOnB, 0);
+        g_a_waiting = false;
+        // C's boundary work asked by A (StageTickWork outside a join): B parks idle, passing
+        // them in a record of their own while A goes on.
+        g_park_at_boundary = &CheckParked;
+        pipe.RequestBoundaryWork();
+        while (g_park_ops.load() != round + 1) {
+            std::this_thread::yield();
+        }
+    }
+    g_a_waiting = true;
+    Drain(pipe);
+    g_a_waiting = false;
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+    REQUIRE(handler.parks == 200);
+    REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
+    REQUIRE(handler.logs[StageIdB].deltas.size() == 400);
+}
+
+namespace {
+/// T9b review kilit-4: C held inside a record (as by a lock B holds) while B joins.
+std::atomic<bool> g_c_held{};
+std::atomic<bool> g_c_release{};
+std::chrono::steady_clock::time_point g_c_released_at;
+std::atomic<s64> g_op_after_release_ms{-1};
+void HoldOnC(const u64*, u32) {
+    g_c_held = true;
+    while (!g_c_release.load()) {
+        std::this_thread::yield();
+    }
+}
+/// C going on (behind, not stuck): record n of these ends once the test let n + 1 of them end.
+std::atomic<u64> g_c_steps{};
+void StepOnC(const u64* payload, u32) {
+    g_c_held = true;
+    while (g_c_steps.load() <= payload[0] && !g_c_release.load()) {
+        std::this_thread::yield();
+    }
+}
+/// payload[0]: 0, C held on one record; n, C on n records the test ends one by one.
+void HoldCThenJoinOnB(const u64* payload, u32) {
+    if (payload[0] == 0) {
+        PostCallC(*g_pipe, &HoldOnC, 0);
+    }
+    for (u64 n = 0; n < payload[0]; ++n) {
+        PostCallC(*g_pipe, &StepOnC, n);
+    }
+    g_pipe->JoinFromB([] {
+        Expect(g_c_release.load(), "the join's op runs once C went on");
+        g_op_after_release_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - g_c_released_at)
+                                    .count();
+        Order('b');
+    });
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: STAGE_CHECK reports a join from B while it waits (kilit-4)",
+          "[video_core]") {
+    Watchdog watchdog{"join stall"};
+    // 0: C held on one record (its second report stuck, a deadlock suspect); 3: C going on from
+    // record to record, one a report (slow, never stuck; R2c review).
+    for (const u64 steps : {u64{0}, u64{3}, u64{0}, u64{3}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        g_c_held = false;
+        g_c_release = false;
+        g_c_steps = 0;
+        g_op_after_release_ms = -1;
+        REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true, .check = true}));
+        PostCallB(pipe, &HoldCThenJoinOnB, steps);
+        pipe.PublishB();
+        REQUIRE(WaitFor([] { return g_c_held.load(); }, 10));
+        // The reports come while the join waits (C still held), not once it ended.
+        const u32 reports = steps == 0 ? 2 : static_cast<u32>(steps);
+        for (u32 report = 1; report <= reports; ++report) {
+            const bool came = WaitFor([&] { return handler.join_stalls.load() >= report; }, 10);
+            Expect(came, "a join waiting past 50 ms is reported while it waits, then every second",
+                   handler.join_stalls.load(), report);
+            if (!came) {
+                break;
+            }
+            if (steps != 0 && report < reports) {
+                // C goes on to its next record before the next report.
+                g_c_steps = report;
+            }
+        }
+        Expect(handler.join_stall_ms.load() >= 50, "the report says how long it waited",
+               handler.join_stall_ms.load());
+        g_c_released_at = std::chrono::steady_clock::now();
+        g_c_release = true;
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_order == std::vector<char>({'b'}));
+        if (steps == 0) {
+            REQUIRE(handler.join_stuck >= 1);
+        } else {
+            REQUIRE(handler.join_stuck == 0);
+        }
+        // C's ack wakes B at once (SignalWatched), not at the watch's next timeout (a WatchEvery
+        // after the last report, just before the release).
+        REQUIRE(g_op_after_release_ms.load() >= 0);
+        REQUIRE(g_op_after_release_ms.load() < WatchEvery.count() / 2);
+    }
+}
 
 TEST_CASE("Nx2StagePipeline: C waiting in ParkB parks for A's join on its way", "[video_core]") {
     Watchdog watchdog{"ParkB and A's join"};
@@ -1277,13 +1647,8 @@ void StoreMark(u64 position) {
 }
 /// The front's Drain without a join: waits (up to 5 s) for the last stage to store `position`.
 bool WaitStored(u64 position) {
-    for (u32 ms = 0; ms < 5000; ++ms) {
-        if (g_stored_mark.load(std::memory_order_acquire) == position) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-    return false;
+    return WaitFor(
+        [position] { return g_stored_mark.load(std::memory_order_acquire) == position; }, 5);
 }
 std::atomic<u32> g_c_calls{};
 void CountCallOnC(const u64*, u32) {
@@ -1340,6 +1705,205 @@ TEST_CASE("Nx2StagePipeline: C stores B's marks without a join (R1 dikis-1)", "[
     Drain(pipe);
     pipe.Stop();
     REQUIRE(g_failures == 0);
+}
+
+namespace {
+/// T9b review protokol-1: the mark after which a ParkB's op runs (B asked for it before).
+std::atomic<u64> g_held_position{};
+std::atomic<bool> g_held_op_ran{};
+void HeldMarkOp() {
+    // The front's Drain waits for the mark: it must not end while the op uses the caches.
+    Expect(g_stored_mark.load() != g_held_position.load(),
+           "ParkB's op runs before C stores the mark after its ask", g_stored_mark.load(),
+           g_held_position.load());
+    g_held_op_ran = true;
+    ++g_park_ops;
+}
+void StoreMarkAfterOp(u64 position) {
+    if (position == g_held_position.load()) {
+        Expect(g_held_op_ran.load(), "C stores the mark once the op ran", position);
+    }
+    StoreMark(position);
+}
+/// On B: counted records for C (some long: C behind), then what StageTickWork does on B: C's
+/// boundary work asked, for a ParkB. A's caught-up mark comes next (RunStagedBack's batch end).
+void SendThenAskBoundaryOnB(const u64* payload, u32) {
+    for (u64 i = 0; i < payload[0]; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, i % 4 == 0 ? 200 : 0);
+    }
+    g_pipe->PublishC();
+    Spin(g_spin_b.load(std::memory_order_relaxed));
+    g_park_at_boundary = &HeldMarkOp;
+    g_pipe->RequestBoundaryWork();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores a mark after the ParkB asked before it (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held mark"};
+    std::mt19937 random{2027};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        handler.on_mark = &StoreMarkAfterOp;
+        g_stored_mark = 0;
+        g_held_position = 0;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        u64 position = 0;
+        for (u32 round = 0; round < 300; ++round) {
+            g_spin_b = random() % 20000;
+            g_held_op_ran = false;
+            position += 100;
+            g_held_position = position;
+            PostCallB(pipe, &SendThenAskBoundaryOnB, random() % 40);
+            PostMarkB(pipe, position, true);
+            pipe.PublishB();
+            // The front's Drain: it ends once C stored the mark, the op having run.
+            REQUIRE(WaitStored(position));
+            REQUIRE(g_held_op_ran);
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_park_ops == 300);
+        REQUIRE(handler.parks == 300);
+        REQUIRE(handler.logs[StageIdC].caught_up_marks == 300);
+    }
+}
+
+namespace {
+/// The first mark C holds in a round of the test below: a ParkB's op runs before C stores it.
+std::atomic<u64> g_first_held{};
+void HeldMarksOp() {
+    Expect(g_stored_mark.load() < g_first_held.load(),
+           "ParkB's op runs before C stores a mark it held for it", g_stored_mark.load(),
+           g_first_held.load());
+    ++g_park_ops;
+}
+/// From B: a mark straight into ring 3 (as B passes A's), not published.
+void PostMarkC(u64 position) {
+    u64* const body = g_pipe->BeginC(RecordKind::Mark, 1, MarkCaughtUp);
+    body[0] = position;
+    g_pipe->EndC();
+}
+void AskHeldMarksParkOnC(const u64*, u32) {
+    AskPark(&HeldMarksOp);
+}
+/// On B: C's boundary work asked for a ParkB, then what C runs in that ParkB's wait (C behind,
+/// the marks held meanwhile), by payload[1]:
+/// 0: two marks (the last one is stored);
+/// 1: a record asking a second ParkB, then a mark (stored after the second op);
+/// 2: a record asking boundary work with no ParkB (an empty TickWork queue), then a mark
+///    (stored once that boundary work ran).
+void HeldMarksOnB(const u64* payload, u32) {
+    const u64 position = payload[0];
+    g_park_at_boundary = &HeldMarksOp;
+    g_pipe->RequestBoundaryWork();
+    for (u64 i = 0; i < position % 8; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, i % 4 == 0 ? 200 : 0);
+    }
+    switch (payload[1]) {
+    case 0:
+        PostMarkC(position - 20);
+        PostCallC(*g_pipe, &CountOnC, g_sent++);
+        break;
+    case 1:
+        PostCallC(*g_pipe, &AskHeldMarksParkOnC, 0);
+        break;
+    default:
+        PostCallC(*g_pipe, &AskBoundaryOnC, 0);
+        break;
+    }
+    PostMarkC(position);
+    g_pipe->PublishC();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores the marks it held for ParkBs asked around them (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held marks"};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        for (const u64 kind : {u64{0}, u64{1}, u64{2}}) {
+            FakeHandler handler;
+            TestPipeline pipe{handler};
+            ResetK3(handler, pipe);
+            handler.on_mark = &StoreMark;
+            g_stored_mark = 0;
+            u64 position = 0;
+            for (u32 round = 0; round < 100; ++round) {
+                position += 100 + round % 8;
+                // The two marks of kind 0 (position - 20 and position): the op before both.
+                g_first_held = kind == 0 ? position - 20 : position;
+                if (round == 0) {
+                    REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+                }
+                u64* const body = pipe.BeginB(RecordKind::Call, 3);
+                body[0] = reinterpret_cast<u64>(&HeldMarksOnB);
+                body[1] = position;
+                body[2] = kind;
+                pipe.EndB();
+                pipe.PublishB();
+                REQUIRE(WaitStored(position));
+                // Stored once every op of the round ran (the next round changes g_first_held).
+                REQUIRE(g_park_ops.load() == (round + 1) * (kind == 1 ? 2U : 1U));
+            }
+            Drain(pipe);
+            pipe.Stop();
+            REQUIRE(g_failures == 0);
+            REQUIRE(g_park_ops == (kind == 1 ? 200U : 100U));
+            REQUIRE(handler.parks == g_park_ops.load());
+            // One stored a round: of kind 0's two marks C held, the later one stands for both.
+            REQUIRE(handler.logs[StageIdC].marks == 100);
+            REQUIRE(handler.logs[StageIdC].caught_up_marks == 100);
+        }
+    }
+}
+
+namespace {
+/// C's boundary work asks itself again until the pipeline stops: C holds a mark it ran meanwhile
+/// (its ask before the mark) and stops with it held.
+std::atomic<bool> g_ask_again{};
+void AskAgainAlways() {
+    if (g_ask_again.load()) {
+        g_pipe->RequestBoundaryWork();
+    }
+}
+void AskAgainOnC(const u64*, u32) {
+    g_ask_again = true;
+    g_pipe->RequestBoundaryWork();
+}
+/// On B, one batch of ring 3 (C runs it in one go, asking for boundary work at its start): the
+/// ask, a caught-up mark, a record that tells the test C ran past the mark.
+void AskThenMarkOnB(const u64* payload, u32) {
+    PostCallC(*g_pipe, &AskAgainOnC, 0);
+    PostMarkC(payload[0]);
+    PostCallC(*g_pipe, &RunOnC, 0);
+    g_pipe->PublishC();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores the mark it held as it stops (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held mark at stop"};
+    for (u32 round = 0; round < 20; ++round) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        handler.on_boundary = &AskAgainAlways;
+        g_ask_again = false;
+        g_c_ran = false;
+        // =1 only: at =2 B's EndC waits for C to run each record, C busy with its boundary work.
+        REQUIRE(pipe.Start(StageOptions{.mode = 1, .cut_c = true}));
+        PostCallB(pipe, &AskThenMarkOnB, 700);
+        pipe.PublishB();
+        REQUIRE(WaitFor([] { return g_c_ran.load(); }, 5));
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(handler.logs[StageIdC].marks == 1);
+        REQUIRE(handler.logs[StageIdC].last_mark == 700);
+        REQUIRE(handler.logs[StageIdC].caught_up_marks == 1);
+    }
 }
 
 namespace {
