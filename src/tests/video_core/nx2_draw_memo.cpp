@@ -7,11 +7,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/range_sets.inc"
 #include "video_core/buffer_cache/nx2_draw_memo.h"
 
 namespace {
 
 using VideoCommon::LayoutRunMemo;
+using VideoCommon::SummarizedRangeSet;
 using VideoCommon::SyncMemoSets;
 
 /// The memory tracker as SynchronizeBuffer sees it: per 4 KiB page a dirty (CPU or untracked)
@@ -263,4 +265,115 @@ TEST_CASE("LayoutRunMemo answers as the lookup", "[video_core][nx2]") {
     REQUIRE(!memo.Find(1, 1, 0x2000, size));
     memo.Store(0, 1, ~u64{0} - 0x10, 0x20);
     REQUIRE(!memo.Find(0, 1, ~u64{0} - 0x8, size));
+}
+
+namespace {
+
+template <bool PageBits>
+void RunSummaryAgainstTree(int mode, u64 seed) {
+    std::mt19937_64 rng{seed};
+    SummarizedRangeSet<PageBits> summarized;
+    summarized.SetMode(mode);
+    Common::RangeSet<u64> tree;
+    // Mostly a few MiB around two bases, some far away, some at the end of the 64 GiB space
+    // and beyond it (never answered by the page bits).
+    const u64 bases[] = {0x1'0000'0000ULL, 0x3'4000'0000ULL, (u64{1} << 36) - 0x20000,
+                         u64{1} << 37};
+    const auto pick = [&] {
+        const u64 base = bases[rng() % 4];
+        return base + (rng() % 0x400000) - (base == bases[2] ? 0x200000 : 0);
+    };
+    const auto ranges = [](const auto& set, u64 addr, u64 size) {
+        std::vector<std::pair<u64, u64>> result;
+        set.ForEachInRange(addr, size, [&](u64 begin, u64 end) { result.emplace_back(begin, end); });
+        return result;
+    };
+    u64 answered = 0;
+    for (int step = 0; step < 20000; ++step) {
+        const u64 addr = pick();
+        const u64 size = (rng() & 15) == 0 ? 0 : 1 + rng() % ((rng() & 3) == 0 ? 0x40000 : 0x80);
+        switch (rng() % 8) {
+        case 0:
+        case 1:
+            summarized.Add(addr, size);
+            tree.Add(addr, size);
+            break;
+        case 2:
+            summarized.Subtract(addr, size);
+            tree.Subtract(addr, size);
+            break;
+        case 3:
+            REQUIRE(ranges(summarized, addr, size) == ranges(tree, addr, size));
+            break;
+        default:
+            if (!summarized.MayIntersect(addr, size)) {
+                ++answered;
+            }
+            REQUIRE(summarized.Intersects(addr, size) == tree.Intersects(addr, size));
+            break;
+        }
+        if (step % 5000 == 4999) {
+            summarized.Rebuild();
+        }
+        if (step == 15000) {
+            summarized.Clear();
+            tree.Clear();
+        }
+    }
+    REQUIRE(summarized.GetStats().mismatches == 0);
+    REQUIRE((mode == 0 || answered > 0));
+    std::vector<std::pair<u64, u64>> all_summarized;
+    std::vector<std::pair<u64, u64>> all_tree;
+    summarized.ForEach([&](u64 begin, u64 end) { all_summarized.emplace_back(begin, end); });
+    tree.ForEach([&](u64 begin, u64 end) { all_tree.emplace_back(begin, end); });
+    REQUIRE(all_summarized == all_tree);
+    REQUIRE(summarized.Count() == all_tree.size());
+}
+
+} // namespace
+
+TEST_CASE("SummarizedRangeSet answers as the tree", "[video_core][nx2]") {
+    for (u64 seed = 1; seed <= 6; ++seed) {
+        RunSummaryAgainstTree<true>(1, seed);
+        RunSummaryAgainstTree<true>(2, seed + 100);
+        RunSummaryAgainstTree<false>(1, seed + 200);
+    }
+    RunSummaryAgainstTree<true>(0, 99);
+}
+
+TEST_CASE("SummarizedRangeSet summary", "[video_core][nx2]") {
+    SummarizedRangeSet<true> set;
+    set.SetMode(1);
+    REQUIRE(!set.MayIntersect(0x1000, 0x10));
+    set.Add(0x8'0000'0010ULL, 0x20);
+    REQUIRE(set.MayIntersect(0x8'0000'0000ULL, 0x1000));
+    REQUIRE(set.MayIntersect(0x8'0000'0028ULL, 0x10)); // Partly in the range
+    REQUIRE(!set.MayIntersect(0x8'0000'1000ULL, 0x10));
+    REQUIRE(!set.MayIntersect(0x8'0000'0000ULL, 0x10)); // Below the hull
+    set.Add(0x8'0040'0000ULL, 0x10);                     // Next 4 MiB region
+    REQUIRE(!set.MayIntersect(0x8'0020'0000ULL, 0x1000)); // Between: hull yes, pages no
+    REQUIRE(set.MayIntersect(0x8'0000'0000ULL, 0x800000)); // Across both regions
+    // A subtraction covering the page clears its bit.
+    set.Subtract(0x8'0000'0000ULL, 0x1000);
+    REQUIRE(!set.MayIntersect(0x8'0000'0010ULL, 0x20));
+    REQUIRE(!set.Intersects(0x8'0000'0010ULL, 0x20));
+    // One that does not cover it leaves it.
+    set.Add(0x8'0000'0010ULL, 0x20);
+    set.Subtract(0x8'0000'0010ULL, 0x10);
+    REQUIRE(set.MayIntersect(0x8'0000'0010ULL, 0x10));
+    REQUIRE(!set.Intersects(0x8'0000'0010ULL, 0x10));
+    REQUIRE(set.Intersects(0x8'0000'0020ULL, 0x10));
+    set.Clear();
+    REQUIRE(!set.MayIntersect(0x8'0040'0000ULL, 0x10));
+    // Moved sets keep their ranges and summary; the source is empty.
+    SummarizedRangeSet<false> hull;
+    hull.SetMode(1);
+    hull.Add(0x5000, 0x100);
+    SummarizedRangeSet<false> moved{std::move(hull)};
+    REQUIRE(moved.Intersects(0x5080, 1));
+    REQUIRE(!moved.MayIntersect(0x5100, 0x100));
+    REQUIRE(!hull.MayIntersect(0x5080, 1));
+    hull.Add(0x9000, 0x10);
+    REQUIRE(hull.Intersects(0x9000, 0x10));
+    REQUIRE(!hull.Intersects(0x5080, 1));
 }

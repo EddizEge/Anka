@@ -32,6 +32,11 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
+    // EDEN_NX2_GPU_WRITTEN_FILTER: read once, here (after the switches file is loaded).
+    const int written_filter = Nx2GpuWrittenFilter();
+    gpu_modified_ranges.SetMode(written_filter);
+    uncommitted_gpu_modified_ranges.SetMode(written_filter);
+    cpu_read_ranges.SetMode(written_filter);
     inline_buffer_id = NULL_BUFFER_ID;
 #ifdef YUZU_LEGACY
     immediately_free = (Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive);
@@ -149,6 +154,11 @@ void BufferCache<P>::TickFrame() {
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
+    }
+    // EDEN_NX2_GPU_WRITTEN_FILTER: the page summary only grows between subtractions that cover
+    // whole pages; make it exact again once it lets many queries through to nothing.
+    if (gpu_modified_ranges.WantsRebuild()) {
+        gpu_modified_ranges.Rebuild();
     }
     ++frame_tick;
     delayed_destruction_ring.Tick();
@@ -705,7 +715,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     boost::container::small_vector<std::pair<BufferCopy, BufferId>, 16> downloads;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
-    for (const Common::RangeSet<DAddr>& range_set : committed_gpu_modified_ranges) {
+    for (const auto& range_set : committed_gpu_modified_ranges) {
         range_set.ForEach([&](DAddr interval_lower, DAddr interval_upper) {
             const std::size_t size = interval_upper - interval_lower;
             const DAddr device_addr = interval_lower;
@@ -827,6 +837,25 @@ template <class P>
 bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     // One lookup instead of visiting every range inside (~4% of the GPU thread for title 1's
     // inline uploads once GPU-written ranges are no longer cleared by downloads).
+    if (gpu_modified_ranges.Mode() != 0) {
+        const auto& stats = gpu_modified_ranges.GetStats();
+        if ((stats.queries & ((u64{1} << 20) - 1)) == 0 && stats.queries != 0) {
+            LOG_INFO(HW_GPU,
+                     "GPU-written ranges: {} ranges; {} queries, {} answered by the summary, {} "
+                     "let through to nothing; {} adds, {} subtracts ({} answered by the summary); "
+                     "{} disagreements",
+                     gpu_modified_ranges.Count(), stats.queries, stats.query_misses,
+                     stats.false_positives, stats.adds, stats.subtracts, stats.subtract_misses,
+                     stats.mismatches);
+        }
+        if (stats.mismatches != 0) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                LOG_ERROR(HW_GPU, "EDEN_NX2_GPU_WRITTEN_FILTER: the summary missed a range");
+            }
+        }
+    }
     return gpu_modified_ranges.Intersects(addr, size);
 }
 

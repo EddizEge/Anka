@@ -87,6 +87,14 @@ inline int Nx2SsboFast() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
 }
+/// EDEN_NX2_GPU_WRITTEN_FILTER: the GPU-written ranges and the download range sets answer queries
+/// far from their ranges from a summary instead of their trees (SummarizedRangeSet: hull, and for
+/// gpu_modified_ranges a 4 KiB page bitmap). =0 as before; =2 also asks the trees and counts any
+/// disagreement (the "GPU-written ranges" line, every 2^20 queries, shows it).
+inline int Nx2GpuWrittenFilter() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_GPU_WRITTEN_FILTER");
+}
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
 inline bool Nx2VertexFast() {
@@ -789,7 +797,7 @@ private:
     mutable LayoutRunMemo layout_runs;
 
     MemoryTracker memory_tracker;
-    Common::RangeSet<DAddr> uncommitted_gpu_modified_ranges;
+    SummarizedRangeSet<false> uncommitted_gpu_modified_ranges;
 
     /// Whether GPU-written buffer ranges are copied back to guest memory at the next fence;
     /// otherwise only when something flushes them (as upstream yuzu below High GPU accuracy).
@@ -810,14 +818,14 @@ private:
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling() ||
                Tegra::Nx2NeedsBufferDownloads();
     }
-    Common::RangeSet<DAddr> gpu_modified_ranges;
-    std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
+    SummarizedRangeSet<true> gpu_modified_ranges;
+    std::deque<SummarizedRangeSet<false>> committed_gpu_modified_ranges;
     /// Buffer pages the guest CPU reads (NoteCpuRead). Without AsyncBufferDownloads, GPU writes
     /// to them are still copied back at fences: Pokemon Pokopia builds its sky, fog and exposure
     /// constants from values the GPU computes, and drew a black, flickering sky without them.
     /// Copying every GPU-written range back instead (each written native storage binding is an
     /// 8 MiB window) dropped it from 60 to about 42 frames a second.
-    Common::RangeSet<DAddr> cpu_read_ranges;
+    SummarizedRangeSet<false> cpu_read_ranges;
 
     /// Queues the parts of a GPU write to [addr, addr + size) that are copied back at the next
     /// fence.
