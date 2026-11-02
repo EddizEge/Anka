@@ -64,6 +64,19 @@ inline const bool g_nx2_vertex_fast = [] {
     const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
     return value == nullptr || value[0] != '0';
 }();
+/// A 0/1/2 switch (unset or another value: 1), read at the first call: not at static
+/// initialization, before main loads nx2_switches.txt into the environment (yuzu main.cpp), and
+/// without a function-local static's thread-safe initialization check on every call (MSVC: a
+/// thread-local read). Two threads racing on the first call both compute the same value.
+inline int ReadNx2Mode(std::atomic<s8>& mode, const char* name) {
+    s8 value = mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv(name);
+        value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
+        mode.store(value, std::memory_order_relaxed);
+    }
+    return value;
+}
 /// EDEN_NX2_VERTEX_CLEAN (with EDEN_NX2_VERTEX_SKIP): a stream its registers disable (enable bit
 /// clear or an empty range) is resolved to NULL_BINDING once and its VertexBuffer<n> flag cleared.
 /// BindHostVertexBuffers visits enabled streams only, so that flag was never cleared before and
@@ -73,10 +86,10 @@ inline const bool g_nx2_vertex_fast = [] {
 /// =0 as before; =2 also checks, each time the streams are resolved again, that no cleaned stream
 /// got enabled without its flag (logs "EDEN_NX2_VERTEX_CLEAN: stream N enabled without its dirty
 /// flag", first 16, and resolves it).
-inline const int g_nx2_vertex_clean = [] {
-    const char* value = std::getenv("EDEN_NX2_VERTEX_CLEAN");
-    return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
-}();
+inline int Nx2VertexClean() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_VERTEX_CLEAN");
+}
 /// EDEN_NX2_LIGHT_SYNC_SKIP: in a plain light draw (RasterizerVulkan::TryLightDraw: nothing but
 /// stream/index/draw registers changed, no memory changed but same-byte constant buffer writes,
 /// same frame) an enabled stream whose flag is clean keeps the binding the draw before
@@ -86,10 +99,10 @@ inline const int g_nx2_vertex_clean = [] {
 /// before otherwise. =0 as before; =2 synchronizes the streams it would skip anyway and logs any
 /// that uploaded ("EDEN_NX2_LIGHT_SYNC_SKIP: clean stream N of a plain light draw uploaded"; none
 /// expected).
-inline const int g_nx2_light_sync_skip = [] {
-    const char* value = std::getenv("EDEN_NX2_LIGHT_SYNC_SKIP");
-    return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
-}();
+inline int Nx2LightSyncSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_LIGHT_SYNC_SKIP");
+}
 
 using BufferId = Common::SlotId;
 

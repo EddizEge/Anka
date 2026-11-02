@@ -1032,7 +1032,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 const Binding& clean = v_buffer[index];
                 if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
                                               vertex_synced_epoch[index])) {
-                    if (g_nx2_light_sync_skip != 2) {
+                    if (Nx2LightSyncSkip() != 2) {
                         ++sync_skipped;
                     } else {
                         ++sync_would_skip;
@@ -1710,7 +1710,7 @@ void BufferCache<P>::UpdateVertexBuffers() {
     flags[Dirty::VertexBuffers] = false;
 
     const bool vertex_skip = VertexSkipEnabled();
-    if (g_nx2_vertex_clean == 2) {
+    if (Nx2VertexClean() == 2) {
         // A cleaned stream must stay disabled until one of its registers is written. Checked
         // where the streams are resolved again (Dirty::VertexBuffers set): what =0 would resolve
         // here and =1 no longer does.
@@ -1790,7 +1790,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             // limit or native size), all in its dirty block: nothing to resolve again until one
             // is written. Disabled streams are never bound (BindHostVertexBuffers), so nothing
             // else clears this flag.
-            if (g_nx2_vertex_clean != 0) {
+            if (Nx2VertexClean() != 0) {
                 maxwell3d->dirty.flags[Dirty::VertexBuffer0 + index] = false;
                 vertex_clean_mask |= 1u << index;
             }

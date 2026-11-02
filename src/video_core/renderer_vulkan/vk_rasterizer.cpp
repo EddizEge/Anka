@@ -1165,7 +1165,7 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     // EDEN_NX2_LIGHT_SYNC_SKIP: plain here (checked above): the anchor chain synchronized every
     // enabled stream after the last memory change; only streams flagged dirty bind anew (a clean
     // stream whose range may hold CPU-modified or untracked pages since is synchronized anyway).
-    buffer_cache.plain_light_draw = VideoCommon::g_nx2_light_sync_skip != 0;
+    buffer_cache.plain_light_draw = VideoCommon::Nx2LightSyncSkip() != 0;
     buffer_cache.BindHostGeometryBuffers(is_indexed);
     buffer_cache.plain_light_draw = false;
     // An upload needs ConfigureImpl's barrier after it and ends the render pass.
