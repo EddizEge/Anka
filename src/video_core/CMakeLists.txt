@@ -121,6 +121,7 @@ add_library(video_core STATIC
     nx2_profile.h
     nx2_stage_api.cpp
     nx2_stage_api.h
+    nx2_stage_bind.h
     nx2_stage_draw.h
     nx2_stage_proxy.cpp
     nx2_stage_proxy.h
@@ -173,6 +174,7 @@ add_library(video_core STATIC
     renderer_vulkan/fixed_pipeline_state.h
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
+    renderer_vulkan/nx2_record_list.h
     renderer_vulkan/pipeline_helper.h
     renderer_vulkan/pipeline_statistics.cpp
     renderer_vulkan/pipeline_statistics.h

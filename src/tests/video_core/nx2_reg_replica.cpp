@@ -299,3 +299,40 @@ TEST_CASE("Nx2RegReplica: a write outside ProcessDirtyRegisters reaches the repl
     REQUIRE(replica.flags.none());
     REQUIRE(replica.changes == 0);
 }
+
+TEST_CASE("Nx2RegReplica: the front's copy of a staged engine holds its method sink",
+          "[video_core]") {
+    // ConsumeSinkImpl as it runs on A (the reference), against SinkInto on copies made before
+    // it: equal registers and shadow RAM with every shadow RAM control (Track, TrackWithFilter,
+    // Passthrough, Replay), same-value skipping on or off, a method written more than once.
+    std::mt19937 random{7};
+    for (u32 control = 0; control < 4; ++control) {
+        for (const bool skip_same : {false, true}) {
+            std::vector<u32> regs(NumRegs);
+            std::vector<u32> shadow(NumRegs);
+            for (u32 i = 0; i < NumRegs; ++i) {
+                regs[i] = random() % 4;
+                shadow[i] = random() % 4;
+            }
+            std::vector<std::pair<u32, u32>> sink;
+            for (u32 i = 0; i < 400; ++i) {
+                sink.emplace_back(static_cast<u32>(random() % 64), static_cast<u32>(random() % 4));
+            }
+            std::vector<u32> copy_regs = regs;
+            std::vector<u32> copy_shadow = shadow;
+            const bool track = control == 0 || control == 1;
+            SinkInto(copy_regs.data(), copy_shadow.data(), track, control == 3, sink);
+            for (const auto& [method, value] : sink) {
+                if (track) {
+                    shadow[method] = value;
+                }
+                const u32 argument = control == 3 ? shadow[method] : value;
+                if (!skip_same || regs[method] != argument) {
+                    regs[method] = argument;
+                }
+            }
+            REQUIRE(copy_regs == regs);
+            REQUIRE(copy_shadow == shadow);
+        }
+    }
+}

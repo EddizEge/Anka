@@ -355,3 +355,97 @@ entries through Maxwell3D::CallMethodBatch, CallMethod inlined; "method"), `EDEN
 per-write and per-draw switch functions read their variable into an atomic at first use instead
 of a guarded static checked on each call (no switch; "method", "draw", "bind stage buffers").
 Built; not measured yet.
+
+## Back stages (EDEN_NX2_BACK_STAGES, 2026-11-02; cut 1 built, not measured yet)
+
+The back above is the thread a frame waits on. Back stages split it again, in a pipeline
+behind the front: **A** ("GPUBack", the back thread itself) runs ring 1's engine methods against
+the primary registers; the stages below get what A did as records over rings of their own and
+run the rasterizer and its caches on replicas of the registers. Two cuts:
+
+- **Cut 1 (`EDEN_NX2_BACK_CUTS=a`, default): A | BC.** BC ("GPU memory stage", "GPUMem") runs
+  every cache and the Vulkan recording, as the unstaged back did. The register work (~15% of
+  the back) goes to A. Expected x1.05-1.12 (an estimate; PGO-free build, relative).
+- **Cut 2 (`=ac`): A | B | C** with C ("GPU record stage", "GPURec") for the texture cache and
+  recording. Only plumbing until the events needing both B and C are classified (T9): Start
+  logs "cut c is a plumbing trial only until T9" once. Not for play or measuring.
+
+Switches (read once at the split's start, `Nx2Stages::Get`):
+
+- `EDEN_NX2_BACK_STAGES`: `0`/unset off (default: nothing is made, the back runs as before);
+  `1` on; `2` lockstep verification: A waits for each record to run, and after it the replica's
+  registers and light changes are compared with the primary's (log line below); `3` pass-through:
+  A sends ring 1's ranges (ExecA) and BC runs them with `GpuSplit::Execute` on the primaries, no
+  proxy, no replica: only the stage cost (rings, wakes, marks).
+- `EDEN_NX2_BACK_STAGES_EVERY=<n>`: `=2` compares every n-th record (Joins included).
+- `EDEN_NX2_STAGE_CHECK=1`: owner checks at full speed: the scheduler's user against the record
+  owner (`RecordOwner`: BC with cut 1, C with cut 2, A inside a join), cache paths reached from A
+  outside a join (`CheckStage`, the memory manager's cache paths); the first 20 reports go to
+  stderr with the stack and to the log in short (where, thread id and name, stage, first six
+  frames as module+offset). Counted in the profile's " | stage check:" line.
+- Threads: BC (B) runs time critical, A and C highest. `EDEN_NX2_BACK_CPU=1`/`2` (above) pins
+  BC to the back's core with A, C and the process's other threads off it, and with the stages
+  the front gets a core of its own too (`EDEN_NX2_FRONT_CORE=<n>`).
+
+How work is placed (cut 1):
+
+- **A** runs Maxwell3D's methods (`stage_methods_on_a`): register writes are captured
+  (`RegCapture`) and ride as delta words at the head of A's next record to BC, which applies them
+  to its replica first (dirty flags and light changes as the primary's). Writes outside
+  `ProcessDirtyRegisters` (macro HLE, inline data, firmware call 4) and constant buffer data
+  (`CbData` records, adjacent writes merged) go the same way; side state the rasterizer reads
+  (constant buffer binds, rebound bits, engine state, replace table, draw state, draw texture
+  state) goes with the draw that reads it, only the parts that changed.
+- **The proxy** (`Nx2StageProxy`) is every staged channel's rasterizer (engines and memory
+  manager; DmaPusher keeps the real one). From A outside a join a member is posted to BC as a
+  record (draws, clears, uniform binds, fences, queries, invalidations, inline writes with their
+  data) or runs on A with the stages parked (a join): members returning a value, FlushRegion /
+  FlushAll / FlushAndInvalidateRegion, conditional rendering, channel init / bind / release, and
+  a record too long for the ring (K9). From any other thread it calls the real rasterizer.
+- **Ring 1's Call entries** (`DeferTarget`): `Owner` (the default) is forwarded to BC as is and
+  runs there in order; `OnA` (register and draw manager work: FinishFrontMacro, DeferEditable,
+  the front's sink handover) runs on A; `Join` (RunCommand, the memory dirty thunk when the
+  macro runs on the back) runs on A in a join.
+- **Joins at ring level:** executable methods of the other engines (KeplerCompute, MaxwellDMA,
+  Fermi2D, KeplerMemory) run on A with the stages parked, consecutive ones in one join.
+  BindChannel: forwarded (Owner) for the same staged channel and address space, a join for a
+  session's first bind, a channel change or a new address space (it stages the channel).
+- **consumed:** A posts Marks (every 4,096 words and at each batch end); the last stage stores
+  `consumed` (D1), so the front's Drain, WaitForSpace and BackCaughtUp work unchanged.
+- **Start / Stop:** `GpuSplit::MaybeStart` starts the stages before the back thread; `=1`/`=2`
+  install the proxy and stage every initialized channel (later ones at their first bind). Stop
+  after the back joined; the proxy outlives it (reused for the same rasterizer).
+
+`=2`'s mismatch line (`Maxwell3D::StageVerify`, the first 16 differences; all counted in the
+profile's "verified N (M mismatches)"):
+`Back stages (=2): replica <what> <index:#x> holds <replica:#x>, primary <primary:#x>`, `<what>`
+one of `register`, `constant buffer bind (stage << 8 | slot)`, `engine_state`, `replace_table
+(entries)`, `execute_on`, `draw_state (instance count)`, `indirect_state (address)`,
+`draw_texture_state (texture)`, `unsent light.rebound (stage)`, `light changes`. A record out of
+order logs `GPU stages: <stage> read record <seen> where <expected> was due` (critical).
+
+Profile lines (`EDEN_NX2_GPU_PROFILE=1`): one per stage ("GPU back thread" = A, "GPU memory
+stage" = BC / B, "GPU record stage" = C); " | stages:" joins from A by reason, ring KiB, delta
+words, side states; " | stage diagnostics:" (also at `=0`) what decides cut 2: texture / image
+buffer and transform feedback draws, inline / DMA / constant buffer writes landing on images or
+texture pools, GPU-written data held by query / buffer / texture, tick work, memory dirty
+queries.
+
+At `=0` the behaviour is the same; the code added on that path is listed with its switch (one
+`stage_capture` test per Maxwell3D hook, an `Active()` test at BackLoop's start and in the owner
+check, a `Proxy()` test in BindChannel, thread-local checks on the memory manager's cache paths,
+profile-only counters). A gate checks its cost: the `=0` build against perf/hafif's e0488ae90
+with the same flags, back microseconds per draw within 1%.
+
+Known limits:
+
+- Cut 2 is plumbing until T9 (two-part events, ring 3's classification); its launchers are
+  locked. T3's choice for K3 (holding the buffer cache lock across B's joins vs. its release /
+  retake, `Nx2Record::CacheLock`) is open and decided in T9.
+- Mid-game settings changes stop and start the stages (Drain, Stop); not tried in a game yet.
+- `GPU::Impl::InitChannel` initializes a channel on a guest CPU thread with the real
+  rasterizer's caches unlocked: as before the stages, they do not change it.
+- `=2` checks registers and light changes on every compared record, side state only after a
+  record that carried it; whether a rebound bit was lost is left to a sequential mode (`=4`, not
+  built).
+- Built and unit-tested (rings, replicas, binds: a shim of Catch2); not run in a game yet.

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -155,19 +156,39 @@ GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
-/// GpuSplit::CheckOwner).
+/// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
+/// alone): where, the thread's name and the first frames.
 void ReportStack(const char* check, const char* where) {
 #ifdef _WIN32
+    constexpr u32 MaxReports = 20;
+    constexpr USHORT LogFrames = 6;
     static std::atomic<u32> reports{};
-    if (reports.fetch_add(1, std::memory_order_relaxed) >= 12) {
+    const u32 report = reports.fetch_add(1, std::memory_order_relaxed);
+    if (report >= MaxReports) {
         return;
     }
     const u8 stage = Detail::t_stage;
-    std::fprintf(stderr, "GPU %s: %s on thread %lu (%s%s), the record owner is %s\n", check, where,
-                 GetCurrentThreadId(),
-                 stage < 3 ? Nx2Profile::stage_report_names[stage] : "no stage",
-                 Detail::t_in_join ? ", in a join" : "",
-                 Nx2Profile::stage_report_names[g_owner.load(std::memory_order_relaxed)]);
+    const char* const stage_name =
+        stage < 3 ? Nx2Profile::stage_report_names[stage] : "no stage";
+    const char* const owner_name =
+        Nx2Profile::stage_report_names[g_owner.load(std::memory_order_relaxed)];
+    char thread_name[64] = "?";
+    using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static const auto get_description = reinterpret_cast<GetThreadDescriptionFn>(
+        GetProcAddress(GetModuleHandleA("KernelBase.dll"), "GetThreadDescription"));
+    if (PWSTR description{}; get_description != nullptr &&
+                             SUCCEEDED(get_description(GetCurrentThread(), &description))) {
+        if (description[0] != L'\0') {
+            WideCharToMultiByte(CP_UTF8, 0, description, -1, thread_name, sizeof(thread_name),
+                                nullptr, nullptr);
+            thread_name[sizeof(thread_name) - 1] = '\0';
+        }
+        LocalFree(description);
+    }
+    std::fprintf(stderr, "GPU %s: %s on thread %lu %s (%s%s), the record owner is %s\n", check,
+                 where, GetCurrentThreadId(), thread_name, stage_name,
+                 Detail::t_in_join ? ", in a join" : "", owner_name);
+    std::string log_frames;
     void* frames[40];
     const USHORT count = RtlCaptureStackBackTrace(1, 40, frames, nullptr);
     for (USHORT i = 0; i < count; ++i) {
@@ -179,11 +200,18 @@ void ReportStack(const char* check, const char* where) {
             GetModuleFileNameA(module, name, sizeof(name));
         }
         const char* base_name = std::strrchr(name, '\\');
-        std::fprintf(stderr, "  frame %s+%#llx\n", base_name ? base_name + 1 : name,
-                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) -
-                                                     reinterpret_cast<uintptr_t>(module)));
+        const auto offset = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) -
+                                                            reinterpret_cast<uintptr_t>(module));
+        std::fprintf(stderr, "  frame %s+%#llx\n", base_name ? base_name + 1 : name, offset);
+        if (i < LogFrames) {
+            log_frames += fmt::format("{}{}+{:#x}", i == 0 ? "" : " < ",
+                                      base_name ? base_name + 1 : name, offset);
+        }
     }
     std::fflush(stderr);
+    LOG_WARNING(HW_GPU, "GPU {} ({}/{}): {} on thread {} '{}' ({}{}), the record owner is {}; {}",
+                check, report + 1, MaxReports, where, GetCurrentThreadId(), thread_name,
+                stage_name, Detail::t_in_join ? ", in a join" : "", owner_name, log_frames);
 #else
     LOG_ERROR(HW_GPU, "GPU {}: {}", check, where);
 #endif
@@ -284,6 +312,10 @@ void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address,
 }
 
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary) {
+    // The stages off (a capture without them, YUZU_TESTS' unit test): no ring to write to.
+    if (!Active()) {
+        return;
+    }
     CheckRecord(1);
     u64* const body = BeginRecord(ring, RecordKind::Target, 1);
     body[0] = reinterpret_cast<u64>(primary);
@@ -401,6 +433,13 @@ void Start(Core::System& system) {
              : config.mode == 3 ? ", pass-through"
                                 : "",
              config.mode, options.cut_c ? ", cuts ac" : "", config.check ? ", STAGE_CHECK" : "");
+    // K2 (cut c) runs B | C before T9 classifies the events that need both: a trial of the
+    // plumbing, not for play or measuring. Once per process (Start runs again after a Stop).
+    static std::atomic_flag cut_c_warned{};
+    if (options.cut_c && !cut_c_warned.test_and_set(std::memory_order_relaxed)) {
+        LOG_WARNING(HW_GPU, "GPU back stages: cut c is a plumbing trial only until T9 "
+                            "(EDEN_NX2_BACK_CUTS holds 'c'): not for play or measuring");
+    }
 }
 
 void Stop() {
@@ -446,8 +485,11 @@ void CheckRecordOwner(const char* where) {
     if (OnStage(Stage::A) && !InJoin()) {
         // A reached the real rasterizer outside a join (S3).
         Nx2Profile::Add(Counter::StageUnproxied, 1);
-    } else if (t_stage == NoStage && !g_record_busy.load(std::memory_order_acquire)) {
+    } else if (t_stage == NoStage &&
+               (!g_record_busy.load(std::memory_order_acquire) || GpuSplit::Get().BackCaughtUp())) {
         // The front after a drain, CPU threads: the stages are idle (as GpuSplit::CheckOwner).
+        // Caught up, the last stage may still end its batch (busy) after the mark it stored, a
+        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3).
         return;
     }
     ReportStack("stages owner check", where);

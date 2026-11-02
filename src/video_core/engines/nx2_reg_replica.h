@@ -163,6 +163,21 @@ void ApplyDelta(u32* regs, DirtyFlags& flags, const DirtyTables& tables, const u
     }
 }
 
+/// What Maxwell3D::ConsumeSinkImpl leaves in the registers and the shadow RAM, written into
+/// copies of them (Maxwell3D::Front while staged: the front copies A's state and A consumes its
+/// method sink itself, R1 sahiplik-2). `track`: the shadow RAM control is Track or
+/// TrackWithFilter (the value goes to the shadow too); `replay`: it is Replay (the register gets
+/// the shadow's value). Same-value writes ConsumeSinkImpl skips leave what this writes.
+template <typename Sink>
+void SinkInto(u32* regs, u32* shadow, bool track, bool replay, const Sink& sink) {
+    for (const auto& [method, value] : sink) {
+        if (track) {
+            shadow[method] = value;
+        }
+        regs[method] = replay ? shadow[method] : value;
+    }
+}
+
 /// Side state (D4): what a draw reads of Maxwell3D outside its registers. A sends the parts that
 /// changed since they were last sent (generation counters, S5/2) before the draw reading them
 /// (T5, Nx2Stages::WriteSideState). Wire format: a header word (bits 0-15 the parts, bits 32-63
