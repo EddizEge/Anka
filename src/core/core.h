@@ -118,6 +118,8 @@ namespace Core {
 
 /// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
 extern std::atomic<u64> g_nx2_present_count;
+/// Emulation sessions started in this process (nvdrv's Module counts them).
+extern std::atomic<u32> g_nx2_session;
 
 class CpuManager;
 class Debugger;

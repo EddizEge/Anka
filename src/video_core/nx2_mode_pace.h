@@ -26,6 +26,7 @@
 
 namespace Core {
 extern std::atomic<u64> g_nx2_present_count; // core/core.h: vi2 229 presents so far
+extern std::atomic<u32> g_nx2_session;        // core/core.h: emulation sessions so far
 }
 
 namespace VideoCommon::Nx2ModePace {
@@ -439,10 +440,33 @@ inline std::optional<Probe21> ReadProbe21() {
 }
 
 struct State21 {
-    State21(const Params21& params_, std::optional<Probe21> probe)
-        : params{params_}, controller{params_, probe} {}
+    State21(const Params21& params_, std::optional<Probe21> probe_)
+        : params{params_}, probe{probe_}, controller{params_, probe_},
+          session{Core::g_nx2_session.load(std::memory_order_relaxed)} {}
+
+    /// Another emulation session in this process: the controller, the meter and the summary start
+    /// over (the settings stay).
+    void Restart() {
+        controller = Controller21{params, probe};
+        meter = Meter{};
+        last_paced = {};
+        held_now_ms = 0.0;
+        last_held = false;
+        release_ms = 0.0;
+        gaps = {};
+        gap_next = 0;
+        summary_since = {};
+        presents = {};
+        pushes = 0;
+        held_ms = 0.0;
+        released = 0;
+        gaps30 = 0;
+        late_gaps30 = 0;
+        why = {};
+    }
 
     Params21 params;
+    std::optional<Probe21> probe;
     std::mutex mutex;
     Controller21 controller;
     Meter meter;
@@ -462,6 +486,7 @@ struct State21 {
     u32 gaps30{};      ///< present gaps at 30, not after a held or released present
     u32 late_gaps30{}; ///< of those, 34 ms or more
     std::array<u32, static_cast<std::size_t>(Why::Count)> why{};
+    u32 session; ///< Core::g_nx2_session the state belongs to
 };
 
 inline State21& GetState21() {
@@ -519,8 +544,15 @@ inline void Present21(u32 mode, std::chrono::steady_clock::time_point entered,
                       std::chrono::steady_clock::time_point paced) {
     const u64 busy = Nx2BusyClock::Ticks();
     const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+    const u32 session = Core::g_nx2_session.load(std::memory_order_relaxed);
     auto& s = GetState21();
     std::scoped_lock lock{s.mutex};
+    if (session != s.session) {
+        s.session = session;
+        s.Restart();
+        LOG_INFO(HW_GPU, "nx2 mode pace v2.1: emulation session {}: the controller starts over",
+                 session);
+    }
     const auto ms = [](std::chrono::steady_clock::time_point at) {
         return std::chrono::duration<double, std::milli>(at.time_since_epoch()).count();
     };
