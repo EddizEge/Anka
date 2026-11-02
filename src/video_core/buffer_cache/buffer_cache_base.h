@@ -46,24 +46,6 @@
 
 namespace VideoCommon {
 
-// EDEN_NX2_VERTEX_SKIP (BufferCache::VertexSkipEnabled) and EDEN_NX2_SYNC_MEMO (SynchronizeBuffer),
-// read once at startup: as function-local statics every per-draw query paid a thread-safe
-// initialization check (VertexSkipEnabled alone ~0.8% of the split back thread).
-inline const bool g_nx2_vertex_skip = [] {
-    const char* value = std::getenv("EDEN_NX2_VERTEX_SKIP");
-    return value == nullptr || value[0] != '0';
-}();
-/// EDEN_NX2_SYNC_MEMO=0 synchronizes every range as before.
-inline const bool g_nx2_sync_memo = [] {
-    const char* value = std::getenv("EDEN_NX2_SYNC_MEMO");
-    return value == nullptr || value[0] != '0';
-}();
-/// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
-/// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
-inline const bool g_nx2_vertex_fast = [] {
-    const char* value = std::getenv("EDEN_NX2_VERTEX_FAST");
-    return value == nullptr || value[0] != '0';
-}();
 /// A 0/1/2 switch (unset or another value: 1), read at the first call: not at static
 /// initialization, before main loads nx2_switches.txt into the environment (yuzu main.cpp), and
 /// without a function-local static's thread-safe initialization check on every call (MSVC: a
@@ -76,6 +58,24 @@ inline int ReadNx2Mode(std::atomic<s8>& mode, const char* name) {
         mode.store(value, std::memory_order_relaxed);
     }
     return value;
+}
+// EDEN_NX2_VERTEX_SKIP (BufferCache::VertexSkipEnabled) and EDEN_NX2_SYNC_MEMO (SynchronizeBuffer):
+// per-draw queries, read through ReadNx2Mode (as function-local statics every query paid a
+// thread-safe initialization check: VertexSkipEnabled alone ~0.8% of the split back thread).
+inline bool Nx2VertexSkip() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_VERTEX_SKIP") != 0;
+}
+/// EDEN_NX2_SYNC_MEMO=0 synchronizes every range as before.
+inline bool Nx2SyncMemo() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SYNC_MEMO") != 0;
+}
+/// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
+/// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
+inline bool Nx2VertexFast() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_VERTEX_FAST") != 0;
 }
 /// EDEN_NX2_VERTEX_CLEAN (with EDEN_NX2_VERTEX_SKIP): a stream its registers disable (enable bit
 /// clear or an empty range) is resolved to NULL_BINDING once and its VertexBuffer<n> flag cleared.
@@ -724,7 +724,7 @@ private:
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.
     static bool VertexSkipEnabled() {
-        return g_nx2_vertex_skip;
+        return Nx2VertexSkip();
     }
 
     /// Bumped by every page_table change (ChangeRegister) (EDEN_NX2_VERTEX_FAST).

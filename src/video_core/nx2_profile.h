@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <unordered_set>
 
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
@@ -77,11 +79,26 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "fence skipped", "method", "split drain", "split wait", "parameter flush", "light draw",
 };
 
-// Read once at startup: Enabled() runs several times per method write (no guard to check).
-inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+// EDEN_NX2_GPU_PROFILE (any value but 0) is read at the first call: after main loads
+// nx2_switches.txt into the environment (yuzu main.cpp; read at static initialization, the file
+// could not turn it on), and with no function-local static's thread-safe initialization check:
+// Enabled() runs several times per method write. Threads racing on the first call compute the
+// same value.
+inline std::atomic<s8> g_enabled{-1};
+
+YUZU_NO_INLINE inline bool ReadEnabled() {
+    const char* value = std::getenv("EDEN_NX2_GPU_PROFILE");
+    const bool on = value != nullptr && value[0] != '0';
+    g_enabled.store(on ? 1 : 0, std::memory_order_relaxed);
+    return on;
+}
 
 inline bool Enabled() {
-    return g_enabled;
+    const s8 value = g_enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        return ReadEnabled();
+    }
+    return value != 0;
 }
 
 // Nanoseconds; from the host's own counter where the wall clock reads it directly (the zones

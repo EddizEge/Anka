@@ -931,7 +931,7 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
     // EDEN_NX2_VERTEX_FAST: every caller passes index < NUM_VERTEX_BUFFERS (<= v_buffer's 32),
     // and VertexBufferSlot's ASSERT is an out-of-line lambda call each time (~0.5% of the split
     // back on the wide view with BindHostVertexBuffers' one).
-    Binding& slot = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
+    Binding& slot = Nx2VertexFast() ? v_buffer[index] : VertexBufferSlot(index);
     if (slot.device_addr != binding.device_addr || slot.size != binding.size) {
         ++vertex_buffers_serial;
     }
@@ -1052,7 +1052,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 }
                 ++sync_guarded;
             }
-            const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
+            const Binding& binding = Nx2VertexFast() ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             // Touch returns at once for a buffer already touched this frame: skip its LRU lookup
             // when this stream touched the same buffer this frame.
@@ -1816,7 +1816,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
                        entry.gpu_addr_begin == gpu_addr_begin &&
                        entry.gpu_addr_end == gpu_addr_end &&
                        entry.generation == vertex_memo_generations[entry.buffer_id.Value()] &&
-                       ((g_nx2_vertex_fast && entry.layout_epoch == buffer_layout_epoch) ||
+                       ((Nx2VertexFast() && entry.layout_epoch == buffer_layout_epoch) ||
                         page_table[entry.device_addr >> CACHING_PAGEBITS] == entry.buffer_id);
             };
             const auto bind_entry = [&](const VertexBufferMemo& entry) {
@@ -1829,7 +1829,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
                 UpdateVertexBufferSlot(index, binding);
             };
             // EDEN_NX2_VERTEX_FAST: a stream marked dirty with the range it resolved last time.
-            if (g_nx2_vertex_fast && memo_holds(vertex_stream_memo[index])) {
+            if (Nx2VertexFast() && memo_holds(vertex_stream_memo[index])) {
                 bind_entry(vertex_stream_memo[index]);
                 return;
             }
@@ -1837,7 +1837,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
                                 (VERTEX_MEMO_SIZE - 1)]
                         .entry;
             if (memo_holds(*memo)) {
-                if (g_nx2_vertex_fast) {
+                if (Nx2VertexFast()) {
                     // page_table names the buffer now (tested, or unchanged since it did).
                     memo->layout_epoch = buffer_layout_epoch;
                     vertex_stream_memo[index] = *memo;
@@ -1877,7 +1877,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             .device_addr = *device_addr,
             .map_epoch = map_epoch,
             // ~u64{0} is never reached: a later hit then tests page_table as before.
-            .layout_epoch = g_nx2_vertex_fast &&
+            .layout_epoch = Nx2VertexFast() &&
                                     page_table[*device_addr >> CACHING_PAGEBITS] == buffer_id
                                 ? buffer_layout_epoch
                                 : ~u64{0},
@@ -1886,7 +1886,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
             .generation = vertex_memo_generations[slot],
             .memo_epoch = vertex_memo_epoch,
         };
-        if (g_nx2_vertex_fast) {
+        if (Nx2VertexFast()) {
             vertex_stream_memo[index] = *memo;
         }
     }
@@ -2288,7 +2288,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         // EDEN_NX2_SYNC_SKIP=2 still walks a remembered range and reports any upload found there.
         bool memo_hit = false;
         bool memo_missed = false; // Counted only while profiling (EDEN_NX2_GPU_PROFILE)
-        if (g_nx2_sync_memo && size != 0) {
+        if (Nx2SyncMemo() && size != 0) {
             static u64 syncs{};
             static u64 skipped{};
             if ((++syncs & ((u64{1} << 22) - 1)) == 0) {
