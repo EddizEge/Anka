@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
 #include "common/settings_enums.h"
@@ -41,7 +42,12 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
+#include "hid_core/frontend/emulated_controller.h"
+#include "hid_core/hid_core.h"
+#include "hid_core/hid_types.h"
+#include "hid_core/hid_util.h"
 #include "input_common/drivers/keyboard.h"
+#include "input_common/drivers/virtual_gamepad.h"
 #include "input_common/main.h"
 #include "network/network.h"
 #include "sdl_config.h"
@@ -54,6 +60,7 @@
 #endif
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
+#include "yuzu_cmd/nx2_auto_script.h"
 #include "yuzu_cmd/nx2_sampler.h"
 
 #ifdef _WIN32
@@ -239,6 +246,8 @@ static void OnStatusMessageReceived(const Network::StatusMessageEntry& msg) {
         std::cout << std::endl << "* " << message << std::endl << std::endl;
 }
 
+static void StartAutoRun();
+
 struct SdlState {
     Core::System system{};
     // Must outlive emu_window, which keeps a pointer to it.
@@ -270,6 +279,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Common::Log::Initialize();
     Common::Log::SetColorConsoleBackendEnabled(true);
     Common::Log::Start();
+    StartAutoRun();
 
     int option_index = 0;
 #ifdef _WIN32
@@ -470,9 +480,150 @@ static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem) {
     }
 }
 
+// EDEN_NX2_AUTO_INPUT_FILE (yuzu_cmd/nx2_auto_script.h): the script presses keys on the virtual
+// gamepad. Its port of a player is always one of that player's inputs, next to the configured
+// ones, so player 1 needs no remapping; it is only connected for this run when it is not.
+namespace {
+using Nx2AutoScript::Anchor;
+using VirtualButton = InputCommon::VirtualGamepad::VirtualButton;
+static_assert(int(VirtualButton::ButtonA) == 0 && int(VirtualButton::ButtonY) == 3 &&
+                  int(VirtualButton::TriggerL) == 6 && int(VirtualButton::TriggerZR) == 9 &&
+                  int(VirtualButton::ButtonMinus) == 11 && int(VirtualButton::ButtonLeft) == 12 &&
+                  int(VirtualButton::ButtonUp) == 13 && int(VirtualButton::ButtonRight) == 14 &&
+                  int(VirtualButton::ButtonDown) == 15,
+              "nx2_auto_script.cpp key ids");
+
+struct AutoRun {
+    bool active = false;
+    Nx2AutoScript::Script script;
+    std::vector<Nx2AutoScript::Action> actions;
+    size_t next = 0;
+    bool bound = false;
+    size_t port = 0;
+    std::chrono::steady_clock::time_point boot;
+    std::optional<std::chrono::steady_clock::time_point> first_present;
+};
+AutoRun g_auto;
+} // Anonymous namespace
+
+static void StartAutoRun() {
+    const char* path = std::getenv("EDEN_NX2_AUTO_INPUT_FILE");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    g_auto.active = true;
+    g_auto.boot = std::chrono::steady_clock::now();
+    std::ifstream file{path};
+    if (!file) {
+        LOG_ERROR(Frontend, "nx2 auto input: cannot read EDEN_NX2_AUTO_INPUT_FILE '{}'", path);
+        return;
+    }
+    const std::string text{std::istreambuf_iterator<char>{file}, {}};
+    g_auto.script = Nx2AutoScript::ParseScript(text);
+    for (const std::string& error : g_auto.script.errors) {
+        LOG_ERROR(Frontend, "nx2 auto input: {}: {} (skipped)", path, error);
+    }
+    g_auto.actions = Nx2AutoScript::Schedule(g_auto.script);
+    LOG_INFO(Frontend, "nx2 auto input: {} presses from {}, anchor {}, {} bad lines",
+             g_auto.script.events.size(), path, Nx2AutoScript::AnchorName(g_auto.script.anchor),
+             g_auto.script.errors.size());
+}
+
+static void BindAutoInput(SdlState& state) {
+    g_auto.bound = true;
+    if (state.input_subsystem.GetVirtualGamepad() == nullptr) {
+        LOG_ERROR(Frontend, "nx2 auto input: no virtual gamepad engine, the script is not run");
+        g_auto.actions.clear();
+        return;
+    }
+    constexpr size_t HandheldPort = Service::HID::NpadIdTypeToIndex(Core::HID::NpadIdType::Handheld);
+    auto& hid = state.system.HIDCore();
+    auto* const player1 = hid.GetEmulatedController(Core::HID::NpadIdType::Player1);
+    auto* const handheld = hid.GetEmulatedController(Core::HID::NpadIdType::Handheld);
+    if (player1 != nullptr && player1->IsConnected()) {
+        LOG_INFO(Frontend, "nx2 auto input: player 1 is connected (style {}), virtual gamepad port 0",
+                 static_cast<int>(player1->GetNpadStyleIndex()));
+        g_auto.port = 0;
+        return;
+    }
+    if (handheld != nullptr && handheld->IsConnected()) {
+        LOG_INFO(Frontend,
+                 "nx2 auto input: player 1 is not connected but handheld is, virtual gamepad port {}",
+                 HandheldPort);
+        g_auto.port = HandheldPort;
+        return;
+    }
+    if (player1 != nullptr) {
+        // Runtime state only: nothing writes it back to the settings or the config file.
+        if (player1->GetNpadStyleIndex() == Core::HID::NpadStyleIndex::None) {
+            player1->SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+        }
+        player1->Connect();
+    }
+    if (player1 == nullptr || !player1->IsConnected()) {
+        LOG_ERROR(Frontend,
+                  "nx2 auto input: could not connect player 1, the script's presses reach no controller");
+        g_auto.actions.clear();
+        return;
+    }
+    LOG_INFO(Frontend,
+             "nx2 auto input: connected player 1 for this run (style {}), virtual gamepad port 0",
+             static_cast<int>(player1->GetNpadStyleIndex()));
+    g_auto.port = 0;
+}
+
+// Seconds since the anchor; nothing before the first present for the present anchor.
+static std::optional<double> AutoSeconds(Anchor anchor, std::chrono::steady_clock::time_point now) {
+    if (anchor == Anchor::Boot) {
+        return std::chrono::duration<double>(now - g_auto.boot).count();
+    }
+    if (!g_auto.first_present) {
+        return std::nullopt;
+    }
+    return std::chrono::duration<double>(now - *g_auto.first_present).count();
+}
+
+static void RunAutoInput(SdlState& state) {
+    if (!g_auto.active) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+    if (!g_auto.first_present && presents > 0) {
+        g_auto.first_present = now;
+        LOG_INFO(Frontend, "nx2 auto input: first present {:.2f} s after start-up",
+                 std::chrono::duration<double>(now - g_auto.boot).count());
+    }
+    if (g_auto.next >= g_auto.actions.size()) {
+        return;
+    }
+    if (!g_auto.bound) {
+        BindAutoInput(state);
+    }
+    auto* const pad = state.input_subsystem.GetVirtualGamepad();
+    const auto elapsed = AutoSeconds(g_auto.script.anchor, now);
+    while (elapsed && g_auto.next < g_auto.actions.size() &&
+           g_auto.actions[g_auto.next].time <= *elapsed) {
+        const Nx2AutoScript::Action& action = g_auto.actions[g_auto.next++];
+        const Nx2AutoScript::Event& event = g_auto.script.events[action.event];
+        if (event.stick) {
+            const float x = action.down ? event.x : 0.0f;
+            const float y = action.down ? event.y : 0.0f;
+            pad->SetStickPosition(g_auto.port, event.id, x, y);
+            LOG_INFO(Frontend, "nx2 auto input: t={:.2f} s (present #{}) {} {} ({:.2f}, {:.2f})",
+                     *elapsed, presents, event.name, action.down ? "down" : "up", x, y);
+        } else {
+            pad->SetButtonState(g_auto.port, event.id, action.down);
+            LOG_INFO(Frontend, "nx2 auto input: t={:.2f} s (present #{}) {} {}", *elapsed,
+                     presents, event.name, action.down ? "down" : "up");
+        }
+    }
+}
+
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
     RunKeyScript(state->input_subsystem);
+    RunAutoInput(*state);
     return state->emu_window && state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
