@@ -88,8 +88,9 @@ void WriteSideState(Tegra::Engines::Maxwell3D& primary, u64* out);
 void ApplySideState(Tegra::Engines::Maxwell3D& replica, const u64* words, u32 count);
 
 /// =2 (T1 calls it on the consumer after a record it compares, EDEN_NX2_BACK_STAGES_EVERY, while
-/// the producer waits): compares `stage`'s replica of `primary` (the current target) with it as
-/// far as the two are kept equal (K2):
+/// the producer waits: before it ends the record; for a Join record after its deltas and before
+/// the park ack, as A writes the primaries again once acked (K8, S8)): compares `stage`'s replica
+/// of `primary` (the current target) with it as far as the two are kept equal (K2):
 /// - After every compared record: the registers (memcmp; T2 lists the exceptions with reasons),
 ///   and light.changes with A's shadow of it (what A noted since the last draw record it sent)
 ///   without UniformSame and UniformData: cb data writes note those on the replica alone
