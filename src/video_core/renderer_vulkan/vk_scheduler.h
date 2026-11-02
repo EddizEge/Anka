@@ -222,14 +222,15 @@ public:
     /// RequestOutsideRenderPassOperationContext, each run of commands between marks as one
     /// RecordWithUploadBuffer (the upload command buffer's order kept). The worker frees the
     /// list's arena memory once it ran the last run. It notes no tick: NoteSeqTick does.
-    void Replay(RecordList& list, u32 seq);
+    void Replay(RecordList& list, u64 seq);
 
     /// Cut c, C: everything B stamped with `seq` (and the seqs before it) went into the current
     /// tick. Once per packet, after its last command (the draw): noting it before a submit that
-    /// comes ahead of the draw would let B reuse what the draw reads too early.
-    void NoteSeqTick(u32 seq);
+    /// comes ahead of the draw would let B reuse what the draw reads too early. Seqs are u64 and
+    /// never wrap (DrawToC::seq, K5).
+    void NoteSeqTick(u64 seq);
 
-    /// The last seq C noted (64-bit, Nx2Record::SeqTicks::Widen). Any thread.
+    /// The last seq C noted (0: none): C is done with `seq` once CDoneSeq() >= seq. Any thread.
     [[nodiscard]] u64 CDoneSeq() const noexcept {
         return seq_ticks.DoneSeq();
     }
