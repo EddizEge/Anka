@@ -24,6 +24,7 @@ add_executable(tests
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp
     video_core/nx2_mode_gov.cpp
+    video_core/nx2_mode_pace.cpp
     video_core/nx2_upscale_pick.cpp
     input_common/calibration_configuration_job.cpp
 )

@@ -1,0 +1,393 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+
+#include <fmt/format.h>
+
+#include "common/common_types.h"
+#include "common/cpu_features.h"
+#include "common/logging.h"
+#include "common/settings.h"
+#include "video_core/nx2_busy_clock.h"
+#include "video_core/nx2_mode_pace_logic.h"
+
+namespace Core {
+extern std::atomic<u64> g_nx2_present_count; // core/core.h: vi2 229 presents so far
+}
+
+namespace VideoCommon::Nx2ModePace {
+
+// EDEN_NX2_MODE_PACE=1 (multicore, off by default; needs EDEN_NX2_PRESENT_INTERVAL_WORD for the
+// game's mode): steer Donkey Kong Bananza's 60 / 30 / 20 fps mode by holding its vi2 229 presents
+// for a few frames (late frames, which is what it switches on), the GPU timer left at
+// fast_gpu_time's /256. Decisions in nx2_mode_pace_logic.h; this part times the presents, holds
+// them (Hold, after the vblank pacing) and logs "nx2 mode pace:" lines. Off with
+// EDEN_NX2_PRESENT_INTERVAL > 1, EDEN_NX2_GPU_BUSY_CLOCK (both make the game read GPU time and drop
+// its resolution); it turns EDEN_NX2_MODE_GOV off (nx2_mode_gov.h). Holds only at speed limit 100%.
+// The controller's clock is the sum of the present intervals, each at most 1 s: across a pause or
+// a long load its rests run slower than the wall clock.
+//
+// EDEN_NX2_PACE_SPIN_US=<0-3000> (default 0, with or without the controller): every vblank pacing
+// sleep (and the hold) wakes that long before its target and yields until it; 0 sleeps as before.
+
+inline bool On(const char* text) {
+    return text != nullptr && text[0] != '0';
+}
+
+inline bool Enabled() {
+    static const bool enabled = [] {
+        if (!On(std::getenv("EDEN_NX2_MODE_PACE"))) {
+            return false;
+        }
+        if (!Settings::values.use_multi_core.GetValue()) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE needs multicore: off");
+            return false;
+        }
+        if (std::getenv("EDEN_NX2_PRESENT_INTERVAL_WORD") == nullptr) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE needs EDEN_NX2_PRESENT_INTERVAL_WORD: off");
+            return false;
+        }
+        if (const char* text = std::getenv("EDEN_NX2_PRESENT_INTERVAL");
+            text != nullptr && std::strtol(text, nullptr, 10) > 1) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with EDEN_NX2_PRESENT_INTERVAL > 1 (the game's "
+                                "mode would read as at least that): off");
+            return false;
+        }
+        if (On(std::getenv("EDEN_NX2_GPU_BUSY_CLOCK"))) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with EDEN_NX2_GPU_BUSY_CLOCK (the game would "
+                                "read GPU time and drop its resolution): off");
+            return false;
+        }
+        if (const char* text = std::getenv("EDEN_NX2_GPU_TICK_DIV")) {
+            const double div = std::strtod(text, nullptr);
+            if (div >= 1.0 && div < 64.0) {
+                LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with EDEN_NX2_GPU_TICK_DIV={}: the game "
+                                    "reads GPU time and may drop its resolution",
+                            div);
+            }
+        } else if (Settings::values.gpu_clock.GetValue() == Settings::GpuClock::Normal) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE with fast_gpu_time off (/1): the game reads "
+                                "GPU time and may drop its resolution");
+        }
+        return true;
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_PACE_SPIN_US: 0-3000, default 0.
+inline u32 SpinUs() {
+    static const u32 spin = [] {
+        const char* text = std::getenv("EDEN_NX2_PACE_SPIN_US");
+        if (text == nullptr) {
+            return 0U;
+        }
+        const long value = std::strtol(text, nullptr, 10);
+        if (value < 0 || value > 3000) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_PACE_SPIN_US={} out of 0-3000: 0", text);
+            return 0U;
+        }
+        if (value > 0) {
+            LOG_INFO(HW_GPU, "vblank pacing wakes {} us early and yields to its target "
+                             "(EDEN_NX2_PACE_SPIN_US)",
+                     value);
+        }
+        return static_cast<u32>(value);
+    }();
+    return spin;
+}
+
+inline void SleepUntil(std::chrono::steady_clock::time_point target) {
+    SleepUntil(target, SpinUs());
+}
+
+inline void SleepFor(std::chrono::nanoseconds duration) {
+    if (SpinUs() == 0) {
+        std::this_thread::sleep_for(duration);
+        return;
+    }
+    SleepUntil(std::chrono::steady_clock::now() + duration);
+}
+
+/// EDEN_NX2_MODE_PACE_<NAME>: a value out of its range is ignored (warning).
+inline Params ReadParams() {
+    Params p{};
+    const auto number = [](const char* name, double& value, double low, double high) {
+        if (const char* text = std::getenv(name)) {
+            char* end{};
+            const double parsed = std::strtod(text, &end);
+            if (end != text && parsed >= low && parsed <= high) {
+                value = parsed;
+            } else {
+                LOG_WARNING(HW_GPU, "{}={} out of {}-{}: {}", name, text, low, high, value);
+            }
+        }
+    };
+    const auto count = [](const char* name, u32& value, long low, long high) {
+        if (const char* text = std::getenv(name)) {
+            char* end{};
+            const long parsed = std::strtol(text, &end, 10);
+            if (end != text && parsed >= low && parsed <= high) {
+                value = static_cast<u32>(parsed);
+            } else {
+                LOG_WARNING(HW_GPU, "{}={} out of {}-{}: {}", name, text, low, high, value);
+            }
+        }
+    };
+    const auto flag = [](const char* name, bool& value) {
+        if (const char* text = std::getenv(name)) {
+            value = text[0] != '0';
+        }
+    };
+    flag("EDEN_NX2_MODE_PACE_AUTO", p.auto_push);
+    flag("EDEN_NX2_MODE_PACE_60", p.allow60);
+    number("EDEN_NX2_MODE_PACE_FROM60", p.from60_ms, 10.0, 33.0);
+    number("EDEN_NX2_MODE_PACE_SELF60", p.self60_ms, 20.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_DOWN_DWELL", p.down_dwell_s, 0.0, 5.0);
+    number("EDEN_NX2_MODE_PACE_TO60", p.to60_ms, 5.0, 17.0);
+    number("EDEN_NX2_MODE_PACE_UP_DWELL", p.up_dwell_s, 1.0, 120.0);
+    number("EDEN_NX2_MODE_PACE_UP_DWELL_MAX", p.up_dwell_max_s, 1.0, 600.0);
+    number("EDEN_NX2_MODE_PACE_VERIFY60", p.verify60_s, 0.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_STABLE60", p.stable60_s, 10.0, 600.0);
+    number("EDEN_NX2_MODE_PACE_TO30", p.to30_ms, 15.0, 33.0);
+    number("EDEN_NX2_MODE_PACE_UP20_DWELL", p.up20_dwell_s, 0.5, 10.0);
+    number("EDEN_NX2_MODE_PACE_AFTER_UP20", p.after_up20_s, 0.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_HOLD", p.hold_ms, 34.5, 60.0);
+    number("EDEN_NX2_MODE_PACE_HOLD_LATE", p.hold_late_ms, 34.5, 80.0);
+    number("EDEN_NX2_MODE_PACE_HOLD20", p.hold20_ms, 51.0, 80.0);
+    number("EDEN_NX2_MODE_PACE_HOLD20_STEP", p.hold20_step_ms, 0.0, 20.0);
+    number("EDEN_NX2_MODE_PACE_HOLD20_MAX", p.hold20_max_ms, 51.0, 90.0);
+    count("EDEN_NX2_MODE_PACE_HOLD20_EVERY", p.hold20_step_frames, 1, 100);
+    if (const char* text = std::getenv("EDEN_NX2_MODE_PACE_UP_SINGLE")) {
+        const double parsed = std::strtod(text, nullptr);
+        if (parsed == 0.0 || (parsed >= 50.0 && parsed <= 95.0)) {
+            p.up_single_ms = parsed;
+        } else {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE_UP_SINGLE={} not 0 or 50-95: 0", text);
+        }
+    }
+    count("EDEN_NX2_MODE_PACE_DOWN_FRAMES", p.down_frames, 3, 300);
+    count("EDEN_NX2_MODE_PACE_UP_FRAMES", p.up_frames, 10, 300);
+    count("EDEN_NX2_MODE_PACE_UP20_FRAMES", p.up20_frames, 5, 200);
+    number("EDEN_NX2_MODE_PACE_DOWN_REST", p.down_rest_s, 0.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_DOWN_REST_MAX", p.down_rest_max_s, 0.0, 600.0);
+    count("EDEN_NX2_MODE_PACE_DOWN_TRIES", p.down_tries, 1, 20);
+    number("EDEN_NX2_MODE_PACE_UP_REST", p.up_rest_s, 0.0, 300.0);
+    number("EDEN_NX2_MODE_PACE_UP_REST_MAX", p.up_rest_max_s, 0.0, 600.0);
+    count("EDEN_NX2_MODE_PACE_UP_TRIES", p.up_tries, 1, 20);
+    number("EDEN_NX2_MODE_PACE_UP20_REST", p.up20_rest_s, 0.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_UP20_REST_MAX", p.up20_rest_max_s, 0.0, 600.0);
+    count("EDEN_NX2_MODE_PACE_UP20_TRIES", p.up20_tries, 1, 20);
+    number("EDEN_NX2_MODE_PACE_STALL", p.stall_ms, 50.0, 500.0);
+    number("EDEN_NX2_MODE_PACE_STALL_QUIET", p.stall_quiet_s, 0.0, 10.0);
+    number("EDEN_NX2_MODE_PACE_MODE_QUIET", p.mode_quiet_s, 0.0, 10.0);
+    number("EDEN_NX2_MODE_PACE_MODE_QUIET60", p.mode_quiet60_s, 0.0, 10.0);
+    flag("EDEN_NX2_MODE_PACE_TO20", p.to20);
+    number("EDEN_NX2_MODE_PACE_TO20_K", p.to20_k_ms, 30.0, 60.0);
+    number("EDEN_NX2_MODE_PACE_TO20_MS", p.to20_ms, 100.0, 300.0);
+    count("EDEN_NX2_MODE_PACE_TO20_FRAMES", p.to20_frames, 1, 4);
+    number("EDEN_NX2_MODE_PACE_TO20_REST", p.to20_rest_s, 5.0, 300.0);
+    return p;
+}
+
+inline std::optional<Probe> ReadProbe() {
+    const char* text = std::getenv("EDEN_NX2_MODE_PACE_PROBE");
+    if (text == nullptr) {
+        return std::nullopt;
+    }
+    auto probe = ParseProbe(text);
+    if (!probe) {
+        LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_PACE_PROBE={} is not <down|up|up20|to20|cycle>:<1-3600 "
+                            "s>: no probe",
+                    text);
+    }
+    return probe;
+}
+
+constexpr double TicksPerMs = static_cast<double>(Common::WallClock::GPUTickFreq) / 1000.0;
+
+/// "26.3", or "-" for NaN (no K yet).
+inline std::string Ms(double value) {
+    return std::isnan(value) ? std::string{"-"} : fmt::format("{:.1f}", value);
+}
+
+struct State {
+    State(const Params& params, std::optional<Probe> probe) : controller{params, probe} {}
+
+    std::mutex mutex;
+    Controller controller;
+    Meter meter;
+    std::chrono::steady_clock::time_point last_paced{}; ///< the hold's base
+    std::atomic<bool> holding{};
+    double held_now_ms{}; ///< what Hold slept for the present being made
+    bool last_held{};
+    std::array<double, 6> gaps{};
+    u32 gap_next{};
+    // The 10 s summary.
+    std::chrono::steady_clock::time_point summary_since{};
+    std::array<u32, 4> presents{}; ///< 60 / 30 / 20 / other
+    u32 pushes{};
+    double held_ms{};
+    u32 gaps30{};      ///< present gaps at 30, not after a held present
+    u32 late_gaps30{}; ///< of those, 34 ms or more
+};
+
+inline State& GetState() {
+    static State state = [] {
+        const Params p = ReadParams();
+        const std::optional<Probe> probe = ReadProbe();
+        LOG_INFO(HW_GPU,
+                 "nx2 mode pace: on (from60 {}, self60 {}, to60 {} over {} s, to30 {} over {} s, "
+                 "hold {}/{}/{} ms, frames {}/{}/{}, spin {} us, auto {}, 60 {}, to20 {}, probe "
+                 "{}); up20's hold climbs {} ms every {} presents to {}, rests {}/{}/{} s doubling "
+                 "(at most {}/{}/{}), {}/{}/{} tries, quiet {} s at 60 and {} s else, stall {} ms",
+                 p.from60_ms, p.self60_ms, p.to60_ms, p.up_dwell_s, p.to30_ms, p.up20_dwell_s,
+                 p.hold_ms, p.hold_late_ms, p.hold20_ms, p.down_frames, p.up_frames,
+                 p.up20_frames, SpinUs(), p.auto_push ? 1 : 0, p.allow60 ? 1 : 0, p.to20 ? 1 : 0,
+                 probe ? fmt::format("{}:{}", probe->cycle ? "cycle" : PushName(probe->kind),
+                                     probe->every_s)
+                       : std::string{"-"},
+                 p.hold20_step_ms, p.hold20_step_frames, p.hold20_max_ms, p.down_rest_s,
+                 p.up_rest_s, p.up20_rest_s, p.down_rest_max_s, p.up_rest_max_s,
+                 p.up20_rest_max_s, p.down_tries, p.up_tries, p.up20_tries, p.mode_quiet60_s,
+                 p.mode_quiet_s, p.stall_ms);
+        return State{p, probe};
+    }();
+    return state;
+}
+
+/// Holds only at the 100% speed limit (the thresholds are wall milliseconds).
+inline bool SpeedOk() {
+    return Settings::values.use_speed_limit.GetValue() && Settings::SpeedLimit() == 100;
+}
+
+/// vi2 229, after the vblank pacing: hold the present the controller asks for, unless the game
+/// asked for another mode than the push's (`mode`: PresentInterval's vblanks). True if it slept.
+inline bool Hold(u32 mode) {
+    if (!SpeedOk()) {
+        return false;
+    }
+    auto& s = GetState();
+    std::chrono::steady_clock::time_point target;
+    {
+        std::scoped_lock lock{s.mutex};
+        const double ms = s.controller.HoldMs(mode);
+        if (ms <= 0.0 || s.last_paced == std::chrono::steady_clock::time_point{}) {
+            return false;
+        }
+        target = s.last_paced + std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::duration<double, std::milli>(ms));
+    }
+    if (std::chrono::steady_clock::now() >= target) {
+        return false;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    s.holding.store(true, std::memory_order_relaxed);
+    SleepUntil(target);
+    s.holding.store(false, std::memory_order_relaxed);
+    std::scoped_lock lock{s.mutex};
+    s.held_now_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return true;
+}
+
+/// Whether a present is being held now (any thread).
+inline bool Holding() {
+    return GetState().holding.load(std::memory_order_relaxed);
+}
+
+/// vi2 229 after the pacing and the hold: `mode` is PresentInterval's vblanks, `entered` when the
+/// request came in, `composited` and `paced` the times before and after the pacing and the hold.
+inline void Present(u32 mode, std::chrono::steady_clock::time_point entered,
+                    std::chrono::steady_clock::time_point composited,
+                    std::chrono::steady_clock::time_point paced) {
+    const u64 busy = Nx2BusyClock::Ticks();
+    const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+    auto& s = GetState();
+    std::scoped_lock lock{s.mutex};
+    const auto ms = [](std::chrono::steady_clock::time_point at) {
+        return std::chrono::duration<double, std::milli>(at.time_since_epoch()).count();
+    };
+    const std::optional<Measured> m = s.meter.Present(
+        mode, ms(entered), ms(composited), ms(paced), static_cast<double>(busy) / TicksPerMs);
+    const bool after_hold = s.last_held;
+    const double held_ms = s.held_now_ms;
+    s.held_now_ms = 0.0;
+    s.last_held = held_ms > 0.0;
+    s.last_paced = paced;
+    if (!m) {
+        s.summary_since = paced;
+        return;
+    }
+    const double gap_ms = m->gap_ms;
+    s.gaps[s.gap_next++ % s.gaps.size()] = gap_ms;
+    if (!SpeedOk()) {
+        return;
+    }
+    const Output out = s.controller.Step(m->input);
+
+    ++s.presents[mode >= 1 && mode <= 3 ? mode - 1 : 3];
+    if (mode == 2 && !after_hold && !out.mode_changed) {
+        ++s.gaps30;
+        s.late_gaps30 += gap_ms >= 34.0 ? 1 : 0;
+    }
+    if (out.ended != Push::None) {
+        if (out.result == Result::GaveUp || out.result == Result::Other) {
+            LOG_INFO(HW_GPU,
+                     "nx2 mode pace: end {} {} after {} presents, game mode {} (rest {:.0f} s, "
+                     "tries {}{})",
+                     PushName(out.ended), ResultName(out.result), out.frames, mode, out.rest_s,
+                     out.tries, out.blocked ? ", blocked until the game changes its mode itself" : "");
+        } else {
+            LOG_INFO(HW_GPU, "nx2 mode pace: end {} {} after {} presents, game mode {}",
+                     PushName(out.ended), ResultName(out.result), out.frames, mode);
+        }
+    }
+    if (out.mode_changed) {
+        std::string gaps;
+        const u32 n = (std::min<u32>)(s.gap_next, static_cast<u32>(s.gaps.size()));
+        for (u32 i = n; i > 0; --i) {
+            gaps += fmt::format("{}{:.1f}", gaps.empty() ? "" : " ",
+                                s.gaps[(s.gap_next - i) % s.gaps.size()]);
+        }
+        LOG_INFO(HW_GPU, "nx2 mode pace: game mode {} (was {}) at present {}, K {} ms, {}; gaps {}",
+                 mode, out.old_mode, present, Ms(out.change_k_ms),
+                 out.by == Push::None ? std::string{"by itself"}
+                                      : fmt::format("by {}", PushName(out.by)),
+                 gaps);
+    }
+    if (out.started != Push::None) {
+        ++s.pushes;
+        LOG_INFO(HW_GPU,
+                 "nx2 mode pace: start {} in mode {} ({}): K {} ms (work {}, busy {}), hold {:.0f} ms",
+                 PushName(out.started), mode, out.by_probe ? "probe" : "auto", Ms(out.k_ms),
+                 Ms(out.work_med_ms), Ms(out.busy_med_ms), out.min_period_ms);
+    }
+    s.held_ms += held_ms;
+    if (paced - s.summary_since >= std::chrono::seconds{10}) {
+        LOG_INFO(HW_GPU,
+                 "nx2 mode pace 10 s: presents 60/30/20 {}/{}/{}, pushes {}, held {:.0f} ms, gaps "
+                 "of 34 ms or more at 30 {}/{}, K {} ms",
+                 s.presents[0], s.presents[1], s.presents[2], s.pushes, s.held_ms, s.late_gaps30,
+                 s.gaps30, Ms(out.k_ms));
+        s.summary_since = paced;
+        s.presents = {};
+        s.pushes = 0;
+        s.held_ms = 0.0;
+        s.gaps30 = 0;
+        s.late_gaps30 = 0;
+    }
+}
+
+} // namespace VideoCommon::Nx2ModePace

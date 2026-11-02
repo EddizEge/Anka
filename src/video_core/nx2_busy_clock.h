@@ -37,7 +37,8 @@ namespace VideoCommon::Nx2BusyClock {
 // with multicore: single core times the GPU from the emulated CPU's ticks.
 //
 // EDEN_NX2_PRESENT_DIAG keeps the busy time too (its per-second "gpu busy"), clock on or off;
-// so does EDEN_NX2_MODE_GOV, whose timer scales it (nx2_mode_gov.h).
+// so does EDEN_NX2_MODE_GOV, whose timer scales it (nx2_mode_gov.h), and EDEN_NX2_MODE_PACE,
+// whose frame cost takes it (nx2_mode_pace.h; the GPU timer stays as it is).
 
 /// Whether GPU::GetTicks uses the busy clock.
 inline bool Enabled() {
@@ -55,12 +56,14 @@ inline bool Enabled() {
     return enabled;
 }
 
-/// Whether the idle time is kept (the clock, EDEN_NX2_PRESENT_DIAG or EDEN_NX2_MODE_GOV).
+/// Whether the idle time is kept (the clock, EDEN_NX2_PRESENT_DIAG, EDEN_NX2_MODE_GOV or
+/// EDEN_NX2_MODE_PACE).
 inline bool Tracked() {
     static const bool tracked = [] {
         const auto on = [](const char* text) { return text != nullptr && text[0] != '0'; };
         return Enabled() || ((on(std::getenv("EDEN_NX2_PRESENT_DIAG")) ||
-                              on(std::getenv("EDEN_NX2_MODE_GOV"))) &&
+                              on(std::getenv("EDEN_NX2_MODE_GOV")) ||
+                              on(std::getenv("EDEN_NX2_MODE_PACE"))) &&
                              Settings::values.use_multi_core.GetValue());
     }();
     return tracked;

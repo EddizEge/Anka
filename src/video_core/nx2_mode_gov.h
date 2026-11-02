@@ -213,6 +213,12 @@ inline bool Enabled() {
         if (text == nullptr || text[0] == '0') {
             return false;
         }
+        // Both steer the same mode, one through the GPU time, one through late presents.
+        if (const char* pace = std::getenv("EDEN_NX2_MODE_PACE"); pace != nullptr && pace[0] != '0') {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_GOV with EDEN_NX2_MODE_PACE: off (the pace "
+                                "controller steers the mode)");
+            return false;
+        }
         if (!Settings::values.use_multi_core.GetValue()) {
             LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_GOV needs multicore: off");
             return false;

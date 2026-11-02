@@ -55,6 +55,7 @@
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_mode_gov.h"
+#include "video_core/nx2_mode_pace.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -1054,9 +1055,20 @@ private:
         Composite(w[5], ~w[22], w[24]);
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(PresentInterval(w));
+        if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
+            if (VideoCommon::Nx2ModePace::Hold(PresentInterval(w)) && VblankGridMode() == 0) {
+                // The vblank pacing starts over from the held present: no short frames after it.
+                m_next_vblank = std::chrono::steady_clock::now() +
+                                std::chrono::nanoseconds{100'000'000'000LL / 60 / 100 *
+                                                         PresentInterval(w)};
+            }
+        }
         const auto paced = std::chrono::steady_clock::now();
         if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
+        }
+        if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2ModePace::Present(PresentInterval(w), entered, composited, paced);
         }
         if (PresentDiagEnabled()) {
             DiagPresent(w, entered, waited, composited, paced);
@@ -1137,7 +1149,7 @@ private:
             // Running slower than 60 fps (60 / vblanks): show at once and don't bank the lost time.
             m_next_vblank = now;
         } else if (now < m_next_vblank) {
-            std::this_thread::sleep_until(m_next_vblank);
+            VideoCommon::Nx2ModePace::SleepUntil(m_next_vblank);
         }
         m_next_vblank += interval;
     }
@@ -1242,7 +1254,7 @@ private:
             target = m_grid_origin + index * period;
         }
         if (target > now) {
-            std::this_thread::sleep_for(std::chrono::nanoseconds{target - now});
+            VideoCommon::Nx2ModePace::SleepFor(std::chrono::nanoseconds{target - now});
         }
     }
 

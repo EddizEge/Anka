@@ -113,6 +113,8 @@ add_library(video_core STATIC
     nx2_busy_clock.h
     nx2_mode_diag.h
     nx2_mode_gov.h
+    nx2_mode_pace.h
+    nx2_mode_pace_logic.h
     nx2_indirect_diag.h
     nx2_profile.h
     present.h
