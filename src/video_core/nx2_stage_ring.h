@@ -1,0 +1,70 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <cstddef>
+
+#include "common/common_types.h"
+
+// Back stages (EDEN_NX2_BACK_STAGES): the record format of the rings between the stages and the
+// ring itself, header-only so the unit tests take them alone. Owner: T1 (the format is the
+// contract, nx2_stages.h).
+namespace VideoCommon::Nx2Stages {
+
+/// What a record of ring 2 (A to B) or ring 3 (B to C) holds after its header.
+enum class RecordKind : u8 {
+    Wrap = 0,  ///< The rest of the ring is unused: continue at its start (no words)
+    Call = 1,  ///< Word 0 a Thunk, then its payload (Thunk gets the payload and its size)
+    Mark = 2,  ///< Word 0 the ring 1 position A ran up to; the last stage stores it (D1)
+    Join = 3,  ///< No words: run everything before it, park until released (seq: handshake)
+    ExecA = 4, ///< =3: word 0 the ring 1 position, word 1 the words to run with GpuSplit::Execute
+};
+
+/// Record header, one u64:
+///   bits 0-3   kind (RecordKind)
+///   bits 4-7   flags (per kind; none defined yet)
+///   bits 8-31  words after the header
+///   bits 32-63 sequence number (Join and =2 lockstep handshakes; wraps)
+/// A record never wraps around the ring's end: the producer writes Wrap and starts over.
+constexpr u64 MakeHeader(RecordKind kind, u32 words, u32 seq, u32 flags = 0) {
+    return static_cast<u64>(kind) | (u64{flags & 0xf} << 4) | (u64{words & 0xffffff} << 8) |
+           (u64{seq} << 32);
+}
+constexpr RecordKind HeaderKind(u64 header) {
+    return static_cast<RecordKind>(header & 0xf);
+}
+constexpr u32 HeaderFlags(u64 header) {
+    return static_cast<u32>((header >> 4) & 0xf);
+}
+constexpr u32 HeaderWords(u64 header) {
+    return static_cast<u32>((header >> 8) & 0xffffff);
+}
+constexpr u32 HeaderSeq(u64 header) {
+    return static_cast<u32>(header >> 32);
+}
+
+/// Most words one record may hold after its header.
+inline constexpr u32 MaxRecordWords = 0xffffff;
+
+/// Ring 2: 2^19 words (4 MiB); ring 3 (K2 only): 2^18 words (2 MiB).
+inline constexpr size_t RingToBWords = size_t{1} << 19;
+inline constexpr size_t RingToCWords = size_t{1} << 18;
+
+/// Single-producer single-consumer ring of u64 records (T1). The GpuSplit ring's protocol: the
+/// producer reserves room for a whole record (Wrap at the end, waiting for space as
+/// GpuSplit::WaitForSpace), commits it, and publishes every PublishEvery words, at the end of a
+/// batch, and after a drain from 8 words doubling (GpuSplit::PublishRing); the consumer spins
+/// briefly, then sleeps on an atomic wait (GpuSplit::BackLoop), and hands space back as it goes.
+template <size_t Words>
+class StageRing {
+public:
+    static_assert((Words & (Words - 1)) == 0, "a power of two");
+    static constexpr size_t Mask = Words - 1;
+    static constexpr size_t PublishEvery = 256;
+
+    // Producer side (T1): Reserve, Commit, Publish, WaitForSpace.
+    // Consumer side (T1): Available, Consume, the wait for work.
+};
+
+} // namespace VideoCommon::Nx2Stages

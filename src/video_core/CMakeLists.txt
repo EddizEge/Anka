@@ -58,6 +58,7 @@ add_library(video_core STATIC
     engines/maxwell_3d.h
     engines/maxwell_dma.cpp
     engines/maxwell_dma.h
+    engines/nx2_reg_replica.h
     engines/nx2_upscale_pick.h
     engines/puller.cpp
     engines/puller.h
@@ -111,12 +112,19 @@ add_library(video_core STATIC
     nx2.h
     nx2_back_cpu.h
     nx2_busy_clock.h
+    nx2_gpu_pages.h
     nx2_mode_diag.h
     nx2_mode_gov.h
     nx2_mode_pace.h
     nx2_mode_pace_logic.h
     nx2_indirect_diag.h
     nx2_profile.h
+    nx2_stage_draw.h
+    nx2_stage_proxy.cpp
+    nx2_stage_proxy.h
+    nx2_stage_ring.h
+    nx2_stages.cpp
+    nx2_stages.h
     present.h
     pte_kind.h
     query_cache/bank_base.h
