@@ -147,6 +147,10 @@ TEST_CASE("SyncMemoSets ways", "[video_core][nx2]") {
     REQUIRE(SyncMemoSets::MissKind(set, 22, 23) == 1);
     const SyncMemoSets::Set empty{};
     REQUIRE(SyncMemoSets::MissKind(empty, 22, 23) == 0);
+    // Joining a range inside a way keeps the way's extent.
+    SyncMemoSets::Store(set, 50, 60, 12, holds);
+    SyncMemoSets::Store(set, 52, 53, 13, holds);
+    REQUIRE(found(50, 60));
     // A way that covers but no longer holds is not found.
     REQUIRE(SyncMemoSets::Find(set, 22, 23, [](u64) { return false; }) == nullptr);
 }
@@ -365,8 +369,29 @@ TEST_CASE("SummarizedRangeSet summary", "[video_core][nx2]") {
     REQUIRE(set.MayIntersect(0x8'0000'0010ULL, 0x10));
     REQUIRE(!set.Intersects(0x8'0000'0010ULL, 0x10));
     REQUIRE(set.Intersects(0x8'0000'0020ULL, 0x10));
+    // The hull's end is exclusive: the range's last byte is in, the next one is not.
+    set.Add(0x8'0000'5000ULL, 0x100);
+    REQUIRE(set.Intersects(0x8'0000'50ffULL, 1));
+    REQUIRE(!set.Intersects(0x8'0000'5100ULL, 1));
+    // Rebuilt from the tree: a large range's later pages and its end are still summarized.
+    set.Add(0x8'0100'0000ULL, 0x30000);
+    set.Rebuild();
+    REQUIRE(set.MayIntersect(0x8'0102'f000ULL, 0x10));
+    REQUIRE(set.Intersects(0x8'0102'ffffULL, 1));
+    REQUIRE(!set.MayIntersect(0x8'0103'0000ULL, 0x10));
     set.Clear();
     REQUIRE(!set.MayIntersect(0x8'0040'0000ULL, 0x10));
+    {
+        // The hull's end is exclusive, and a query from an empty region into a marked one
+        // still finds the range.
+        SummarizedRangeSet<true> fresh;
+        fresh.SetMode(1);
+        fresh.Add(0x8'0080'0010ULL, 0x10);
+        REQUIRE(fresh.Intersects(0x8'0080'001fULL, 1));
+        REQUIRE(!fresh.Intersects(0x8'0080'0020ULL, 1));
+        REQUIRE(fresh.MayIntersect(0x8'0070'0000ULL, 0x180000));
+        REQUIRE(fresh.Intersects(0x8'0070'0000ULL, 0x180000));
+    }
     // Moved sets keep their ranges and summary; the source is empty.
     SummarizedRangeSet<false> hull;
     hull.SetMode(1);
@@ -505,6 +530,12 @@ TEST_CASE("SlotVector iterates the stored slots", "[common][nx2]") {
     std::mt19937_64 rng{5};
     Common::SlotVector<Item> slots;
     std::vector<Common::SlotId> live;
+    // Slot 0 stays, as the caches' null entry does (SlotVector::begin assumes a live first word);
+    // a few hundred more spread the live slots over several words.
+    const Common::SlotId pinned = slots.insert(Item{0});
+    for (int i = 0; i < 700; ++i) {
+        live.push_back(slots.insert(Item{static_cast<u32>(i)}));
+    }
     for (int step = 0; step < 6000; ++step) {
         if (live.empty() || rng() % 3 != 0) {
             live.push_back(slots.insert(Item{static_cast<u32>(step)}));
@@ -516,7 +547,7 @@ TEST_CASE("SlotVector iterates the stored slots", "[common][nx2]") {
         if (step % 97 == 0) {
             // Thin it out: long empty stretches between live slots.
             for (size_t i = 0; i < live.size();) {
-                if (rng() % 8 != 0) {
+                if (rng() % 3 != 0) {
                     slots.erase(live[i]);
                     live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
                 } else {
@@ -524,7 +555,7 @@ TEST_CASE("SlotVector iterates the stored slots", "[common][nx2]") {
                 }
             }
         }
-        std::vector<u32> expected;
+        std::vector<u32> expected{pinned.index};
         for (const Common::SlotId id : live) {
             expected.push_back(id.index);
         }
