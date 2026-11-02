@@ -367,7 +367,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
     }
 
     const auto report_failure = [&](std::string_view reason) {
-        static std::set<std::tuple<u64, u64, std::string_view>> seen;
+        thread_local std::set<std::tuple<u64, u64, std::string_view>> seen;
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
@@ -409,7 +409,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         const auto& reset_regs = maxwell3d->regs;
         const GPUVAddr program =
             (u64{reset_regs.pipelines[1].reserved[0] & 0xff} << 32) | reset_regs.pipelines[1].reserved[1];
-        static std::unordered_map<GPUVAddr, bool> reset_programs;
+        // Per thread, as the answers kept below (whichever thread sets draws up: the split's back, the
+        // stage running the rasterizer); entries are decided from guest memory and never change.
+        thread_local std::unordered_map<GPUVAddr, bool> reset_programs;
         // EDEN_NX2_RESET_LAST=0: the map is searched for every non-indexed draw set up in full.
         // Most come with the vertex program of the one before: its answer is kept (an entry is
         // decided when it is made and never changes, and none is removed).
@@ -417,9 +419,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
             const char* value = std::getenv("EDEN_NX2_RESET_LAST");
             return value == nullptr || value[0] != '0';
         }();
-        static GPUVAddr last_program{};
-        static bool last_known{};
-        static bool last_is_reset{};
+        thread_local GPUVAddr last_program{};
+        thread_local bool last_known{};
+        thread_local bool last_is_reset{};
         bool is_reset;
         if (reset_last && last_known && program == last_program) {
             is_reset = last_is_reset;
@@ -522,9 +524,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     find_overlaps(records);
                 }
                 {
-                    static u64 lists{};
-                    static u64 overlapping_lists{};
-                    static u64 repeating_lists{};
+                    thread_local u64 lists{};
+                    thread_local u64 overlapping_lists{};
+                    thread_local u64 repeating_lists{};
                     ++lists;
                     overlapping_lists += overlapping ? 1 : 0;
                     repeating_lists += repeated ? 1 : 0;
@@ -584,7 +586,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
                     AccelerateInlineRuns(batch_runs, {reinterpret_cast<const u8*>(run_words.data()),
                                                       sizeof(run_words)});
                 }
-                static u32 reset_logs{};
+                thread_local u32 reset_logs{};
                 if (reset_logs < 5) {
                     ++reset_logs;
                     LOG_INFO(HW_GPU,
@@ -632,7 +634,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
     set_up = true;
     anchor.pipeline = pipeline;
     light_follows = LightDrawEnabled() ? LightFollowable(*pipeline) : LightLevel::None;
-    static u32 native_capture_count{};
+    thread_local u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
             static const bool capture = std::getenv("EDEN_NATIVE_DRAW_CAPTURE") != nullptr;
@@ -950,7 +952,7 @@ void RasterizerVulkan::CheckLightVerify(GraphicsPipeline& pipeline, u64 render_p
         return;
     }
     Profile::Add(Profile::Counter::LightUniformMismatches, 1);
-    static u32 logged{};
+    thread_local u32 logged{};
     if (logged < 64) {
         ++logged;
         LOG_WARNING(Render_Vulkan, "Light uniform draw differs from its full setup (pipeline {:#x}): {}",
@@ -1196,13 +1198,13 @@ namespace {
 void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& memory,
                        const char* kind, u32 count) {
     static const bool trace = std::getenv("EDEN_NX2_WINDOW_TRACE") != nullptr;
-    static u32 traced{};
+    thread_local u32 traced{};
     const auto& regs = maxwell3d.regs;
     static const u64 skip = [] {
         const char* value = std::getenv("EDEN_NX2_WINDOW_TRACE_SKIP");
         return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
     }();
-    static u64 seen_events{};
+    thread_local u64 seen_events{};
     static const u64 only_ps = [] {
         const char* value = std::getenv("EDEN_NX2_TRACE_PS");
         return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
@@ -1238,7 +1240,7 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
         LOG_INFO(HW_GPU, "nx2 window ps c[3]@{:#x} size={}: {}", cb3.address, cb3.size,
                  fmt::join(values, " "));
     }
-    static u32 texture_traces{};
+    thread_local u32 texture_traces{};
     if (texture_traces++ > 200) {
         return;
     }
@@ -1291,7 +1293,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (static const bool trace = std::getenv("EDEN_NX2_CB24_TRACE") != nullptr; trace) {
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
-        static u32 logged{};
+        thread_local u32 logged{};
         if ((vs == 0x11471c9a00 || vs == 0x11471ca600 || vs == 0x11471cd300) && logged++ < 3) {
             std::array<u32, 24> words{};
             gpu_memory->ReadBlockUnsafe(regs.const_buffer.Address(), words.data(), sizeof(words));
@@ -1324,7 +1326,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     if (trace_vs != 0) {
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
-        static u32 traced{};
+        thread_local u32 traced{};
         if (vs == trace_vs && traced++ % 200 == 0 && traced < 1000) {
             Tegra::Engines::g_nx2_trace_draws_after_upscale = 1;
         }
@@ -1380,7 +1382,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     }
     // EDEN_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
-        static std::set<std::tuple<GPUVAddr, u32, u32, u64, u64>> seen;
+        thread_local std::set<std::tuple<GPUVAddr, u32, u32, u64, u64>> seen;
         const auto& regs = maxwell3d->regs;
         const auto& rt = regs.rt[0];
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
@@ -2305,9 +2307,9 @@ void RasterizerVulkan::AccelerateInlineRuns(std::span<const std::pair<GPUVAddr, 
     commands += buffer_cache.FlushInlineBatch(batch) ? 1 : 0;
     Profile::Add(Profile::Counter::ResetUploads, uploads);
     Profile::Add(Profile::Counter::ResetCopyCommands, commands);
-    static u64 calls{};
-    static u64 total_uploads{};
-    static u64 total_commands{};
+    thread_local u64 calls{};
+    thread_local u64 total_uploads{};
+    thread_local u64 total_commands{};
     ++calls;
     total_uploads += uploads;
     total_commands += commands;
@@ -2327,7 +2329,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     std::scoped_lock lock{texture_cache.mutex};
     const auto [image_view, scaled] =
         texture_cache.TryFindFramebufferImageView(config, framebuffer_addr);
-    static u32 display_trace_count{};
+    thread_local u32 display_trace_count{};
     static const bool frame_capture = std::getenv("EDEN_NATIVE_FRAME_CAPTURE") != nullptr;
     if (frame_capture && display_trace_count++ < 64) {
         LOG_INFO(HW_GPU, "Native display source: address={:#x}, offset={:#x}, dimensions={}x{}, stride={}, accelerated={}, mask={:#x}",
