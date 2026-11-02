@@ -73,14 +73,10 @@ void* g_cb_write_context{};
 bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count);
 void* g_hook_context{};
 /// EDEN_NX2_PRESENT_DIAG=1 or EDEN_NX2_MODE_DIAG=1: with cut c, B's joins and C's ParkBs timed,
-/// and a "nx2 stages diag" line a second from B while the stages run (JoinDiagReport).
-const bool g_join_diag = [] {
-    const auto on = [](const char* name) {
-        const char* text = std::getenv(name);
-        return text != nullptr && text[0] != '0';
-    };
-    return on("EDEN_NX2_PRESENT_DIAG") || on("EDEN_NX2_MODE_DIAG");
-}();
+/// and a "nx2 stages diag" line a second from B while the stages run (JoinDiagReport). Set by
+/// Start before B and C start (the switch file is in the environment by then; not at static
+/// initialization, before main loads nx2_switches.txt).
+bool g_join_diag{};
 void JoinDiagReport();
 
 /// What B and C do with the records (StagePipeline's handler).
@@ -709,6 +705,13 @@ void Start(Core::System& system) {
     g_default_owner = options.cut_c ? StageIdC : StageIdB;
     g_owner.store(g_default_owner, std::memory_order_relaxed);
     // B and C stopped: the diag line's second starts over with them.
+    g_join_diag = [] {
+        const auto on = [](const char* name) {
+            const char* text = std::getenv(name);
+            return text != nullptr && text[0] != '0';
+        };
+        return on("EDEN_NX2_PRESENT_DIAG") || on("EDEN_NX2_MODE_DIAG");
+    }();
     g_join_stats.joins = g_join_stats.locked = g_join_stats.wait_ns = 0;
     g_join_stats.wait_max_ns = g_join_stats.op_ns = g_join_stats.second_start_ns = 0;
     g_join_stats.parks.store(0, std::memory_order_relaxed);
