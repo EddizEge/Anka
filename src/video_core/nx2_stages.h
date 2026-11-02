@@ -91,7 +91,8 @@ using Ring1Thunk = void (*)(const u64* payload);
 /// words; returns where the payload goes. From A, the deltas A's capture holds go in the same
 /// record, before it (S5/1). The consumer sees it from Commit on (published as GpuSplit does).
 /// Only while Active(). A inside a join writes no record (K4): Reserve, Post, Forward,
-/// PostCbData, PostTarget and PostMark assert !InJoin().
+/// PostCbData, PostTarget and PostMark assert !InJoin(). 1 + `payload_words` is at most
+/// MaxBodyWords (asserted; K9, nx2_stage_ring.h).
 u64* Reserve(Ring ring, Thunk thunk, u32 payload_words);
 void Commit(Ring ring);
 /// Makes what was committed visible to the consumer now (the end of a batch, before a wait).
@@ -118,11 +119,12 @@ void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words)
 /// of `primary` (StageCbWrite). First Capture().SelectTarget(primary): CallMultiMethod's cb data
 /// passes no ProcessDirtyRegisters, so after a channel change no Note may have sent its Target
 /// (K6). Joins the CbData record just before (S5/3) only when that is the last one written, not
-/// published yet, ends at `address`, the sum fits one record and no delta is pending
-/// (Capture().PendingWords() == 0: a register written between the two writes applies before the
-/// second, K6); else a new record. const_buffer.offset: A advances the primary's without noting
-/// it, StageCbWrite the replica's (a noted offset would leave a delta pending after every write
-/// and nothing would ever join, K6).
+/// published yet, ends at `address`, the sum fits one record (MaxBodyWords) and no delta is
+/// pending (Capture().PendingWords() == 0: a register written between the two writes applies
+/// before the second, K6); else a new record. A write longer than one record goes in several, in
+/// order (K9). const_buffer.offset: A advances the primary's without noting it, StageCbWrite the
+/// replica's (a noted offset would leave a delta pending after every write and nothing would
+/// ever join, K6).
 void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address, const u32* data,
                 u32 count);
 /// A: the primary Maxwell3D the deltas after this record are for (the consumer takes its own

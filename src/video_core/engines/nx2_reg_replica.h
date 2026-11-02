@@ -7,6 +7,7 @@
 #include <bitset>
 
 #include "common/common_types.h"
+#include "video_core/nx2_stage_ring.h"
 
 namespace Tegra::Engines {
 class Maxwell3D;
@@ -18,6 +19,7 @@ namespace VideoCommon::Nx2RegReplica {
 
 /// Maxwell3D::Regs::NUM_REGS (asserted where both are visible, T2).
 inline constexpr u32 NumRegs = 0xE00;
+static_assert(NumRegs <= Nx2Stages::MaxDeltaWords, "a flush of the capture fits one record (K9)");
 /// Maxwell3D::DirtyState::Flags and ::Tables.
 using DirtyFlags = std::bitset<256>;
 using DirtyTables = std::array<std::array<u8, NumRegs>, 2>;

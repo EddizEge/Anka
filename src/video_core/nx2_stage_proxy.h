@@ -26,6 +26,8 @@ namespace VideoCommon::Nx2Stages {
 ///   AccessAccelerateDMA and InvalidateRegion from A outside a join are reported (STAGE_CHECK,
 ///   S7): MaxwellDMA's executable methods run in a ring level join.
 /// - Every other member: Post.
+/// A member whose record would pass MaxBodyWords (nx2_stage_ring.h, K9) runs in a join instead:
+/// AccelerateInlineToMemory's data (Upload), a draw whose side state is too long (Other).
 /// Skeleton (T0): every member calls the real rasterizer.
 class Nx2StageProxy final : public VideoCore::RasterizerInterface {
 public:
