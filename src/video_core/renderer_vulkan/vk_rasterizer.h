@@ -349,10 +349,10 @@ private:
     /// A query report or counter reset's old body (A or B in a join): B's next WaitForIdle joins.
     void NoteQueryForWfi() noexcept;
     /// B, before it writes guest memory at device address `addr` (none: not one device range):
-    /// whether a query report it sent C may write there still (stage_query_writes).
-    [[nodiscard]] bool MeetsQueryWritesB(std::optional<DAddr> addr, u64 size);
-    /// B, outside a packet and holding no cache lock: C runs everything B sent (a join with no op).
-    void JoinQueryWritesB();
+    /// a query report it sent C that would land there after it does not (T7c review finding 3).
+    /// One C writes at once runs first (a join); one C writes from a later fence is cancelled
+    /// first, in the join, where the write invalidates the query cache (`cancels`).
+    void GuardQueryWritesB(std::optional<DAddr> addr, u64 size, bool cancels);
     /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
     /// of their own (sent when not empty) unless one is open; the record owner records them.
     template <typename Func>
@@ -420,7 +420,8 @@ private:
     struct SplitCheckBase {
         u64 image_hits;  ///< texture_cache.WriteHits() before the split setup
         u64 view_epoch;  ///< texture_cache.ImageViewEpoch() once it was done
-        u64 light_epoch; ///< light_epoch_b then (B waits in lockstep: other threads move it)
+        u64 light_epoch; ///< light_epoch_b at B's decision (head.light.epoch), before its buffer
+                         ///< half; in lockstep only other threads move it until the check
     };
     /// EDEN_NX2_BACK_STAGES=2: the split setup against the old one (Configure, B parked).
     /// `followed`: drawn without a setup (a light draw that needed no repair).
@@ -592,10 +593,17 @@ private:
     /// B (T7c review finding 3): the guest memory query reports B sent C write ([address,
     /// address + 16)): C writes a payload release at once, so a write of B's own there waits.
     VideoCommon::Nx2Stages::InFlightRanges stage_query_writes;
+    /// B: the counters B sent C, which C writes from a fence after them (QueryWritesAtOnce): kept
+    /// until a join finds the query cache no longer holds them, or B cancels them before a write.
+    VideoCommon::Nx2Stages::InFlightRanges stage_query_later;
     /// B (geometry mirror): the next draw packet sends every vertex stream (GeometryForced).
     bool geometry_reset_b{true};
     /// B: C's command buffer tick at the last packet that sent every vertex stream.
     u64 geometry_tick_b{};
+    /// B: the replica and memory manager of that packet. The buffer cache's vertex streams are
+    /// one set for every channel and a channel's bind sets only C's replica's flags.
+    const Tegra::Engines::Maxwell3D* geometry_engine_b{};
+    const Tegra::MemoryManager* geometry_memory_b{};
     /// C: the geometry mirror (nx2_stage_split.h).
     VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
     /// C: B's record owner hook replayed B's list in a join since C's last draw packet: that

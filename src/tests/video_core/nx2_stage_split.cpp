@@ -59,6 +59,27 @@ TEST_CASE("Nx2StageSplit: a write over a report C has not run waits for it", "[v
     REQUIRE(writes.Size() == 0);
 }
 
+TEST_CASE("Nx2StageSplit: a counter C writes from a later fence waits until cancelled",
+          "[video_core]") {
+    // T7c review finding 3, its fence part: C writes a payload release at once, a counter only once
+    // a fence after it passed; running C's packet is not enough.
+    REQUIRE(QueryWritesAtOnce(QueryType::Payload));
+    REQUIRE(!QueryWritesAtOnce(QueryType::ZPassPixelCount64));
+    REQUIRE(!QueryWritesAtOnce(QueryType::StreamingByteCount));
+    InFlightRanges later;
+    later.Note(0x1000, 0x1010, 5, 0);
+    later.Note(0x2000, 0x2010, 6, 0);
+    // Kept whatever C ran (B notes them with no seq to drop at).
+    REQUIRE(later.Overlaps(0x1008, 0x1009, 0));
+    // B's write there cancels the first (QueryCacheBase::InvalidateRegion in the join): gone.
+    later.Forget(0x1004, 0x1008);
+    REQUIRE(!later.Overlaps(0x1000, 0x1010, 0));
+    REQUIRE(later.Overlaps(0x2000, 0x2001, 0));
+    // A join drops those the query cache no longer holds.
+    later.DropIf([](u64 begin, u64) { return begin == 0x2000; });
+    REQUIRE(later.Size() == 0);
+}
+
 TEST_CASE("Nx2StageSplit: in-flight ranges keep the last seq of a range", "[video_core]") {
     InFlightRanges pools;
     pools.Note(0x1000, 0x2000, 10, 0);

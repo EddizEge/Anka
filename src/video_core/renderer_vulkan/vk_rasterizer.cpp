@@ -2007,9 +2007,14 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
             // CounterReport's mark, made here before the query leaves B: the page summary B asks
             // (Nx2GpuPages::Holds) covers the page from this point of the stream on.
             Tegra::Nx2MarkUntrackedWrite(*cpu_addr, 16);
-            // Its value (and timestamp) there, before the next packet.
-            stage_query_writes.Note(*cpu_addr, *cpu_addr + 16, NextStageSeq(),
-                                    VideoCommon::Nx2Stages::GpuPages().RanSeq());
+            if (VideoCommon::Nx2Stages::QueryWritesAtOnce(type)) {
+                // Its value (and timestamp) there, before the next packet.
+                stage_query_writes.Note(*cpu_addr, *cpu_addr + 16, NextStageSeq(),
+                                        VideoCommon::Nx2Stages::GpuPages().RanSeq());
+            } else {
+                // A counter: written from a fence after it, whenever that passes.
+                stage_query_later.Note(*cpu_addr, *cpu_addr + 16, NextStageSeq(), 0);
+            }
         }
         StageToC([this, gpu_addr, type, flags, payload, subreport] {
             Query(gpu_addr, type, flags, payload, subreport);
@@ -3810,6 +3815,12 @@ void RasterizerVulkan::JoinB(Func&& func) {
         b_in_join = true;
         func();
         b_in_join = was_in_join;
+        if (stage_query_later.Size() != 0) {
+            // C parked: the counters the query cache no longer holds were written or cancelled.
+            stage_query_later.DropIf([this](u64 begin, u64 end) {
+                return !query_cache.HoldsQueries(begin, end - begin);
+            });
+        }
     });
     // C ran everything B sent before.
     stage_pools.Clear();
@@ -3845,38 +3856,58 @@ void RasterizerVulkan::NoteQueryForWfi() noexcept {
     }
 }
 
-bool RasterizerVulkan::MeetsQueryWritesB(std::optional<DAddr> addr, u64 size) {
-    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
-    if (!stage_query_writes.Any(ran)) [[likely]] {
-        return false;
-    }
-    // Not one device range: any write may.
-    return !addr || stage_query_writes.Overlaps(*addr, *addr + (std::max)(size, u64{1}), ran);
-}
-
-void RasterizerVulkan::JoinQueryWritesB() {
+void RasterizerVulkan::GuardQueryWritesB(std::optional<DAddr> addr, u64 size, bool cancels) {
     // T7c review finding 3: C would write a report B sent before over B's later write of the same
-    // bytes (CounterReport writes a payload release at once); C runs it first.
+    // bytes. A payload release C writes at once: C runs it first. A counter C writes from a fence
+    // after it, which may pass before C runs B's invalidation of the bytes: cancelled first, as
+    // the old path's invalidation does (QueryCacheBase::InvalidateRegion).
+    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
+    const u64 begin = addr ? *addr : 0;
+    const u64 end = begin + (std::max)(size, u64{1});
+    // Not one device range: any write may meet a release; a counter it cannot cancel (B's
+    // invalidation of each page reaches C later).
+    const bool at_once =
+        stage_query_writes.Any(ran) && (!addr || stage_query_writes.Overlaps(begin, end, ran));
+    const bool later = cancels && addr && stage_query_later.Size() != 0 &&
+                       Tegra::Nx2UntrackedWritten(begin, end - begin) &&
+                       stage_query_later.Overlaps(begin, end, 0);
+    if (!at_once && !later) [[likely]] {
+        return;
+    }
+    const auto cancel = [&] {
+        if (later) {
+            query_cache.InvalidateRegion(begin, end - begin);
+        }
+    };
     if (Nx2Record::HeldLocks::Count() != 0 || buffer_cache_runtime.Target().list != nullptr)
         [[unlikely]] {
         // Not seen (B's guest writes come between packets): the join that keeps the mutex.
         VideoCommon::Nx2Stages::ReportStageHazard("guest write over a query inside B's packet");
-        JoinBLocked([] {});
+        JoinBLocked(cancel);
         stage_query_writes.Clear();
-        return;
+    } else {
+        JoinB(cancel);
     }
-    JoinB([] {});
+    if (later) {
+        stage_query_later.Forget(begin, end);
+    }
 }
 
 void RasterizerVulkan::ForceGeometryB(Tegra::Engines::Maxwell3D& mb) {
     // C binds again from its geometry mirror what its command buffer lost (BindGeometryC); B
     // sends every stream after binds the mirror did not see, and once per command buffer for
     // their use marks (GeometryForced).
+    // Another channel or memory manager since: its streams resolved again (BindChannel's
+    // InvalidateState sets only C's replica's flags; the buffer cache's streams are shared).
+    const bool switched = &mb != geometry_engine_b || gpu_memory != geometry_memory_b;
     const u64 tick = scheduler.CurrentTick();
-    if (VideoCommon::Nx2Stages::GeometryForced(geometry_reset_b, tick, geometry_tick_b)) {
+    if (VideoCommon::Nx2Stages::GeometryForced(geometry_reset_b || switched, tick,
+                                               geometry_tick_b)) {
         ForceVertexBinds(mb);
         geometry_reset_b = false;
         geometry_tick_b = tick;
+        geometry_engine_b = &mb;
+        geometry_memory_b = gpu_memory;
     }
 }
 
@@ -3904,9 +3935,11 @@ void RasterizerVulkan::BeginStagesHook(void* context) {
     // Nothing in flight from a run before.
     rasterizer->stage_pools.Clear();
     rasterizer->stage_query_writes.Clear();
+    rasterizer->stage_query_later.Clear();
     rasterizer->stage_c_ranges.clear();
     // C's command buffer holds no bind of B's yet: the first packet sends every vertex stream.
     rasterizer->geometry_reset_b = true;
+    rasterizer->geometry_engine_b = nullptr;
     rasterizer->geometry_mirror_c.Clear();
     rasterizer->geometry_replayed_c = false;
 }
@@ -3922,6 +3955,7 @@ void RasterizerVulkan::EndStagesHook(void* context) {
     }
     rasterizer->stage_pools.Clear();
     rasterizer->stage_query_writes.Clear();
+    rasterizer->stage_query_later.Clear();
     rasterizer->ReleaseAnchorC();
     std::scoped_lock lock{rasterizer->buffer_cache.mutex};
     rasterizer->buffer_cache_runtime.EndStages();
@@ -4816,13 +4850,11 @@ void RasterizerVulkan::StageResetStores(Tegra::Engines::Maxwell3D& mb) {
         runs.emplace_back(run_start, run_records * RecordSize);
     }
     NoteLightWork();
-    if (MeetsQueryWritesB(std::nullopt, 0)) [[unlikely]] {
+    if (stage_query_writes.Any(VideoCommon::Nx2Stages::GpuPages().RanSeq()) ||
+        stage_query_later.Size() != 0) [[unlikely]] {
         // Reports in flight: the runs that meet one (InlineRunsB writes inside the packet).
         for (const auto& [address, size] : runs) {
-            if (MeetsQueryWritesB(gpu_memory->GpuToCpuAddress(address), size)) {
-                JoinQueryWritesB();
-                break;
-            }
+            GuardQueryWritesB(gpu_memory->GpuToCpuAddress(address), size, true);
         }
     }
     StageBufferWork([&] {
@@ -4920,9 +4952,7 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
     }
     NoteLightWork();
     const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
-    if (MeetsQueryWritesB(cpu_addr, copy_size)) [[unlikely]] {
-        JoinQueryWritesB();
-    }
+    GuardQueryWritesB(cpu_addr, copy_size, true);
     if (!cpu_addr) [[unlikely]] {
         // WriteBlock would invalidate C's caches from here: written now, every cache told at
         // the next FlushCaching (which runs before anything of theirs is used).
@@ -4976,9 +5006,7 @@ void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::Cach
         return;
     }
     // The memory manager's WriteBlock invalidates each range before it writes it.
-    if (MeetsQueryWritesB(addr, size)) [[unlikely]] {
-        JoinQueryWritesB();
-    }
+    GuardQueryWritesB(addr, size, True(which & CacheType::QueryCache));
     const u64 c_bits = (True(which & CacheType::TextureCache) ? StageRangeTexture : 0) |
                        (True(which & CacheType::QueryCache) ? StageRangeQuery : 0);
     if (c_bits != 0) {
@@ -5246,7 +5274,7 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         const SplitCheckBase base{
             .image_hits = image_hits,
             .view_epoch = texture_cache.ImageViewEpoch(),
-            .light_epoch = light_epoch_b.load(std::memory_order_seq_cst),
+            .light_epoch = head.light.epoch,
         };
         lock.unlock();
         CheckSplitSetup(pipeline, head.kind == DrawKind::Full ? in.Handles() : pipeline.LastHandles(),

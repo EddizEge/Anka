@@ -35,6 +35,13 @@ namespace VideoCommon::Nx2Stages {
     return QueryGoesToC(type, flags, Settings::IsGPULevelHigh());
 }
 
+/// For a report that goes to C (QueryGoesToC): whether C writes it at once (a payload release:
+/// CounterReport's memcpy) or from a fence after it (a counter: SyncOperation), which an
+/// invalidation of its bytes before then cancels (QueryCacheBase::InvalidateRegion).
+[[nodiscard]] constexpr bool QueryWritesAtOnce(QueryType type) noexcept {
+    return type == QueryType::Payload;
+}
+
 /// Whether a query report or counter reset running its old body notes B's "a query since the last
 /// WaitForIdle join" (F3: the next WaitForIdle may sync query writes, which takes the buffer cache
 /// mutex, and joins). With cut c on every thread but C: A in its join (KeplerCompute's report) and
@@ -79,6 +86,20 @@ public:
     [[nodiscard]] bool Any(u64 ran) {
         Drop(ran);
         return !ranges.empty();
+    }
+
+    /// Drops the ranges meeting [begin, end) (their work cancelled).
+    void Forget(u64 begin, u64 end) {
+        std::erase_if(ranges, [begin, end](const Range& range) {
+            return begin < range.end && range.begin < end;
+        });
+    }
+
+    /// Drops the ranges `done(begin, end)` says are done.
+    template <typename Done>
+    void DropIf(Done&& done) {
+        std::erase_if(ranges, [&done](const Range& range) { return done(range.begin, range.end); });
+        prune_at = (std::max)(MinPrune, ranges.size() * 2);
     }
 
     void Clear() noexcept {
