@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
+#include <vector>
+
 #include "common/common_types.h"
 #include "common/settings.h"
 #include "video_core/query_cache/types.h"
@@ -36,5 +40,68 @@ namespace VideoCommon::Nx2Stages {
 [[nodiscard]] constexpr bool QueryNotesWfi(bool split_draws, bool on_stage_c) noexcept {
     return split_draws && !on_stage_c;
 }
+
+/// B: address ranges [begin, end) of work it sent C that C may not have run yet, each with the
+/// last seq it goes with (a packet's, or the next packet's for work sent between packets). A
+/// range is done once C ran its seq (`ran`: Nx2GpuPages::RanSeq), all are once B joined (C
+/// parked having run everything): Clear.
+class InFlightRanges {
+public:
+    void Note(u64 begin, u64 end, u64 seq, u64 ran) {
+        // The same ranges come again and again (a draw's pools, a semaphore): the last ones.
+        const size_t count = ranges.size();
+        for (size_t i = count; i-- > 0 && i + RecentLooks >= count;) {
+            Range& range = ranges[i];
+            if (range.begin == begin && range.end == end) {
+                range.seq = (std::max)(range.seq, seq);
+                return;
+            }
+        }
+        if (count >= prune_at) {
+            Drop(ran);
+            prune_at = (std::max)(MinPrune, ranges.size() * 2);
+        }
+        ranges.push_back({.begin = begin, .end = end, .seq = seq});
+    }
+
+    /// Whether [begin, end) meets a range C may not have run yet.
+    [[nodiscard]] bool Overlaps(u64 begin, u64 end, u64 ran) {
+        Drop(ran);
+        return std::ranges::any_of(ranges, [begin, end](const Range& range) {
+            return begin < range.end && range.begin < end;
+        });
+    }
+
+    /// Whether any range may be in flight.
+    [[nodiscard]] bool Any(u64 ran) {
+        Drop(ran);
+        return !ranges.empty();
+    }
+
+    void Clear() noexcept {
+        ranges.clear();
+        prune_at = MinPrune;
+    }
+
+    [[nodiscard]] size_t Size() const noexcept {
+        return ranges.size();
+    }
+
+private:
+    struct Range {
+        u64 begin;
+        u64 end;
+        u64 seq;
+    };
+    static constexpr size_t RecentLooks = 2;
+    static constexpr size_t MinPrune = 16;
+
+    void Drop(u64 ran) {
+        std::erase_if(ranges, [ran](const Range& range) { return range.seq <= ran; });
+    }
+
+    std::vector<Range> ranges;
+    size_t prune_at = MinPrune;
+};
 
 } // namespace VideoCommon::Nx2Stages

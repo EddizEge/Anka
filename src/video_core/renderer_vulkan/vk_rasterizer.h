@@ -20,6 +20,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2_gpu_pages.h"
 #include "video_core/nx2_stage_draw.h"
+#include "video_core/nx2_stage_split.h"
 #include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
@@ -347,6 +348,11 @@ private:
     void JoinBLocked(Func&& func);
     /// A query report or counter reset's old body (A or B in a join): B's next WaitForIdle joins.
     void NoteQueryForWfi() noexcept;
+    /// B, before it writes guest memory at device address `addr` (none: not one device range):
+    /// whether a query report it sent C may write there still (stage_query_writes).
+    [[nodiscard]] bool MeetsQueryWritesB(std::optional<DAddr> addr, u64 size);
+    /// B, outside a packet and holding no cache lock: C runs everything B sent (a join with no op).
+    void JoinQueryWritesB();
     /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
     /// of their own (sent when not empty) unless one is open; the record owner records them.
     template <typename Func>
@@ -567,6 +573,9 @@ private:
         GPUVAddr end;
     };
     std::vector<StagePool> stage_pools;
+    /// B (T7c review finding 3): the guest memory query reports B sent C write ([address,
+    /// address + 16)): C writes a payload release at once, so a write of B's own there waits.
+    VideoCommon::Nx2Stages::InFlightRanges stage_query_writes;
 };
 
 } // namespace Vulkan

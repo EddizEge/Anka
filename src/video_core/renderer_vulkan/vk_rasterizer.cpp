@@ -55,7 +55,6 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2.h"
-#include "video_core/nx2_stage_split.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
 #include "video_core/renderer_vulkan/nx2_record_list.h"
@@ -2000,6 +1999,9 @@ void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
             // CounterReport's mark, made here before the query leaves B: the page summary B asks
             // (Nx2GpuPages::Holds) covers the page from this point of the stream on.
             Tegra::Nx2MarkUntrackedWrite(*cpu_addr, 16);
+            // Its value (and timestamp) there, before the next packet.
+            stage_query_writes.Note(*cpu_addr, *cpu_addr + 16, NextStageSeq(),
+                                    VideoCommon::Nx2Stages::GpuPages().RanSeq());
         }
         StageToC([this, gpu_addr, type, flags, payload, subreport] {
             Query(gpu_addr, type, flags, payload, subreport);
@@ -3792,6 +3794,7 @@ void RasterizerVulkan::JoinB(Func&& func) {
     });
     // C ran everything B sent before.
     stage_pools.clear();
+    stage_query_writes.Clear();
 }
 
 template <typename Func>
@@ -3821,6 +3824,29 @@ void RasterizerVulkan::NoteQueryForWfi() noexcept {
             split_draws, VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::C))) {
         stage_query_since_wfi = true;
     }
+}
+
+bool RasterizerVulkan::MeetsQueryWritesB(std::optional<DAddr> addr, u64 size) {
+    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
+    if (!stage_query_writes.Any(ran)) [[likely]] {
+        return false;
+    }
+    // Not one device range: any write may.
+    return !addr || stage_query_writes.Overlaps(*addr, *addr + (std::max)(size, u64{1}), ran);
+}
+
+void RasterizerVulkan::JoinQueryWritesB() {
+    // T7c review finding 3: C would write a report B sent before over B's later write of the same
+    // bytes (CounterReport writes a payload release at once); C runs it first.
+    if (Nx2Record::HeldLocks::Count() != 0 || buffer_cache_runtime.Target().list != nullptr)
+        [[unlikely]] {
+        // Not seen (B's guest writes come between packets): the join that keeps the mutex.
+        VideoCommon::Nx2Stages::ReportStageHazard("guest write over a query inside B's packet");
+        JoinBLocked([] {});
+        stage_query_writes.Clear();
+        return;
+    }
+    JoinB([] {});
 }
 
 void RasterizerVulkan::BeginStagesHook(void* context) {
@@ -4717,6 +4743,15 @@ void RasterizerVulkan::StageResetStores(Tegra::Engines::Maxwell3D& mb) {
         runs.emplace_back(run_start, run_records * RecordSize);
     }
     NoteLightWork();
+    if (MeetsQueryWritesB(std::nullopt, 0)) [[unlikely]] {
+        // Reports in flight: the runs that meet one (InlineRunsB writes inside the packet).
+        for (const auto& [address, size] : runs) {
+            if (MeetsQueryWritesB(gpu_memory->GpuToCpuAddress(address), size)) {
+                JoinQueryWritesB();
+                break;
+            }
+        }
+    }
     StageBufferWork([&] {
         InlineRunsB(runs, {reinterpret_cast<const u8*>(run_words.data()), sizeof(run_words)});
     });
@@ -4812,6 +4847,9 @@ void RasterizerVulkan::InlineToMemoryB(GPUVAddr address, size_t copy_size,
     }
     NoteLightWork();
     const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(address);
+    if (MeetsQueryWritesB(cpu_addr, copy_size)) [[unlikely]] {
+        JoinQueryWritesB();
+    }
     if (!cpu_addr) [[unlikely]] {
         // WriteBlock would invalidate C's caches from here: written now, every cache told at
         // the next FlushCaching (which runs before anything of theirs is used).
@@ -4863,6 +4901,10 @@ void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::Cach
     NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
+    }
+    // The memory manager's WriteBlock invalidates each range before it writes it.
+    if (MeetsQueryWritesB(addr, size)) [[unlikely]] {
+        JoinQueryWritesB();
     }
     const u64 c_bits = (True(which & CacheType::TextureCache) ? StageRangeTexture : 0) |
                        (True(which & CacheType::QueryCache) ? StageRangeQuery : 0);
