@@ -80,10 +80,12 @@ inline const int g_nx2_vertex_clean = [] {
 /// EDEN_NX2_LIGHT_SYNC_SKIP: in a plain light draw (RasterizerVulkan::TryLightDraw: nothing but
 /// stream/index/draw registers changed, no memory changed but same-byte constant buffer writes,
 /// same frame) an enabled stream whose flag is clean keeps the binding the draw before
-/// synchronized and touched; BindHostVertexBuffers skips its TouchBuffer and SynchronizeBuffer.
-/// =0 as before; =2 synchronizes them anyway and logs any that uploaded ("EDEN_NX2_LIGHT_SYNC_SKIP:
-/// clean stream N of a plain light draw uploaded"; same-byte constant buffer writes over vertex
-/// data can upload the bytes the buffer holds, the only expected case).
+/// synchronized and touched; BindHostVertexBuffers skips its TouchBuffer and SynchronizeBuffer
+/// while no CPU-modified or untracked page can have appeared in the stream's range since its
+/// last synchronization there (vertex_synced_epoch, MemoryTracker::UnsetSince), and does both as
+/// before otherwise. =0 as before; =2 synchronizes the streams it would skip anyway and logs any
+/// that uploaded ("EDEN_NX2_LIGHT_SYNC_SKIP: clean stream N of a plain light draw uploaded"; none
+/// expected).
 inline const int g_nx2_light_sync_skip = [] {
     const char* value = std::getenv("EDEN_NX2_LIGHT_SYNC_SKIP");
     return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
@@ -684,6 +686,10 @@ private:
     /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).
     std::array<BufferId, 32> vertex_touched_ids{};
     std::array<u64, 32> vertex_touched_ticks{};
+    /// EDEN_NX2_LIGHT_SYNC_SKIP: the memory tracker's CPU-set epoch taken before each vertex
+    /// stream's last synchronization in BindHostVertexBuffers (0, never matching, before the
+    /// first). Its range held no CPU-modified or untracked page as of then.
+    std::array<u64, 32> vertex_synced_epoch{};
 
     /// Whether unchanged vertex stream work is skipped (UpdateVertexBuffer(s),
     /// BindHostVertexBuffers). EDEN_NX2_VERTEX_SKIP=0 turns it off.

@@ -1002,23 +1002,31 @@ void BufferCache<P>::BindHostVertexBuffers() {
             // index is a bit of the u32 enabled_vertex_buffers_mask: below v_buffer's 32.
             // EDEN_NX2_LIGHT_SYNC_SKIP: a plain light draw's clean stream binds what the draw
             // before bound, synchronized and touched (this frame, no memory written since but
-            // the same bytes): nothing to do for it, as below where the flag is clean.
+            // the same bytes): nothing to do for it, as below where the flag is clean. Only while
+            // its range holds no CPU-modified or untracked page since that synchronization
+            // (UnsetSince; one compare while the tracker's epoch is unchanged): a same-byte
+            // write that was made (not skipped) marks its page so at the next flush, untracking
+            // it, and CPU writes there then reach neither the tracker nor the light epoch.
+            // Otherwise the stream is synchronized as below, as before.
             if (plain_light_draw && !flags[Dirty::VertexBuffer0 + index]) {
-                if (g_nx2_light_sync_skip == 2) {
-                    const Binding& clean = v_buffer[index];
-                    if (!SynchronizeBuffer(slot_buffers[clean.buffer_id], clean.device_addr,
-                                           clean.size)) {
-                        static u32 reported{};
-                        if (reported++ < 16) {
-                            LOG_ERROR(HW_GPU,
-                                      "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain light "
-                                      "draw uploaded",
-                                      index);
+                const Binding& clean = v_buffer[index];
+                if (memory_tracker.UnsetSince(clean.device_addr, clean.size,
+                                              vertex_synced_epoch[index])) {
+                    if (g_nx2_light_sync_skip == 2) {
+                        if (!SynchronizeBuffer(slot_buffers[clean.buffer_id], clean.device_addr,
+                                               clean.size)) {
+                            static u32 reported{};
+                            if (reported++ < 16) {
+                                LOG_ERROR(HW_GPU,
+                                          "EDEN_NX2_LIGHT_SYNC_SKIP: clean stream {} of a plain "
+                                          "light draw uploaded",
+                                          index);
+                            }
                         }
                     }
+                    flush_bindings();
+                    continue;
                 }
-                flush_bindings();
-                continue;
             }
             const Binding& binding = g_nx2_vertex_fast ? v_buffer[index] : VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
@@ -1030,7 +1038,9 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 vertex_touched_ids[index] = binding.buffer_id;
                 vertex_touched_ticks[index] = frame_tick + 1;
             }
+            const u64 sync_epoch = memory_tracker.CpuSetEpoch();
             SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            vertex_synced_epoch[index] = sync_epoch;
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
