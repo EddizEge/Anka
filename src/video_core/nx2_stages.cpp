@@ -284,6 +284,10 @@ void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address,
 }
 
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary) {
+    // The stages off (a capture without them, YUZU_TESTS' unit test): no ring to write to.
+    if (!Active()) {
+        return;
+    }
     CheckRecord(1);
     u64* const body = BeginRecord(ring, RecordKind::Target, 1);
     body[0] = reinterpret_cast<u64>(primary);
@@ -446,8 +450,11 @@ void CheckRecordOwner(const char* where) {
     if (OnStage(Stage::A) && !InJoin()) {
         // A reached the real rasterizer outside a join (S3).
         Nx2Profile::Add(Counter::StageUnproxied, 1);
-    } else if (t_stage == NoStage && !g_record_busy.load(std::memory_order_acquire)) {
+    } else if (t_stage == NoStage &&
+               (!g_record_busy.load(std::memory_order_acquire) || GpuSplit::Get().BackCaughtUp())) {
         // The front after a drain, CPU threads: the stages are idle (as GpuSplit::CheckOwner).
+        // Caught up, the last stage may still end its batch (busy) after the mark it stored, a
+        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3).
         return;
     }
     ReportStack("stages owner check", where);
