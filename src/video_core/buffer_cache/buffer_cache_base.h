@@ -33,6 +33,7 @@
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
 #include "video_core/buffer_cache/nx2_draw_memo.h"
+#include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
@@ -513,7 +514,9 @@ public:
     /// each draw packet of B's. BindHostVertexBuffers marks only the streams it binds again (dirty
     /// ones); B does not see the command buffer C records into, so a stream bound in an older one
     /// would go unmarked there once TickFrame reset its buffer's marks, and an upload to it could
-    /// be moved ahead of the draws that read it (CanReorderUpload).
+    /// be moved ahead of the draws that read it (CanReorderUpload). A stream whose range its
+    /// buffer tracked in the tracker's current generation (vertex_usage_marks) is only stamped:
+    /// TickFrame's reset starts a new generation, the next packet tracks it again.
     void MarkVertexStreamsUsed();
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
@@ -781,6 +784,8 @@ private:
         return value != 0;
     }
 
+    /// Back stages, cut c: the range each vertex stream tracked last (MarkVertexStreamsUsed).
+    std::array<UsageMarkMemo, 32> vertex_usage_marks{};
     /// The buffer each vertex stream touched last and frame_tick + 1 then (BindHostVertexBuffers).
     std::array<BufferId, 32> vertex_touched_ids{};
     std::array<u64, 32> vertex_touched_ticks{};

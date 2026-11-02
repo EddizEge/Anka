@@ -158,6 +158,10 @@ void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
     last_usage_tick = owner->UsageStamp();
 }
 
+void Buffer::StampUsage() noexcept {
+    last_usage_tick = owner->UsageStamp();
+}
+
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
     if (!device) {
         // Null buffer supported, return a null descriptor
@@ -358,15 +362,18 @@ public:
         }
     }
 
-    /// Returns what it bound (the geometry mirror).
-    std::tuple<VkBuffer, VkDeviceSize, VkIndexType> BindBuffer(u32 first) {
+    /// Returns what it bound (the geometry mirror); `record` false: not recorded (a mirrored
+    /// packet, C7: C records it).
+    std::tuple<VkBuffer, VkDeviceSize, VkIndexType> BindBuffer(u32 first, bool record) {
         const VkIndexType index_type_ = index_type;
         const size_t sub_first_offset = static_cast<size_t>(first % 4) * GetQuadsNum(num_indices);
         const size_t offset =
             (sub_first_offset + GetQuadsNum(first)) * 6ULL * BytesPerIndex(index_type);
-        target.Record([buffer_ = *buffer, index_type_, offset](vk::CommandBuffer cmdbuf) {
-            cmdbuf.BindIndexBuffer(buffer_, offset, index_type_);
-        });
+        if (record) {
+            target.Record([buffer_ = *buffer, index_type_, offset](vk::CommandBuffer cmdbuf) {
+                cmdbuf.BindIndexBuffer(buffer_, offset, index_type_);
+            });
+        }
         return {*buffer, offset, index_type_};
     }
 
@@ -854,15 +861,20 @@ void BufferCacheRuntime::EndStages() {
         if (RecordList* const list = EndRecords()) {
             scheduler.Replay(*list, list->Seq());
         }
+        if (mirror_geometry) {
+            // Its vertex and index binds are not in the list (C7).
+            RecordMirroredGeometry(scheduler, device, packet_geometry);
+        }
     }
     // Everything stamped so far went into the current tick or before it.
     scheduler.TickHandover().Note(pending_seq, scheduler.CurrentTick());
     staged = false;
 }
 
-u64 BufferCacheRuntime::BeginRecords() {
+u64 BufferCacheRuntime::BeginRecords(bool mirror_geometry_) {
     records->Begin(pending_seq);
     packet_geometry.clear();
+    mirror_geometry = mirror_geometry_;
     target.list = records.get();
     descriptor_scratch->Restart(descriptor_scratch->UsesDescriptorBuffer());
     descriptor_queue = descriptor_scratch.get();
@@ -951,6 +963,46 @@ void BufferCacheRuntime::NoteGeometry(u8 slot, VkBuffer buffer, VkDeviceSize off
     std::memcpy(&entry.buffer, &buffer, sizeof(buffer));
     entry.offset = offset;
     entry.size = size;
+}
+
+void RecordMirroredGeometry(Scheduler& scheduler, const Device& device,
+                            std::span<const VideoCommon::Nx2Stages::GeometrySlot> slots) {
+    // BindVertexBuffer(s)' commands, one stream each (a batch's sizes and strides are the slots'),
+    // and BindIndexBuffer / BindQuadIndexBuffer's.
+    using VideoCommon::Nx2Stages::GeometrySlot;
+    const bool extended = device.IsExtExtendedDynamicStateSupported();
+    VideoCommon::Nx2Stages::ForEachMirroredBind(
+        slots,
+        [&](const GeometrySlot& slot) {
+            const u32 index = slot.slot;
+            VkBuffer buffer;
+            std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
+            if (extended) {
+                scheduler.Record([index, buffer, offset = VkDeviceSize{slot.offset},
+                                  size = VkDeviceSize{slot.size},
+                                  stride = VkDeviceSize{slot.stride}](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.BindVertexBuffers2EXT(index, 1, &buffer, &offset, &size, &stride);
+                });
+            } else {
+                scheduler.Record(
+                    [index, buffer, offset = VkDeviceSize{slot.offset}](vk::CommandBuffer cmdbuf) {
+                        cmdbuf.BindVertexBuffer(index, buffer, offset);
+                    });
+            }
+        },
+        [&](const GeometrySlot& slot) {
+            VkBuffer buffer;
+            std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
+            const VkIndexType type = slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT32
+                                         ? VK_INDEX_TYPE_UINT32
+                                     : slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT8
+                                         ? VK_INDEX_TYPE_UINT8_EXT
+                                         : VK_INDEX_TYPE_UINT16;
+            scheduler.Record(
+                [buffer, offset = VkDeviceSize{slot.offset}, type](vk::CommandBuffer cmdbuf) {
+                    cmdbuf.BindIndexBuffer(buffer, offset, type);
+                });
+        });
 }
 
 void BufferCacheRuntime::DropPendingMultiRangeOwners() {
@@ -1151,6 +1203,10 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
     if (target.list != nullptr) [[unlikely]] {
         NoteGeometry(GEOMETRY_INDEX_SLOT, vk_buffer, vk_offset, 0, 0,
                      GeometryIndexFormatOf(vk_index_type));
+        if (mirror_geometry) {
+            // C records it from the packet (C7).
+            return;
+        }
     }
     target.Record([vk_buffer, vk_offset, vk_index_type](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(vk_buffer, vk_offset, vk_index_type);
@@ -1162,6 +1218,9 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         ReserveNullBuffer();
         if (target.list != nullptr) [[unlikely]] {
             NoteGeometry(GEOMETRY_INDEX_SLOT, *null_buffer, 0, 0, 0, GEOMETRY_INDEX_UINT32);
+            if (mirror_geometry) {
+                return;
+            }
         }
         target.Record([this](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindIndexBuffer(*null_buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1176,7 +1235,8 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         } else {
             quad_array_index_buffer->UpdateBuffer(first + count);
         }
-        const auto [buffer, offset, type] = quad_array_index_buffer->BindBuffer(first);
+        const auto [buffer, offset, type] =
+            quad_array_index_buffer->BindBuffer(first, !MirrorsBinds());
         if (target.list != nullptr) [[unlikely]] {
             NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0, GeometryIndexFormatOf(type));
         }
@@ -1187,7 +1247,8 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         } else {
             quad_strip_index_buffer->UpdateBuffer(first + count);
         }
-        const auto [buffer, offset, type] = quad_strip_index_buffer->BindBuffer(first);
+        const auto [buffer, offset, type] =
+            quad_strip_index_buffer->BindBuffer(first, !MirrorsBinds());
         if (target.list != nullptr) [[unlikely]] {
             NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0, GeometryIndexFormatOf(type));
         }
@@ -1202,6 +1263,9 @@ void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset
         if (target.list != nullptr) [[unlikely]] {
             NoteGeometry(static_cast<u8>(index), buffer, buffer != VK_NULL_HANDLE ? offset : 0,
                          buffer != VK_NULL_HANDLE ? size : VK_WHOLE_SIZE, stride);
+            if (mirror_geometry) {
+                return;
+            }
         }
         target.Record([index, buffer, offset, size, stride](vk::CommandBuffer cmdbuf) {
             const VkDeviceSize vk_offset = buffer != VK_NULL_HANDLE ? offset : 0;
@@ -1217,6 +1281,9 @@ void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset
         }
         if (target.list != nullptr) [[unlikely]] {
             NoteGeometry(static_cast<u8>(index), buffer, offset, 0, stride);
+            if (mirror_geometry) {
+                return;
+            }
         }
         target.Record([index, buffer, offset](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindVertexBuffer(index, buffer, offset);
@@ -1251,6 +1318,9 @@ void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bi
             NoteGeometry(static_cast<u8>(bindings.min_index + i), buffer_handles[i],
                          bindings.offsets[i], sized ? bindings.sizes[i] : 0,
                          static_cast<u32>(bindings.strides[i]));
+        }
+        if (mirror_geometry) {
+            return;
         }
     }
     if (device.IsExtExtendedDynamicStateSupported()) {

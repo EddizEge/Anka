@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -50,9 +51,7 @@ TEST_CASE("Nx2StageDraw: the tail round-trips in its order", "[video_core]") {
     StageDrawWriter writer;
     writer.Begin();
     writer.Head().seq = 77;
-    writer.Head().instance_count = 3;
     writer.Head().is_indexed = true;
-    writer.Head().any_upload = true;
     writer.Head().light.epoch = 9;
     // Stage 0 with two entries, stage 2 none, stage 4 with three: stages may be skipped.
     const std::array<std::array<u64, DrawEntryWords>, 2> vertex{Entry(10), Entry(20)};
@@ -80,9 +79,7 @@ TEST_CASE("Nx2StageDraw: the tail round-trips in its order", "[video_core]") {
     const StageDrawReader reader{words.data(), static_cast<u32>(words.size())};
     const DrawToC& head = reader.Head();
     REQUIRE(head.seq == 77);
-    REQUIRE(head.instance_count == 3);
     REQUIRE(head.is_indexed);
-    REQUIRE(head.any_upload);
     REQUIRE(head.light.epoch == 9);
     REQUIRE(head.buffer_entries == std::array<u8, DrawStages>{2, 0, 0, 0, 3});
     REQUIRE(head.handles == 3);
@@ -159,4 +156,140 @@ TEST_CASE("Nx2StageDraw: a repair reads other handles", "[video_core]") {
     REQUIRE(repair.StageEntryCount(3) == 1);
     REQUIRE(repair.StageEntries(3)[2] == entry[2]);
     REQUIRE(reader.Handles().empty());
+}
+
+TEST_CASE("Nx2StageDraw: the head is six words", "[video_core]") {
+    // What C reads (k2hiz): the seq, pipeline, records, B's light epoch, the counts, the stages'
+    // entries, kind and is_indexed.
+    static_assert(sizeof(DrawToC) == 6 * sizeof(u64));
+    REQUIRE(DrawHeadWords == 6);
+}
+
+TEST_CASE("Nx2StageDraw: draw arguments round-trip packed by their command", "[video_core]") {
+    DrawArgs direct{};
+    direct.command = DrawCommand::Direct;
+    direct.is_indexed = true;
+    direct.topology = 0x0d;
+    direct.base_instance = 0xfffffffe;
+    direct.num_instances = 1;
+    direct.base_vertex = 0x80000001; // a negative base vertex, as the u32 it is
+    direct.num_vertices = 0x12345;
+    direct.first_index = 0xabcdef01;
+    DrawArgs indirect{};
+    indirect.command = DrawCommand::Indirect;
+    indirect.indirect_buffer = 0x1122334455667788ULL;
+    indirect.indirect_offset = 0x100000040ULL; // past 4 GiB: kept whole
+    indirect.max_draw_counts = 77;
+    indirect.stride = 20;
+    indirect.topology = 4;
+    DrawArgs count = indirect;
+    count.command = DrawCommand::IndirectCount;
+    count.is_indexed = true;
+    count.count_buffer = 0x99;
+    count.count_offset = 0x10;
+    DrawArgs bytes{};
+    bytes.command = DrawCommand::ByteCount;
+    bytes.indirect_buffer = 5;
+    bytes.indirect_offset = 6;
+    bytes.stride = 12;
+    DrawArgs none{};
+    none.topology = 3;
+    const std::array<std::pair<DrawArgs, u32>, 5> cases{{
+        {direct, 3}, {indirect, 4}, {count, 6}, {bytes, 4}, {none, 1}}};
+    for (const auto& [args, words] : cases) {
+        std::array<u64, MaxDrawArgWords + 1> packed;
+        packed.fill(0x5a5a5a5a5a5a5a5aULL);
+        REQUIRE(PackDrawArgs(args, packed.data()) == words);
+        REQUIRE(packed[words] == 0x5a5a5a5a5a5a5a5aULL); // nothing past its words
+        const DrawArgs back = UnpackDrawArgs({packed.data(), words});
+        REQUIRE(back.command == args.command);
+        REQUIRE(back.is_indexed == args.is_indexed);
+        REQUIRE(back.topology == args.topology);
+        if (args.command == DrawCommand::Direct) {
+            REQUIRE(back.base_instance == args.base_instance);
+            REQUIRE(back.num_instances == args.num_instances);
+            REQUIRE(back.base_vertex == args.base_vertex);
+            REQUIRE(back.num_vertices == args.num_vertices);
+            REQUIRE(back.first_index == args.first_index);
+        } else if (args.command != DrawCommand::None) {
+            REQUIRE(back.indirect_buffer == args.indirect_buffer);
+            REQUIRE(back.indirect_offset == args.indirect_offset);
+            REQUIRE(back.max_draw_counts == args.max_draw_counts);
+            REQUIRE(back.stride == args.stride);
+            REQUIRE(back.count_buffer ==
+                    (args.command == DrawCommand::IndirectCount ? args.count_buffer : 0));
+            REQUIRE(back.count_offset ==
+                    (args.command == DrawCommand::IndirectCount ? args.count_offset : 0));
+        }
+    }
+}
+
+TEST_CASE("Nx2StageDraw: the packet's own geometry is written without a copy", "[video_core]") {
+    // SetGeometry: B's runtime's PacketGeometry, read by WriteTo alone.
+    std::array<GeometrySlot, 3> slots{};
+    for (u8 i = 0; i < slots.size(); ++i) {
+        slots[i] = GeometrySlot{.slot = i, .index_format = 0, .reserved = 0, .stride = 16u * i,
+                                .buffer = 0x100u + i, .offset = 8u * i, .size = 64u + i};
+    }
+    StageDrawWriter writer;
+    writer.Begin();
+    writer.SetGeometry(slots);
+    std::array<u64, MaxDrawArgWords> packed;
+    DrawArgs args{};
+    args.command = DrawCommand::Direct;
+    args.num_vertices = 3;
+    writer.AddDrawWords(packed.data(), PackDrawArgs(args, packed.data()));
+    REQUIRE(writer.Words() == DrawHeadWords + 3 * GeometrySlotWords + 3);
+    slots[2].offset = 0x777; // read at WriteTo, not at SetGeometry
+    const std::vector<u64> words = Write(writer);
+    const StageDrawReader reader{words.data(), static_cast<u32>(words.size())};
+    REQUIRE(reader.Head().geometry_slots == 3);
+    REQUIRE(reader.Geometry().size() == 3);
+    REQUIRE(reader.Geometry()[1].buffer == 0x101);
+    REQUIRE(reader.Geometry()[2].offset == 0x777);
+    REQUIRE(UnpackDrawArgs(reader.DrawWords()).num_vertices == 3);
+    // Begin forgets the view.
+    writer.Begin();
+    REQUIRE(writer.Words() == DrawHeadWords);
+}
+
+TEST_CASE("Nx2StageDraw: a mirrored packet's binds in B's order, transform feedback apart",
+          "[video_core]") {
+    // C7: C records the vertex streams and the index buffer from the slots, as B noted them (a
+    // stream bound twice binds twice, the later last); transform feedback slots (33-36) are in
+    // B's list.
+    std::array<GeometrySlot, 6> slots{};
+    const std::array<u8, 6> numbers{3, 32, 33, 0, 3, 31};
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].slot = numbers[i];
+        slots[i].buffer = 0x100 + i;
+    }
+    std::vector<u64> order;
+    u32 vertex_binds = 0;
+    u32 index_binds = 0;
+    ForEachMirroredBind(
+        slots,
+        [&](const GeometrySlot& slot) {
+            ++vertex_binds;
+            order.push_back(slot.buffer);
+        },
+        [&](const GeometrySlot& slot) {
+            ++index_binds;
+            order.push_back(slot.buffer);
+        });
+    REQUIRE(vertex_binds == 4);
+    REQUIRE(index_binds == 1);
+    REQUIRE(order == std::vector<u64>{0x100, 0x101, 0x103, 0x104, 0x105});
+
+    // The head's flag goes through the ring; Begin clears it.
+    StageDrawWriter writer;
+    writer.Begin();
+    writer.Head().geometry_mirrored = true;
+    writer.SetGeometry(std::span<const GeometrySlot>{slots.data(), 2});
+    std::vector<u64> words = Write(writer);
+    StageDrawReader reader{words.data(), static_cast<u32>(words.size())};
+    REQUIRE(reader.Head().geometry_mirrored);
+    REQUIRE(reader.Geometry().size() == 2);
+    writer.Begin();
+    REQUIRE(!writer.Head().geometry_mirrored);
 }

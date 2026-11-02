@@ -65,7 +65,13 @@ bool g_check{};
 std::atomic<u8> g_owner{StageIdB};
 u8 g_default_owner{StageIdB};
 /// The default owner runs records (CheckRecordOwner: the front may use the scheduler otherwise).
-std::atomic<bool> g_record_busy{};
+/// A line of its own: C stores it around each of its batches, B reads g_owner and the hooks
+/// around it for each record and packet (k2hiz: the line moved between them).
+struct alignas(64) RecordBusy {
+    std::atomic<bool> value{};
+};
+RecordBusy g_record_busy_line;
+std::atomic<bool>& g_record_busy = g_record_busy_line.value;
 /// The record side's begin and end of the stages (SetStageHooks).
 void (*g_hook_begin)(void*){};
 void (*g_hook_end)(void*){};
@@ -116,6 +122,7 @@ struct GpuHandler {
     }
     void CbData(u8 stage, u64 address, const u32* data, u32 count) {
         if (Maxwell3D* const replica = Replica(stage)) {
+            Nx2Profile::FineScope scope{Zone::CbData};
             if (g_cb_write_check != nullptr && stage == StageIdB &&
                 CbWriteJoins(*replica, address, count)) [[unlikely]] {
                 // Into a pool C may still read for work B sent before (omur-1): C parked having
@@ -556,7 +563,10 @@ void JoinFromB(FunctionRef op) {
             entered = DiagNowNs();
         }
         g_owner.store(StageIdB, std::memory_order_release);
-        op();
+        {
+            Nx2Profile::FineScope scope{Zone::JoinOp};
+            op();
+        }
         g_owner.store(g_default_owner, std::memory_order_release);
     });
     if (g_join_diag) {
@@ -582,7 +592,10 @@ void JoinFromBLocked(FunctionRef op) {
         }
         t_locked_join = false;
         g_owner.store(StageIdB, std::memory_order_release);
-        op();
+        {
+            Nx2Profile::FineScope scope{Zone::JoinOp};
+            op();
+        }
         g_owner.store(g_default_owner, std::memory_order_release);
     });
     t_locked_join = false;

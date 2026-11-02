@@ -3928,6 +3928,22 @@ void ForceVertexBinds(Tegra::Engines::Maxwell3D& mb) {
     }
 }
 
+// EDEN_NX2_GEOMETRY_MIRROR=0 (cut c, C7): B records a draw packet's vertex and index binds into
+// its list too, as before. Else they reach C in the packet's geometry slots alone and C records
+// them after the list (ApplyGeometryC): B neither records nor copies them, a packet that recorded
+// nothing else has no list, and C replays none.
+bool GeometryMirrorBinds() {
+    // Read at the first call, without a guarded static's check on every call (each draw packet).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_GEOMETRY_MIRROR");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
+}
+
 // The streams of `streams` whose dirty flag is set.
 u32 VertexDirtyMask(const Tegra::Engines::Maxwell3D::DirtyState::Flags& flags, u32 streams) {
     u32 mask = 0;
@@ -4065,6 +4081,7 @@ void RasterizerVulkan::ForceGeometryForJoin() {
 void RasterizerVulkan::BeginStagesHook(void* context) {
     // Start, before B and C start (every stage drained).
     auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    stage_rasterizer = rasterizer;
     std::scoped_lock lock{rasterizer->buffer_cache.mutex};
     rasterizer->buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, rasterizer);
     rasterizer->buffer_cache_runtime.BeginStages();
@@ -4184,6 +4201,7 @@ void RasterizerVulkan::SendStageRecords(u64 seq, RecordList* records) {
 
 void RasterizerVulkan::SendStageDraw() {
     namespace Stages = VideoCommon::Nx2Stages;
+    VideoCommon::Nx2Profile::FineScope scope{VideoCommon::Nx2Profile::Zone::PacketSend};
     FlushStageCWork();
     if (OwnsRecordsB()) [[unlikely]] {
         // C parked: the packet runs here (no draw is set up in a join's op so far).
@@ -4200,6 +4218,11 @@ void RasterizerVulkan::SendStageDraw() {
 u64 RasterizerVulkan::NextStageSeq() const noexcept {
     // While staged, what the runtime stamps with: the seq its next packet gets.
     return Nx2Record::SeqTicks::SeqOf(buffer_cache_runtime.UsageStamp());
+}
+
+void RasterizerVulkan::MarkStreamsB() {
+    VideoCommon::Nx2Profile::FineScope scope{VideoCommon::Nx2Profile::Zone::MarkStreams};
+    buffer_cache.MarkVertexStreamsUsed();
 }
 
 void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) {
@@ -4268,11 +4291,35 @@ bool RasterizerVulkan::CbWriteJoinsB(Tegra::Engines::Maxwell3D& replica, GPUVAdd
     return false;
 }
 
-void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
+void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq, bool light) {
     namespace Stages = VideoCommon::Nx2Stages;
     Stages::Nx2GpuPages& pages = Stages::GpuPages();
     if (!pages.Live()) {
         // Off: Holds says every page may hold data.
+        return;
+    }
+    StageTargets& targets = stage_targets;
+    const auto preset_ranges = [&] {
+        for (const auto& [begin, size] : targets.ranges) {
+            pages.PreSet(begin, size, seq);
+        }
+        if (targets.ranges.empty()) {
+            // No target: only B's position (b_next, STAGE_CHECK's) moves; no page is held.
+            pages.PreSet(0, 0, seq);
+        }
+    };
+    // A light draw: its render target registers are the packet before's (they are
+    // LightChange::State, which keeps a draw off the light way; a clear or a texture draw in
+    // between is a Command), whose call found `key` for them (`current`) and its ranges; they
+    // stand while the memory manager and its mappings do. ~30-90 ns a draw of building the key and
+    // comparing it (k2hiz). STAGE_CHECK and =2 build it all the same and compare (below).
+    const bool keep = light && targets.valid && targets.current &&
+                      targets.gpu_memory == gpu_memory &&
+                      targets.memory_id == gpu_memory->GetID() &&
+                      targets.mapping_epoch == gpu_memory->MappingEpoch();
+    if (keep && !pages.Checking()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::PresetsKept, 1);
+        preset_ranges();
         return;
     }
     // The bound targets' GPU ranges, conservatively (D6): a layer's stride (pitch linear: pitch
@@ -4322,10 +4369,13 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
                                               layers, 8)};
     }
     if (oversized) [[unlikely]] {
+        targets.current = false;
         pages.PreSetAll(seq);
         return;
     }
-    StageTargets& targets = stage_targets;
+    if (keep && targets.key != key) [[unlikely]] {
+        Stages::ReportStageHazard("a light draw's render targets differ from the packet before's");
+    }
     // Read before the walk: a mapping changed meanwhile walks again at the next packet.
     const u64 mapping_epoch = gpu_memory->MappingEpoch();
     if (!targets.valid || targets.gpu_memory != gpu_memory ||
@@ -4360,13 +4410,8 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
         targets.mapping_epoch = mapping_epoch;
         targets.valid = true;
     }
-    for (const auto& [begin, size] : targets.ranges) {
-        pages.PreSet(begin, size, seq);
-    }
-    if (targets.ranges.empty()) {
-        // No target: only B's position (b_next, STAGE_CHECK's) moves; no page is held.
-        pages.PreSet(0, 0, seq);
-    }
+    targets.current = true;
+    preset_ranges();
 }
 
 void RasterizerVulkan::StageInvalidateThunk(const u64* payload, u32 words) {
@@ -4597,7 +4642,6 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     namespace Stages = VideoCommon::Nx2Stages;
     using LightChange = Tegra::Engines::Maxwell3D::LightChange;
     Tegra::Engines::Maxwell3D& mb = EngineB();
-    params.rasterizer = this;
     params.topology = static_cast<u8>(mb.draw_manager.draw_state.topology);
     bool invalidated;
     {
@@ -4666,26 +4710,21 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
     };
     Stages::StageDrawWriter& out = stage_writer;
-    const auto finish_head = [&](u64 seq, RecordList* records, LightLevel level) {
+    const auto finish_head = [&](u64 seq, RecordList* records) {
+        Profile::FineScope scope{Profile::Zone::PacketBuild};
         Stages::DrawToC& head = out.Head();
         head.seq = seq;
         head.records = records;
-        head.instance_count = instance_count;
-        head.indirect = indirect;
-        head.light = {
-            .anchor_records = 0,
-            .epoch = anchor.epoch,
-            .reasons = 0,
-            .armed = level == LightLevel::Full,
-        };
+        head.light = {.epoch = anchor.epoch};
         // The geometry mirror: the packet's binds and the streams B keeps live (C binds them
-        // again where its command buffer lost them, BindGeometryC).
-        for (const Stages::GeometrySlot& slot : buffer_cache_runtime.PacketGeometry()) {
-            out.AddGeometry(slot);
-        }
+        // again where its command buffer lost them, BindGeometryC). The runtime's own slots,
+        // valid until its next BeginRecords: SendStageDraw copies them to ring 3.
+        out.SetGeometry(buffer_cache_runtime.PacketGeometry());
+        head.geometry_mirrored = buffer_cache_runtime.GeometryMirrored();
         head.vertex_live = buffer_cache.EnabledVertexBuffersMask();
-        out.AddDrawWords(reinterpret_cast<const u64*>(&params),
-                         static_cast<u32>(sizeof(params) / sizeof(u64)));
+        // Packed by command (a direct draw's 72 bytes in 24).
+        std::array<u64, Stages::MaxDrawArgWords> packed;
+        out.AddDrawWords(packed.data(), Stages::PackDrawArgs(params, packed.data()));
     };
 
     // The light decision: TryLightDraw's checks on what B sees.
@@ -4694,6 +4733,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     bool try_uniform = false;
     bool rebind_storage = false;
     if (LightDrawEnabled() && StageLightEnabled()) {
+        Profile::FineScope decide_scope{Profile::Zone::LightDecide};
         const auto& light = mb.light;
         const auto& draw_state = mb.draw_manager.draw_state;
         const u32 uniform_mode = LightUniformMode();
@@ -4737,13 +4777,24 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         {
             Profile::Scope scope{Profile::Zone::LightDraw};
             Nx2Record::CacheLock lock{buffer_cache.mutex};
-            seq = buffer_cache_runtime.BeginRecords();
+            seq = buffer_cache_runtime.BeginRecords(GeometryMirrorBinds());
             ForceGeometryB(mb);
             if (try_plain) {
                 // ConfigureImpl's geometry buffers (TryLightDraw); an upload needs the full
                 // setup's barrier.
+                Profile::FineScope geometry_scope{Profile::Zone::LightGeometry};
                 if (buffer_cache.UpdateGeometryBuffers(is_indexed)) {
+                    // EDEN_NX2_LIGHT_SYNC_SKIP, as TryLightDraw: plain here by B's checks (its
+                    // replica's light changes, its memory manager's cached and same-value writes,
+                    // light_epoch_b), so B's chain synchronized every enabled stream after the
+                    // last memory change; only streams flagged dirty bind anew (ForceGeometryB's
+                    // flag them all), a clean stream whose range may hold CPU-modified or
+                    // untracked pages since is synchronized anyway (UnsetSince). Without it each
+                    // plain light draw synchronized its ~12 clean streams again (85: twice K1's
+                    // buffer syncs a draw).
+                    buffer_cache.plain_light_draw = VideoCommon::Nx2LightSyncSkip() != 0;
                     buffer_cache.BindHostGeometryBuffers(is_indexed);
+                    buffer_cache.plain_light_draw = false;
                     light_ok = !buffer_cache.any_buffer_uploaded;
                 }
                 if (light_ok) {
@@ -4756,6 +4807,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
                 }
             } else {
                 // The anchor's SetEngine holds (same replica and memory manager).
+                Profile::FineScope uniform_scope{Profile::Zone::LightUniform};
                 light_ok = pipeline.ConfigureUniformsBuffers(is_indexed, rebind_storage, out);
                 if (!light_ok) {
                     Profile::Add(Profile::Counter::LightUniformFellBack, 1);
@@ -4766,17 +4818,22 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             }
             if (light_ok) {
                 // Every stream the draw reads, bound again or not (geo-markusage-1).
-                buffer_cache.MarkVertexStreamsUsed();
+                MarkStreamsB();
                 take_indirect();
+                // EDEN_NX2_GPU_PROFILE: the streams this draw bound, as TryLightDraw counts them.
+                buffer_cache.CommitVertexStreamNote();
             }
             records = buffer_cache_runtime.EndRecords();
         }
         if (light_ok) {
-            finish_head(seq, records, last.level);
-            NotePoolsB(mb, seq);
-            PreSetTargets(mb, seq);
-            if (pipeline.WritesMemory()) {
-                VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+            finish_head(seq, records);
+            {
+                Profile::FineScope presets_scope{Profile::Zone::StagePresets};
+                NotePoolsB(mb, seq);
+                PreSetTargets(mb, seq, true);
+                if (pipeline.WritesMemory()) {
+                    VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+                }
             }
             SendStageDraw();
             if (try_plain) {
@@ -4800,7 +4857,8 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         // The full setup follows; what was bound and uploaded so far stays valid (C replays it
         // first) and any_buffer_uploaded stays for its barrier. Its binds go without the geometry
-        // mirror (a records packet): the full setup sends every vertex stream.
+        // mirror (a records packet; mirrored, C7, they are not in it at all): the full setup sends
+        // every vertex stream, and each indexed or quad draw its index buffer.
         geometry_reset_b = true;
         SendStageRecords(seq, records);
     }
@@ -4882,7 +4940,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     out.Begin();
     {
         Nx2Record::CacheLock lock{buffer_cache.mutex};
-        seq = buffer_cache_runtime.BeginRecords();
+        seq = buffer_cache_runtime.BeginRecords(GeometryMirrorBinds());
         record_indirect_barrier();
         ForceGeometryB(mb);
         GraphicsPipeline::BufferHalf half;
@@ -4892,8 +4950,9 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         if (half == GraphicsPipeline::BufferHalf::Ready) {
             // Every stream the draw reads, bound again or not (geo-markusage-1).
-            buffer_cache.MarkVertexStreamsUsed();
+            MarkStreamsB();
             take_indirect();
+            buffer_cache.CommitVertexStreamNote();
         } else {
             // SplitJoins said no: nothing was done.
             LOG_ERROR(HW_GPU, "ConfigureBuffers joined a draw SplitJoins kept split");
@@ -4907,14 +4966,17 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         follows = LightDrawEnabled() && StageLightEnabled() ? FollowableB(*pipeline, mb, shape_ok)
                                                             : LightLevel::None;
     }
-    finish_head(seq, records, follows);
-    NotePoolsB(mb, seq);
-    if (params.command != StageCommand::None) {
-        // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
-        PreSetTargets(mb, seq);
-        if (pipeline->WritesMemory()) {
-            // Storage images / global stores B does not place.
-            VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+    finish_head(seq, records);
+    {
+        Profile::FineScope presets_scope{Profile::Zone::StagePresets};
+        NotePoolsB(mb, seq);
+        if (params.command != StageCommand::None) {
+            // T8 (PLAN §7/25): what C may write for this packet, before it is sent.
+            PreSetTargets(mb, seq);
+            if (pipeline->WritesMemory()) {
+                // Storage images / global stores B does not place.
+                VideoCommon::Nx2Stages::GpuPages().PreSetAll(seq);
+            }
         }
     }
     SendStageDraw();
@@ -5350,13 +5412,8 @@ static_assert(
 
 void RasterizerVulkan::StageDrawThunk(const u64* payload, u32 words) {
     const StageDrawReader in{payload, words};
-    StageDrawParams params;
-    const std::span<const u64> draw_words = in.DrawWords();
-    if (draw_words.size() * sizeof(u64) != sizeof(params)) [[unlikely]] {
-        std::abort();
-    }
-    std::memcpy(&params, draw_words.data(), sizeof(params));
-    params.rasterizer->PrepareDrawC(in, params);
+    const StageDrawParams params = VideoCommon::Nx2Stages::UnpackDrawArgs(in.DrawWords());
+    stage_rasterizer->PrepareDrawC(in, params);
 }
 
 void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawParams& params) {
@@ -5411,6 +5468,12 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         Profile::Add(state_ok ? Profile::Counter::LightRepairsTexture
                               : Profile::Counter::LightRepairsState,
                      1);
+        if (!state_ok) {
+            Profile::Add(!anchor.followable                ? Profile::Counter::RepairsNotFollowable
+                         : anchor.pipeline != head.pipeline ? Profile::Counter::RepairsPipeline
+                                                            : Profile::Counter::RepairsRecords,
+                         1);
+        }
         if (anchor.pipeline != &pipeline || (plain && anchor.payload.empty())) {
             // No anchor here to repair with (its setup failed, or the stages just began).
             return false;
@@ -5525,8 +5588,14 @@ void RasterizerVulkan::ApplyGeometryC(const StageDrawReader& in, u64 replay_tick
     // replayed them in a join before (a submission may have come after) or a submission came
     // while they were replayed (not expected: a packet's Finish, STAGE_CHECK's hazard): bound
     // again then.
+    // A packet B mirrored (C7) has its vertex and index binds in its geometry slots alone: C
+    // records them here, after the list, in this command buffer.
     const u64 tick = scheduler.CurrentTick();
-    const bool early = std::exchange(geometry_replayed_c, false) || tick != replay_tick;
+    bool early = std::exchange(geometry_replayed_c, false) || tick != replay_tick;
+    if (in.Head().geometry_mirrored) {
+        RecordMirroredGeometry(scheduler, device, in.Geometry());
+        early = false;
+    }
     const u32 bound =
         geometry_mirror_c.Apply(in.Geometry(), in.Head().vertex_live, tick, early);
     auto& flags = maxwell3d->dirty.flags;
@@ -5546,24 +5615,9 @@ void RasterizerVulkan::BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head
     const u32 live = head.vertex_live & (bindings >= 32 ? ~0u : (1u << bindings) - 1);
     const u32 dirty = VertexDirtyMask(flags, live);
     const u32 rebind = geometry_mirror_c.Rebind(live, dirty);
-    const bool extended = device.IsExtExtendedDynamicStateSupported();
     for (u32 mask = rebind; mask != 0; mask &= mask - 1) {
         const u32 index = static_cast<u32>(std::countr_zero(mask));
-        const Stages::GeometrySlot& slot = geometry_mirror_c.Vertex(index);
-        VkBuffer buffer;
-        std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
-        if (extended) {
-            scheduler.Record([index, buffer, offset = VkDeviceSize{slot.offset},
-                              size = VkDeviceSize{slot.size},
-                              stride = VkDeviceSize{slot.stride}](vk::CommandBuffer cmdbuf) {
-                cmdbuf.BindVertexBuffers2EXT(index, 1, &buffer, &offset, &size, &stride);
-            });
-        } else {
-            scheduler.Record(
-                [index, buffer, offset = VkDeviceSize{slot.offset}](vk::CommandBuffer cmdbuf) {
-                    cmdbuf.BindVertexBuffer(index, buffer, offset);
-                });
-        }
+        RecordMirroredGeometry(scheduler, device, {&geometry_mirror_c.Vertex(index), 1});
         flags[VideoCommon::Dirty::VertexBuffer0 + index] = false;
     }
     if (const u32 missing = geometry_mirror_c.Missing(live, dirty); missing != 0) [[unlikely]] {
@@ -5578,18 +5632,7 @@ void RasterizerVulkan::BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head
     }
     const bool rebind_index = geometry_mirror_c.RebindIndex(scheduler.CurrentTick());
     if (rebind_index) {
-        const Stages::GeometrySlot& slot = geometry_mirror_c.Index();
-        VkBuffer buffer;
-        std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
-        const VkIndexType type = slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT32
-                                     ? VK_INDEX_TYPE_UINT32
-                                 : slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT8
-                                     ? VK_INDEX_TYPE_UINT8_EXT
-                                     : VK_INDEX_TYPE_UINT16;
-        scheduler.Record(
-            [buffer, offset = VkDeviceSize{slot.offset}, type](vk::CommandBuffer cmdbuf) {
-                cmdbuf.BindIndexBuffer(buffer, offset, type);
-            });
+        RecordMirroredGeometry(scheduler, device, {&geometry_mirror_c.Index(), 1});
     }
     if (rebind != 0 || rebind_index) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::GeometryReplays, 1);

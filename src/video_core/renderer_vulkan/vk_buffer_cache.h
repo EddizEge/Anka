@@ -70,6 +70,15 @@ public:
 
     void MarkUsage(u64 offset, u64 size) noexcept;
 
+    /// What MarkUsage leaves of a range tracked in this generation already: the use stamp
+    /// (back stages, cut c: BufferCache::MarkVertexStreamsUsed).
+    void StampUsage() noexcept;
+
+    /// The tracker's generation (VideoCommon::UsageMarkMemo): new at each ResetUsageTracking.
+    [[nodiscard]] u64 UsageGeneration() const noexcept {
+        return tracker.Generation();
+    }
+
     void ResetUsageTracking() noexcept {
         tracker.Reset();
     }
@@ -353,8 +362,11 @@ public:
     /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, u64, K5; noted by C
     /// with Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime
     /// records into B's record list (RecordTarget), adds the binds' descriptor entries to
-    /// DescriptorScratch and stamps with this seq.
-    u64 BeginRecords();
+    /// DescriptorScratch and stamps with this seq. `mirror_geometry` (a draw packet, C7): its
+    /// vertex and index binds go to PacketGeometry alone, not into the list; C records them from
+    /// the packet's geometry slots (RecordMirroredGeometry). Transform feedback binds and what the
+    /// quad / uint8 passes record (copies, dispatches, barriers) stay in the list.
+    u64 BeginRecords(bool mirror_geometry = false);
 
     /// B: ends the packet's records; returns its list for DrawToC::records (null when nothing
     /// was recorded). After it the runtime records straight to the scheduler and the guest
@@ -395,6 +407,11 @@ public:
     [[nodiscard]] std::span<const VideoCommon::Nx2Stages::GeometrySlot> PacketGeometry()
         const noexcept {
         return packet_geometry;
+    }
+    /// Whether the packet since the last BeginRecords had its vertex and index binds in
+    /// PacketGeometry alone (DrawToC::geometry_mirrored).
+    [[nodiscard]] bool GeometryMirrored() const noexcept {
+        return mirror_geometry;
     }
 
     /// B's staging pool (null before the first BeginStages), for MappedBytes / MappedBytesAt on
@@ -468,6 +485,11 @@ private:
     void StageDropMultiRangeOwner(VkBuffer owner);
     /// The record owner (a join's op): retires what StageDropMultiRangeOwner held back.
     void DropPendingMultiRangeOwners();
+
+    /// Inside a packet BeginRecords mirrors (C7): a vertex or index bind is noted, not recorded.
+    [[nodiscard]] bool MirrorsBinds() const noexcept {
+        return target.list != nullptr && mirror_geometry;
+    }
 
     /// Inside a packet: notes a geometry bind for PacketGeometry.
     void NoteGeometry(u8 slot, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
@@ -569,12 +591,19 @@ private:
     Nx2Record::SeqGraveyard<BufferGrave> buffer_graveyard;
     Nx2Record::SeqGraveyard<vk::Buffer> lut_graveyard;
     std::vector<VideoCommon::Nx2Stages::GeometrySlot> packet_geometry; ///< PacketGeometry
+    bool mirror_geometry{}; ///< BeginRecords' (GeometryMirrored)
     std::vector<VkBuffer> pending_owner_drops; ///< StageDropMultiRangeOwner's, for the next join
     bool multi_range_used{}; ///< BindMultiRangeStorageBuffer made an entry once
     RecordOwnerHook record_owner_hook{};
     void* record_owner_context{};
     std::array<u64, static_cast<size_t>(StageJoin::Count)> stage_joins{};
 };
+
+/// Cut c (C7): records the vertex and index binds of `slots` (a mirrored packet's geometry slots,
+/// PacketGeometry's layout: what was bound, the null buffer substituted) straight to `scheduler`,
+/// in order, as BufferCacheRuntime's binds record them; transform feedback slots are skipped.
+void RecordMirroredGeometry(Scheduler& scheduler, const Device& device,
+                            std::span<const VideoCommon::Nx2Stages::GeometrySlot> slots);
 
 struct BufferCacheParams {
     using Runtime = Vulkan::BufferCacheRuntime;

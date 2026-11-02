@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -643,7 +644,7 @@ public:
         to_c = options.cut_c ? std::make_unique<LinkC>() : nullptr;
         b = {};
         c = {};
-        passed.clear();
+        passed_count = 0;
         a_in_join = false;
         park_request.store(0, std::memory_order_relaxed);
         park_ack.store(0, std::memory_order_relaxed);
@@ -724,7 +725,7 @@ public:
     // in its ParkB wait too.
 
     u64* BeginC(RecordKind kind, u32 body_words, u32 flags = 0) {
-        PassedDeltas deltas{passed};
+        PassedDeltas deltas{passed.data(), passed_count};
         return Begin(*to_c, deltas, kind, body_words, flags, NoInterruptC{});
     }
     void EndC() {
@@ -823,7 +824,7 @@ public:
             op();
             return;
         }
-        if (!passed.empty()) {
+        if (passed_count != 0) {
             FlushPassed();
         }
         const u32 id = AskJoin();
@@ -917,13 +918,14 @@ private:
         }
     };
     struct PassedDeltas {
-        std::vector<u64>& words;
+        const u64* words;
+        u32& count;
         u32 Pending() {
-            return static_cast<u32>(words.size());
+            return count;
         }
-        void Take(u64* out, u32 count) {
-            std::memcpy(out, words.data(), size_t{count} * sizeof(u64));
-            words.clear();
+        void Take(u64* out, u32 taken) {
+            std::memcpy(out, words, size_t{taken} * sizeof(u64));
+            count = 0;
         }
     };
     static void NopThunk(const u64*, u32) {}
@@ -984,7 +986,7 @@ private:
         const u32 id = park_request.load(std::memory_order_acquire);
         park_served = id;
         LinkC& link = *to_c;
-        if (!passed.empty()) {
+        if (passed_count != 0) {
             FlushPassed(CallNoVerify);
         }
         link.ring.Publish();
@@ -1114,10 +1116,12 @@ private:
     /// B: the deltas it ran that C has not got, at most one header's (MaxDeltaWords) before they
     /// go in a record of their own; each record from A holds at most that many.
     void PassDeltas(const u64* words, u32 count) {
-        if (passed.size() + count > MaxDeltaWords) {
+        if (passed_count + count > MaxDeltaWords) {
             FlushPassed();
         }
-        passed.insert(passed.end(), words, words + count);
+        // A fixed array: ~3 records a draw, a vector's insert cost ~5 ns each (k2hiz).
+        std::memcpy(passed.data() + passed_count, words, size_t{count} * sizeof(u64));
+        passed_count += count;
     }
 
     /// B: its pending deltas to C in a record of their own (`flags`: CallNoVerify where A does
@@ -1410,8 +1414,10 @@ private:
 
     // B's own.
     alignas(64) Consumer b;
-    /// B: the deltas it ran that C has not got yet (cut c).
-    std::vector<u64> passed;
+    /// B: the deltas it ran that C has not got yet (cut c), the first passed_count of them; a
+    /// record from A holds at most MaxDeltaWords (PassDeltas flushes before it would overflow).
+    std::array<u64, MaxDeltaWords> passed{};
+    u32 passed_count{};
     u32 park_served{}; ///< B: the last ParkB request it served
     u32 join_count{};  ///< B: JoinFromB requests made
 

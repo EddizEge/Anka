@@ -284,34 +284,13 @@ private:
     }
 
     /// What C records for a packet (StageDrawParams::command).
-    enum class StageCommand : u8 {
-        None,          ///< Only B's records (a draw cut short: RESETFIX, no pipeline)
-        Direct,        ///< vkCmdDraw / vkCmdDrawIndexed
-        Indirect,      ///< vkCmdDraw(Indexed)Indirect
-        IndirectCount, ///< vkCmdDraw(Indexed)IndirectCount
-        ByteCount,     ///< vkCmdDrawIndirectByteCountEXT
-    };
-    /// The packet's draw words (DrawToC's tail part 4): what Draw / DrawIndirect's draw_func
-    /// read, taken by B from its replica and its buffer cache.
-    struct StageDrawParams {
-        RasterizerVulkan* rasterizer;
-        u64 indirect_buffer; ///< VkBuffer (kept by B's runtime until C is done: BuryBuffer)
-        u64 indirect_offset;
-        u64 count_buffer;
-        u64 count_offset;
-        u32 base_instance;
-        u32 num_instances;
-        u32 base_vertex;
-        u32 num_vertices;
-        u32 first_index;
-        u32 max_draw_counts;
-        u32 stride;
-        StageCommand command;
-        bool is_indexed; ///< The command's (quads draw indexed)
-        u8 topology;     ///< Maxwell's, for C's replica (UpdateDynamicStates)
-        u8 reserved;
-    };
-    static_assert(sizeof(StageDrawParams) % sizeof(u64) == 0);
+    using StageCommand = VideoCommon::Nx2Stages::DrawCommand;
+    /// The packet's draw words (DrawToC's tail part 4, packed: Nx2Stages::PackDrawArgs): what
+    /// Draw / DrawIndirect's draw_func read, taken by B from its replica and its buffer cache.
+    using StageDrawParams = VideoCommon::Nx2Stages::DrawArgs;
+    /// The rasterizer C runs draw packets for (StageDrawThunk): set by BeginStagesHook, the
+    /// stages' one record side (SetStageHooks).
+    static inline RasterizerVulkan* stage_rasterizer{};
 
     /// B's replica of the bound channel's Maxwell3D (Role::Memory; maxwell3d is C's).
     [[nodiscard]] Tegra::Engines::Maxwell3D& EngineB();
@@ -394,10 +373,14 @@ private:
     /// B (T8): the pages C may write for work `seq` (or, between packets, the next packet's): the
     /// bound render targets and depth only (every page for a target too large to walk). A caller
     /// whose pipeline writes memory it does not place (storage images, global stores) adds
-    /// GpuPages().PreSetAll(seq) itself.
-    void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq);
+    /// GpuPages().PreSetAll(seq) itself. `light`: a light draw's packet (no render target
+    /// register changed since the packet before: the ranges found then are kept).
+    void PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq, bool light = false);
     /// B: the seq of the next packet (work sent between packets runs before it).
     [[nodiscard]] u64 NextStageSeq() const noexcept;
+    /// B, inside a draw packet: every vertex stream the draw reads marked used
+    /// (BufferCache::MarkVertexStreamsUsed, geo-markusage-1).
+    void MarkStreamsB();
     /// B (omur-1): the texture header and sampler pools C reads for work `seq` (a packet, or
     /// DrawTexture before the next one), kept until C ran it.
     void NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq);
@@ -432,7 +415,7 @@ private:
     void RunStageInvalidations(const u64* ranges, u32 count);
     void RecordStageDraw(const StageDrawParams& params);
     /// C, once a packet's records were replayed (from `replay_tick` on): its geometry binds into
-    /// the mirror.
+    /// the mirror; a mirrored packet's (DrawToC::geometry_mirrored, C7) recorded first.
     void ApplyGeometryC(const StageDrawReader& in, u64 replay_tick);
     /// C, right before the draw: what the command buffer lost since binds again (kayit-4).
     void BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head);
@@ -590,8 +573,10 @@ private:
         bool followable{};  ///< No render target or view to repeat (LightFollowable's C part)
         std::vector<u64> payload; ///< Its packet: head, descriptor entries, handles
     };
-    LightAnchorC light_anchor_c;
-    VideoCommon::Nx2Stages::StageDrawWriter stage_writer; ///< B
+    /// C's per draw members apart from B's (each written for every draw by one of them): lines of
+    /// their own (k2hiz: B's anchor and C's shared one).
+    alignas(64) LightAnchorC light_anchor_c;
+    alignas(64) VideoCommon::Nx2Stages::StageDrawWriter stage_writer; ///< B
     /// B: C's half of B's invalidations not sent yet, two words each: the device address, the
     /// size with what in the top bits (vk_rasterizer.cpp: StageRangeTexture, StageRangeQuery).
     std::vector<u64> stage_c_ranges;
@@ -602,7 +587,7 @@ private:
         bool active{};
         GraphicsPipeline* pipeline{};
     };
-    StageDynamicPipeline stage_dynamic;
+    alignas(64) StageDynamicPipeline stage_dynamic; ///< C (B in its joins)
     /// B: the device ranges of the bound render targets and depth (T8's PreSet for each packet),
     /// found again when the registers, the memory manager (GetID) or its page table
     /// (MappingEpoch) change; TickFrame and Start drop them too.
@@ -613,9 +598,11 @@ private:
         std::array<std::pair<GPUVAddr, u64>, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets + 1>
             key{};
         bool valid{};
+        /// The last call's registers gave `key` (not a target too large to walk).
+        bool current{};
         std::vector<std::pair<DAddr, u64>> ranges;
     };
-    StageTargets stage_targets;
+    alignas(64) StageTargets stage_targets;
     /// B (omur-1): the pool ranges (GPU addresses) of work C may not have run yet, each with the
     /// last seq that reads it; dropped once C ran that seq (Nx2GpuPages::RanSeq) and at B's joins.
     VideoCommon::Nx2Stages::InFlightRanges stage_pools;
@@ -634,7 +621,7 @@ private:
     const Tegra::Engines::Maxwell3D* geometry_engine_b{};
     const Tegra::MemoryManager* geometry_memory_b{};
     /// C: the geometry mirror (nx2_stage_split.h).
-    VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
+    alignas(64) VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
     /// C: B's record owner hook replayed B's list in a join since C's last draw packet: that
     /// packet's binds may be in an older command buffer. Written by B with C parked.
     bool geometry_replayed_c{};

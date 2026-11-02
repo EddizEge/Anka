@@ -1046,14 +1046,34 @@ void BufferCache<P>::CommitVertexStreamNote() {
 
 template <class P>
 void BufferCache<P>::MarkVertexStreamsUsed() {
+    u32 seen = 0;
+    u32 stamped = 0;
     for (u32 mask = enabled_vertex_buffers_mask; mask != 0; mask &= mask - 1) {
-        const Binding& binding = v_buffer[std::countr_zero(mask)];
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        const Binding& binding = v_buffer[index];
         if (binding.buffer_id == NULL_BUFFER_ID) {
             continue;
         }
         Buffer& buffer = slot_buffers[binding.buffer_id];
-        buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+        const u64 offset = buffer.Offset(binding.device_addr);
+        ++seen;
+        if constexpr (requires { buffer.UsageGeneration(); buffer.StampUsage(); }) {
+            UsageMarkMemo& memo = vertex_usage_marks[index];
+            if (memo.Holds(binding.buffer_id.index, buffer.UsageGeneration(), offset,
+                           binding.size)) {
+                // Tracked in this generation already: this packet's stamp alone.
+                buffer.StampUsage();
+                ++stamped;
+                continue;
+            }
+            buffer.MarkUsage(offset, binding.size);
+            memo.Note(binding.buffer_id.index, buffer.UsageGeneration(), offset, binding.size);
+        } else {
+            buffer.MarkUsage(offset, binding.size);
+        }
     }
+    Nx2Profile::Add(Nx2Profile::Counter::StreamMarks, seen);
+    Nx2Profile::Add(Nx2Profile::Counter::StreamMarksStamped, stamped);
 }
 
 template <class P>

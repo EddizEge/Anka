@@ -1121,7 +1121,6 @@ GraphicsPipeline::BufferHalf GraphicsPipeline::ConfigureBuffersImpl(bool is_inde
         }
     }
     VideoCommon::Nx2Stages::DrawToC& head = out.Head();
-    head.any_upload = buffer_cache.any_buffer_uploaded;
     if (buffer_cache.any_buffer_uploaded) {
         // Into B's record list, with its outside render pass mark: C replays it before its own
         // texture uploads (tasarim §3.5: the order changes, not what it means).
