@@ -20,6 +20,7 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/nx2_reg_replica.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
@@ -27,6 +28,7 @@
 #include "video_core/nx2_indirect_diag.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 #ifdef ARCHITECTURE_x86_64
@@ -155,6 +157,134 @@ void NoteSameWriteSkipped() {
 
 } // Anonymous namespace
 
+// Back stages (nx2_stage_api.h): the side state of a primary as A last sent it (StageWriteSide),
+// and what StageSideWords found changed since.
+struct Maxwell3D::StageSent {
+    decltype(State::shader_stages) const_buffers{};
+    EngineHint engine_state{};
+    ::Common::unordered_map<u64, HLEReplacementAttributeType> replace_table;
+    bool execute_on{};
+    DrawManager::State draw_state{};
+    DrawManager::IndirectParams indirect_state{};
+    DrawManager::DrawTextureState draw_texture_state{};
+    /// =2: the light part goes with every draw, with A's light changes since the last one.
+    bool verify{};
+    // StageSideWords' result, for StageWriteSide.
+    u32 parts{};
+    u32 words{};
+    u32 cb_count{};
+    std::array<u8, Regs::MaxShaderStage * Regs::MaxConstBuffers> cb_slots{};
+};
+
+namespace {
+
+// Side state parts (nx2_reg_replica.h, SidePart), each a run of u64 words:
+//   SideConstBuffers   count, then per bind: stage | slot << 8 | enabled << 16 | size << 32,
+//                      address
+//   SideRebound        rebound[0] | rebound[1] << 32, rebound[2] | rebound[3] << 32,
+//                      rebound[4] | A's light changes since the last draw << 32 (=2 checks them)
+//   SideEngineState    engine_state
+//   SideReplaceTable   count, then per entry: key, value (the whole table)
+//   SideExecuteOn      execute_on
+//   SideDrawState      topology | draw_mode << 32, draw_indexed | base_index << 32,
+//                      vertex_buffer.first | count << 32, base_instance | instance_count << 32,
+//                      index_buffer's words, the inline index bytes' count, the bytes
+//   SideIndirectState  is_byte_count | is_indexed << 1 | include_count << 2,
+//                      count_start_address, indirect_start_address, buffer_size,
+//                      max_draw_counts, stride
+//   SideDrawTexture    draw_texture_state's words
+//   SideDirtyFlags     dirty.flags set since the last send (ORed in)
+using DrawState = Maxwell3D::DrawManager::State;
+using IndirectParams = Maxwell3D::DrawManager::IndirectParams;
+using DrawTextureState = Maxwell3D::DrawManager::DrawTextureState;
+using DirtyFlags = Maxwell3D::DirtyState::Flags;
+
+constexpr u32 WordsOf(size_t bytes) {
+    return static_cast<u32>((bytes + sizeof(u64) - 1) / sizeof(u64));
+}
+constexpr u32 IndexBufferWords = WordsOf(sizeof(Maxwell3D::Regs::IndexBuffer));
+constexpr u32 DrawTextureWords = WordsOf(sizeof(DrawTextureState));
+constexpr u32 IndirectWords = 6;
+constexpr u32 DirtyFlagWords = WordsOf(sizeof(DirtyFlags));
+static_assert(std::is_trivially_copyable_v<Maxwell3D::Regs::IndexBuffer> &&
+              std::is_trivially_copyable_v<DrawTextureState> &&
+              std::is_trivially_copyable_v<DirtyFlags> && sizeof(DirtyFlags) == 32);
+
+u32 DrawStateWords(const DrawState& draw_state) {
+    return 5 + IndexBufferWords + WordsOf(draw_state.inline_index_draw_indexes.size());
+}
+
+bool SameConstBuffer(const ConstBufferInfo& a, const ConstBufferInfo& b) {
+    return a.address == b.address && a.size == b.size && a.enabled == b.enabled;
+}
+
+bool SameDrawState(const DrawState& a, const DrawState& b) {
+    return a.topology == b.topology && a.draw_mode == b.draw_mode &&
+           a.draw_indexed == b.draw_indexed && a.base_index == b.base_index &&
+           a.vertex_buffer.first == b.vertex_buffer.first &&
+           a.vertex_buffer.count == b.vertex_buffer.count &&
+           std::memcmp(&a.index_buffer, &b.index_buffer, sizeof(a.index_buffer)) == 0 &&
+           a.base_instance == b.base_instance && a.instance_count == b.instance_count &&
+           a.inline_index_draw_indexes == b.inline_index_draw_indexes;
+}
+
+bool SameIndirect(const IndirectParams& a, const IndirectParams& b) {
+    return a.is_byte_count == b.is_byte_count && a.is_indexed == b.is_indexed &&
+           a.include_count == b.include_count && a.count_start_address == b.count_start_address &&
+           a.indirect_start_address == b.indirect_start_address &&
+           a.buffer_size == b.buffer_size && a.max_draw_counts == b.max_draw_counts &&
+           a.stride == b.stride;
+}
+
+u64 Pair(u32 low, u32 high) {
+    return u64{low} | (u64{high} << 32);
+}
+
+void WriteDrawState(u64*& out, const DrawState& draw_state) {
+    *out++ = Pair(static_cast<u32>(draw_state.topology), static_cast<u32>(draw_state.draw_mode));
+    *out++ = Pair(draw_state.draw_indexed ? 1U : 0U, draw_state.base_index);
+    *out++ = Pair(draw_state.vertex_buffer.first, draw_state.vertex_buffer.count);
+    *out++ = Pair(draw_state.base_instance, draw_state.instance_count);
+    out[IndexBufferWords - 1] = 0;
+    std::memcpy(out, &draw_state.index_buffer, sizeof(draw_state.index_buffer));
+    out += IndexBufferWords;
+    const auto& bytes = draw_state.inline_index_draw_indexes;
+    *out++ = bytes.size();
+    if (!bytes.empty()) {
+        out[WordsOf(bytes.size()) - 1] = 0;
+        std::memcpy(out, bytes.data(), bytes.size());
+        out += WordsOf(bytes.size());
+    }
+}
+
+void ReadDrawState(const u64*& in, DrawState& draw_state) {
+    draw_state.topology = static_cast<Maxwell3D::Regs::PrimitiveTopology>(static_cast<u32>(in[0]));
+    draw_state.draw_mode = static_cast<Maxwell3D::DrawManager::DrawMode>(in[0] >> 32);
+    draw_state.draw_indexed = (in[1] & 1) != 0;
+    draw_state.base_index = static_cast<u32>(in[1] >> 32);
+    draw_state.vertex_buffer.first = static_cast<u32>(in[2]);
+    draw_state.vertex_buffer.count = static_cast<u32>(in[2] >> 32);
+    draw_state.base_instance = static_cast<u32>(in[3]);
+    draw_state.instance_count = static_cast<u32>(in[3] >> 32);
+    in += 4;
+    std::memcpy(&draw_state.index_buffer, in, sizeof(draw_state.index_buffer));
+    in += IndexBufferWords;
+    const size_t size = static_cast<size_t>(*in++);
+    draw_state.inline_index_draw_indexes.resize(size);
+    if (size != 0) {
+        std::memcpy(draw_state.inline_index_draw_indexes.data(), in, size);
+        in += WordsOf(size);
+    }
+}
+
+// =2 (StageVerify, StageApplySide): the first differences are logged, all are counted.
+bool LogStageDifference() {
+    static std::atomic<u32> logged{};
+    return logged.fetch_add(1, std::memory_order_relaxed) < 16;
+}
+
+} // Anonymous namespace
+
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     : draw_manager()
     , memory_manager{memory_manager_}
@@ -180,6 +310,8 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
         method_run_begin = MAXWELL3D_REG_INDEX(const_buffer.buffer);
         method_run_count = 16;
     }
+    // Back stages: A runs the executable methods and sends what they do (nx2_stage_api.h).
+    stage_methods_on_a = true;
 }
 
 Maxwell3D::~Maxwell3D() = default;
@@ -506,6 +638,7 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this);
     }
+    if (stage_capture) [[unlikely]] StageNoteWrite(method, argument);
     // A state register written with the value it holds changes nothing a draw reads (its dirty
     // flags only make the next full setup redo the same); executable methods act whatever their
     // value. With EDEN_NX2_SKIP_SAME such writes do not get here (CallMethod, ConsumeSinkImpl).
@@ -601,6 +734,7 @@ void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, std::span<cons
     executing_macro = 0;
     // HLE macros change registers and dirty flags directly: no light draw after them.
     NoteLightChange(LightChange::State, method);
+    if (stage_capture) [[unlikely]] StageNoteDirect(0, true);
 
     // Lookup the macro offset
     const u32 entry =
@@ -777,6 +911,7 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     case MAXWELL3D_REG_INDEX(inline_data): {
         ASSERT(methods_pending == amount);
         NoteLightChange(LightChange::Command, method);
+        if (stage_capture) [[unlikely]] StageNoteDirect(method, true);
         upload_state.ProcessData(base_start, amount);
         return;
     }
@@ -810,6 +945,7 @@ void Maxwell3D::ProcessFirmwareCall4() {
     // Firmware call 4 is a blob that changes some registers depending on its parameters.
     // These registers don't affect emulation and so are stubbed by setting 0xd00 to 1.
     regs.shadow_scratch[0] = 1;
+    if (stage_capture) [[unlikely]] StageNoteDirect(MAXWELL3D_REG_INDEX(shadow_scratch), false);
 }
 
 void Maxwell3D::StampQueryResult(Core::System& system, u64 payload, bool long_query) {
@@ -861,6 +997,7 @@ void Maxwell3D::ProcessQueryGet() {
 }
 
 void Maxwell3D::ProcessQueryCondition() {
+    if (stage_capture && !VideoCommon::Nx2Stages::InJoin()) [[unlikely]] return StageQueryCondition();
     if (rasterizer->AccelerateConditionalRendering()) {
         execute_on = true;
         return;
@@ -975,6 +1112,7 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
 }
 
 void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
+    if (stage_capture) [[unlikely]] return StageCbForward(start_base, amount);
     // Write the input value to the current const buffer at the current position.
     const GPUVAddr buffer_address = regs.const_buffer.Address();
     ASSERT(buffer_address != 0);
@@ -1569,7 +1707,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     fs.parameters.clear();
     if (fs.draw_pending) {
         fs.draw_pending = false;
-        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        split.DeferTo<VideoCommon::DeferTarget::OnA>(
+            [this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
@@ -1809,6 +1948,448 @@ void Maxwell3D::FinishFrontMacro(Core::System& system) {
     // What ProcessMacro and CallMacroMethod do around the macro.
     ConsumeSink(system);
     draw_manager.DrawDeferred(*this);
+}
+
+// Back stages (nx2_stage_api.h; T2) ------------------------------------------------------------
+
+static_assert(VideoCommon::Nx2RegReplica::NumRegs == Maxwell3D::Regs::NUM_REGS);
+static_assert(VideoCommon::Nx2RegReplica::CbDataMethod == MAXWELL3D_REG_INDEX(const_buffer.buffer));
+static_assert(VideoCommon::Nx2RegReplica::CbDataCount == Maxwell3D::Regs::NumCBData);
+static_assert(std::is_same_v<VideoCommon::Nx2RegReplica::DirtyFlags, Maxwell3D::DirtyState::Flags>);
+static_assert(std::is_same_v<VideoCommon::Nx2RegReplica::DirtyTables, Maxwell3D::DirtyState::Tables>);
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MAXWELL3D_NOINLINE __declspec(noinline)
+#else
+#define MAXWELL3D_NOINLINE __attribute__((noinline))
+#endif
+
+MAXWELL3D_NOINLINE void Maxwell3D::StageNoteWrite(u32 method, u32 argument) {
+    // ProcessDirtyRegisters' write: its dirty flags always, a light change as it notes one.
+    stage_capture->Note(*this, method, argument, true,
+                        regs.reg_array[method] != argument || execution_mask[method]);
+}
+
+MAXWELL3D_NOINLINE void Maxwell3D::StageNoteDirect(u32 method, bool changed) {
+    // A write ProcessDirtyRegisters does not make (the register holds it already), or a light
+    // change noted outside it (`changed`, the register's light class standing for it).
+    stage_capture->Note(*this, method, regs.reg_array[method], false, changed);
+}
+
+void Maxwell3D::StageCbForward(const u32* start_base, u32 amount) {
+    // ProcessCBMultiData while staged: the replica makes the write (StageCbWrite) with its own
+    // light state and moves its offset on as A does here, before the record (=2 compares them
+    // after it). No delta word for the offset: a CbData record may then join the one before
+    // (Nx2Stages::PostCbData) when A wrote no register in between.
+    const GPUVAddr buffer_address = regs.const_buffer.Address();
+    ASSERT(buffer_address != 0);
+    ASSERT(regs.const_buffer.offset <= regs.const_buffer.size);
+    const GPUVAddr address{buffer_address + regs.const_buffer.offset};
+    regs.const_buffer.offset += amount * static_cast<u32>(sizeof(u32));
+    VideoCommon::Nx2Stages::PostCbData(VideoCommon::Nx2Stages::Ring::ToB, address, start_base,
+                                       amount);
+}
+
+void Maxwell3D::StageQueryCondition() {
+    // The condition reads guest memory, and the accelerated way flushes the caches and asks the
+    // query cache (S1): all of it with the stages parked, at this point of the stream.
+    VideoCommon::Nx2Stages::JoinFromA(VideoCommon::Nx2Stages::JoinReason::Condition,
+                                      [this] { ProcessQueryCondition(); });
+}
+
+void Maxwell3D::StageCbWrite(GPUVAddr address, const u32* start_base, u32 amount) {
+    // ProcessCBMultiData's write as the primary would have made it here (at the address it had).
+    const size_t copy_size = amount * sizeof(u32);
+    bool skip_write = false;
+    if (LightTrackingEnabled()) {
+        const u64 same_writes = light.same_writes;
+        NoteLightChange(IsLightSameWrite(address, start_base, copy_size) ? LightChange::UniformSame
+                                                                         : LightChange::UniformData,
+                        MAXWELL3D_REG_INDEX(const_buffer.buffer));
+        bool skip = g_same_skip && light.same_writes != same_writes &&
+                    (address >> 12) == ((address + copy_size - 1) >> 12);
+        if (skip && !memory_manager.NoteSkippedWrite(address, light.same_device,
+                                                     static_cast<u32>(copy_size))) {
+            skip = false;
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesMade, 1);
+        }
+        if (skip) {
+            light.same_writes = same_writes;
+            skip_write = true;
+        } else {
+            NoteLightWrite(address, static_cast<u32>(copy_size));
+        }
+    }
+    if (skip_write) {
+        NoteSameWriteSkipped();
+    } else {
+        memory_manager.WriteBlockCached(address, start_base, copy_size);
+    }
+    regs.const_buffer.offset += static_cast<u32>(copy_size);
+}
+
+void Maxwell3D::StageApplyDelta(const u64* words, u32 count) {
+    const bool light_tracking = LightTrackingEnabled();
+    VideoCommon::Nx2RegReplica::ApplyDelta(regs.reg_array.data(), dirty.flags, dirty.tables, words,
+                                           count, [this, light_tracking](u32 method) {
+                                               if (light_tracking) {
+                                                   NoteLightChange(g_light_classes[method],
+                                                                   method);
+                                               }
+                                           });
+}
+
+void Maxwell3D::StageCopyFrom(Maxwell3D& primary, VideoCore::RasterizerInterface* rasterizer_) {
+    regs = primary.regs;
+    shadow_state = primary.shadow_state;
+    dirty.flags = primary.dirty.flags;
+    dirty.tables = primary.dirty.tables;
+    state = primary.state;
+    draw_manager.draw_state = primary.draw_manager.draw_state;
+    draw_manager.draw_texture_state = primary.draw_manager.draw_texture_state;
+    draw_manager.indirect_state = primary.draw_manager.indirect_state;
+    light = primary.light;
+    // No light draw follows one made with another engine (the light anchor compares pointers).
+    light.armed = false;
+    engine_state = primary.engine_state;
+    replace_table = primary.replace_table;
+    execute_on = primary.execute_on;
+    // The caches read native_turing (GetNativeMacroEngine); no macro runs here, no JIT is made.
+    native_macro_context = primary.native_macro_context;
+    macro_engine.native_turing = primary.macro_engine.native_turing;
+    BindRasterizer(rasterizer_);
+}
+
+void Maxwell3D::StageBegin(VideoCommon::Nx2RegReplica::RegCapture* capture,
+                           std::array<Maxwell3D*, 2> replicas) {
+    auto sent = std::make_unique<StageSent>();
+    std::memcpy(&sent->const_buffers, &state.shader_stages, sizeof(sent->const_buffers));
+    sent->engine_state = engine_state;
+    sent->replace_table = replace_table;
+    sent->execute_on = execute_on;
+    sent->draw_state = draw_manager.draw_state;
+    sent->indirect_state = draw_manager.indirect_state;
+    sent->draw_texture_state = draw_manager.draw_texture_state;
+    sent->verify = VideoCommon::Nx2Stages::Get().mode == 2;
+    stage_sent = std::move(sent);
+    // The capture leaves the constant buffer data registers out (but at =2): no dirty flag may
+    // hang on them but NullEntry, as dirty_flags.cpp and the StateTracker leave them.
+    for (u32 i = 0; i < Regs::NumCBData; ++i) {
+        const u32 method = MAXWELL3D_REG_INDEX(const_buffer.buffer) + i;
+        if (dirty.tables[0][method] != VideoCommon::Dirty::NullEntry ||
+            dirty.tables[1][method] != VideoCommon::Dirty::NullEntry) {
+            LOG_WARNING(HW_GPU, "Back stages: constant buffer data register {:#x} sets dirty "
+                                "flags the replicas will not get (only =2 sends them)",
+                        method);
+        }
+    }
+    // From here on the primary's dirty flags, light.rebound and light changes gather what A
+    // sets until the next side state (the replicas hold what came before).
+    dirty.flags.reset();
+    light.rebound.fill(0);
+    light.changes = 0;
+    light.first_blocking = 0;
+    light.first_blocking_uniform = 0;
+    light.armed = false;
+    stage_replicas = replicas;
+    stage_capture = capture;
+}
+
+void Maxwell3D::StageEnd() {
+    stage_capture = nullptr;
+    stage_replicas = {};
+    stage_sent.reset();
+    // The caches read the primary again: everything set up anew, no light draw (S18).
+    dirty.flags.set();
+    light.armed = false;
+}
+
+u32 Maxwell3D::StageSideWords() {
+    using namespace VideoCommon::Nx2RegReplica;
+    auto& sent = *stage_sent;
+    u32 parts = 0;
+    u32 words = 0;
+    sent.cb_count = 0;
+    if (std::memcmp(&sent.const_buffers, &state.shader_stages, sizeof(sent.const_buffers)) != 0) {
+        for (size_t stage = 0; stage < Regs::MaxShaderStage; ++stage) {
+            for (size_t slot = 0; slot < Regs::MaxConstBuffers; ++slot) {
+                if (!SameConstBuffer(state.shader_stages[stage].const_buffers[slot],
+                                     sent.const_buffers[stage].const_buffers[slot])) {
+                    sent.cb_slots[sent.cb_count++] =
+                        static_cast<u8>(stage * Regs::MaxConstBuffers + slot);
+                }
+            }
+        }
+        if (sent.cb_count != 0) {
+            parts |= SideConstBuffers;
+            words += 1 + 2 * sent.cb_count;
+        } else {
+            // Only padding bytes differed.
+            std::memcpy(&sent.const_buffers, &state.shader_stages, sizeof(sent.const_buffers));
+        }
+    }
+    if (sent.verify || std::ranges::any_of(light.rebound, [](u32 bits) { return bits != 0; })) {
+        parts |= SideRebound;
+        words += 3;
+    }
+    if (engine_state != sent.engine_state) {
+        parts |= SideEngineState;
+        words += 1;
+    }
+    if (replace_table != sent.replace_table) {
+        parts |= SideReplaceTable;
+        words += 1 + 2 * static_cast<u32>(replace_table.size());
+    }
+    if (execute_on != sent.execute_on) {
+        parts |= SideExecuteOn;
+        words += 1;
+    }
+    if (!SameDrawState(draw_manager.draw_state, sent.draw_state)) {
+        parts |= SideDrawState;
+        words += DrawStateWords(draw_manager.draw_state);
+    }
+    if (!SameIndirect(draw_manager.indirect_state, sent.indirect_state)) {
+        parts |= SideIndirectState;
+        words += IndirectWords;
+    }
+    if (std::memcmp(&draw_manager.draw_texture_state, &sent.draw_texture_state,
+                    sizeof(DrawTextureState)) != 0) {
+        parts |= SideDrawTexture;
+        words += DrawTextureWords;
+    }
+    if (dirty.flags.any()) {
+        parts |= SideDirtyFlags;
+        words += DirtyFlagWords;
+    }
+    if (parts != 0) {
+        words += 1;
+    }
+    sent.parts = parts;
+    sent.words = words;
+    return words;
+}
+
+void Maxwell3D::StageWriteSide(u64* out) {
+    using namespace VideoCommon::Nx2RegReplica;
+    auto& sent = *stage_sent;
+    const u32 parts = sent.parts;
+    u64* const begin = out;
+    *out++ = MakeSideHeader(parts, sent.words - 1);
+    if ((parts & SideConstBuffers) != 0) {
+        *out++ = sent.cb_count;
+        for (u32 i = 0; i < sent.cb_count; ++i) {
+            const u32 stage = sent.cb_slots[i] / Regs::MaxConstBuffers;
+            const u32 slot = sent.cb_slots[i] % Regs::MaxConstBuffers;
+            const auto& buffer = state.shader_stages[stage].const_buffers[slot];
+            *out++ = stage | (slot << 8) | (buffer.enabled ? 1U << 16 : 0U) |
+                     (u64{buffer.size} << 32);
+            *out++ = buffer.address;
+        }
+        std::memcpy(&sent.const_buffers, &state.shader_stages, sizeof(sent.const_buffers));
+    }
+    if ((parts & SideRebound) != 0) {
+        *out++ = Pair(light.rebound[0], light.rebound[1]);
+        *out++ = Pair(light.rebound[2], light.rebound[3]);
+        *out++ = Pair(light.rebound[4], light.changes);
+        light.rebound.fill(0);
+    }
+    // A's light changes count from this draw on (=2 compares them with the replica's).
+    light.changes = 0;
+    light.first_blocking = 0;
+    light.first_blocking_uniform = 0;
+    if ((parts & SideEngineState) != 0) {
+        *out++ = static_cast<u64>(engine_state);
+        sent.engine_state = engine_state;
+    }
+    if ((parts & SideReplaceTable) != 0) {
+        *out++ = replace_table.size();
+        for (const auto& [key, value] : replace_table) {
+            *out++ = key;
+            *out++ = static_cast<u64>(value);
+        }
+        sent.replace_table = replace_table;
+    }
+    if ((parts & SideExecuteOn) != 0) {
+        *out++ = execute_on ? 1 : 0;
+        sent.execute_on = execute_on;
+    }
+    if ((parts & SideDrawState) != 0) {
+        WriteDrawState(out, draw_manager.draw_state);
+        sent.draw_state = draw_manager.draw_state;
+    }
+    if ((parts & SideIndirectState) != 0) {
+        const auto& indirect = draw_manager.indirect_state;
+        *out++ = (indirect.is_byte_count ? 1 : 0) | (indirect.is_indexed ? 2 : 0) |
+                 (indirect.include_count ? 4 : 0);
+        *out++ = indirect.count_start_address;
+        *out++ = indirect.indirect_start_address;
+        *out++ = indirect.buffer_size;
+        *out++ = indirect.max_draw_counts;
+        *out++ = indirect.stride;
+        sent.indirect_state = indirect;
+    }
+    if ((parts & SideDrawTexture) != 0) {
+        out[DrawTextureWords - 1] = 0;
+        std::memcpy(out, &draw_manager.draw_texture_state, sizeof(DrawTextureState));
+        out += DrawTextureWords;
+        sent.draw_texture_state = draw_manager.draw_texture_state;
+    }
+    if ((parts & SideDirtyFlags) != 0) {
+        std::memcpy(out, &dirty.flags, sizeof(DirtyFlags));
+        out += DirtyFlagWords;
+        dirty.flags.reset();
+    }
+    ASSERT(static_cast<u32>(out - begin) == sent.words);
+    sent.parts = 0;
+    sent.words = 0;
+}
+
+void Maxwell3D::StageApplySide(const u64* words, u32 count) {
+    using namespace VideoCommon::Nx2RegReplica;
+    const u64 header = words[0];
+    const u32 parts = SideParts(header);
+    ASSERT(SideWords(header) + 1 == count);
+    const u64* in = words + 1;
+    if ((parts & SideConstBuffers) != 0) {
+        const u64 binds = *in++;
+        for (u64 i = 0; i < binds; ++i) {
+            const u64 word = *in++;
+            auto& buffer = state.shader_stages[word & 0xff].const_buffers[(word >> 8) & 0xff];
+            buffer.enabled = ((word >> 16) & 1) != 0;
+            buffer.size = static_cast<u32>(word >> 32);
+            buffer.address = *in++;
+        }
+    }
+    if ((parts & SideRebound) != 0) {
+        light.rebound[0] |= static_cast<u32>(in[0]);
+        light.rebound[1] |= static_cast<u32>(in[0] >> 32);
+        light.rebound[2] |= static_cast<u32>(in[1]);
+        light.rebound[3] |= static_cast<u32>(in[1] >> 32);
+        light.rebound[4] |= static_cast<u32>(in[2]);
+        const u32 primary_changes = static_cast<u32>(in[2] >> 32);
+        in += 3;
+        if (VideoCommon::Nx2Stages::Get().mode == 2) {
+            // Every light change A noted since the last draw is the replica's too (it may have
+            // more: its constant buffer writes, values its deltas changed).
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::VerifyChecks, 1);
+            constexpr u32 replica_only = LightChange::UniformSame | LightChange::UniformData;
+            const u32 missing = primary_changes & ~light.changes & ~replica_only;
+            if (missing != 0) {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::VerifyMismatches,
+                                             1);
+                if (LogStageDifference()) {
+                    LOG_ERROR(HW_GPU,
+                              "Back stages (=2): the replica's light changes {:#x} lack {:#x} "
+                              "A noted",
+                              light.changes, missing);
+                }
+            }
+        }
+    }
+    if ((parts & SideEngineState) != 0) {
+        engine_state = static_cast<EngineHint>(*in++);
+    }
+    if ((parts & SideReplaceTable) != 0) {
+        replace_table.clear();
+        const u64 entries = *in++;
+        for (u64 i = 0; i < entries; ++i) {
+            const u64 key = *in++;
+            replace_table.emplace(key, static_cast<HLEReplacementAttributeType>(*in++));
+        }
+    }
+    if ((parts & SideExecuteOn) != 0) {
+        execute_on = *in++ != 0;
+    }
+    if ((parts & SideDrawState) != 0) {
+        ReadDrawState(in, draw_manager.draw_state);
+    }
+    if ((parts & SideIndirectState) != 0) {
+        auto& indirect = draw_manager.indirect_state;
+        indirect.is_byte_count = (in[0] & 1) != 0;
+        indirect.is_indexed = (in[0] & 2) != 0;
+        indirect.include_count = (in[0] & 4) != 0;
+        indirect.count_start_address = in[1];
+        indirect.indirect_start_address = in[2];
+        indirect.buffer_size = static_cast<size_t>(in[3]);
+        indirect.max_draw_counts = static_cast<size_t>(in[4]);
+        indirect.stride = static_cast<size_t>(in[5]);
+        in += IndirectWords;
+    }
+    if ((parts & SideDrawTexture) != 0) {
+        std::memcpy(&draw_manager.draw_texture_state, in, sizeof(DrawTextureState));
+        in += DrawTextureWords;
+    }
+    if ((parts & SideDirtyFlags) != 0) {
+        DirtyFlags flags;
+        std::memcpy(&flags, in, sizeof(DirtyFlags));
+        in += DirtyFlagWords;
+        dirty.flags |= flags;
+    }
+    ASSERT(in == words + count);
+}
+
+bool Maxwell3D::StageVerify(const Maxwell3D& replica) const {
+    bool same = true;
+    const auto differs = [&same](const char* what, u64 index, u64 primary_value,
+                                 u64 replica_value) {
+        same = false;
+        if (LogStageDifference()) {
+            LOG_ERROR(HW_GPU, "Back stages (=2): replica {} {:#x} holds {:#x}, primary {:#x}",
+                      what, index, replica_value, primary_value);
+        }
+    };
+    // Registers. Not compared: the macro upload and bind pointers (ProcessMacroUpload,
+    // ProcessMacroBind and ProcessMethodCall step them outside ProcessDirtyRegisters; only
+    // macro loading reads them, on A and the front).
+    for (u32 method = 0; method < Regs::NUM_REGS; ++method) {
+        if (method == MAXWELL3D_REG_INDEX(load_mme.instruction_ptr) ||
+            method == MAXWELL3D_REG_INDEX(load_mme.start_address_ptr)) {
+            continue;
+        }
+        if (regs.reg_array[method] != replica.regs.reg_array[method]) {
+            differs("register", method, regs.reg_array[method], replica.regs.reg_array[method]);
+        }
+    }
+    // The side state as A sent it last (what changed since goes with the next draw).
+    const auto& sent = *stage_sent;
+    for (size_t stage = 0; stage < Regs::MaxShaderStage; ++stage) {
+        for (size_t slot = 0; slot < Regs::MaxConstBuffers; ++slot) {
+            const auto& a = sent.const_buffers[stage].const_buffers[slot];
+            const auto& b = replica.state.shader_stages[stage].const_buffers[slot];
+            if (!SameConstBuffer(a, b)) {
+                differs("constant buffer bind (stage << 8 | slot)", (stage << 8) | slot,
+                        a.address, b.address);
+            }
+        }
+    }
+    if (sent.engine_state != replica.engine_state) {
+        differs("engine_state", 0, static_cast<u64>(sent.engine_state),
+                static_cast<u64>(replica.engine_state));
+    }
+    if (sent.replace_table != replica.replace_table) {
+        differs("replace_table (entries)", 0, sent.replace_table.size(),
+                replica.replace_table.size());
+    }
+    if (sent.execute_on != replica.execute_on) {
+        differs("execute_on", 0, sent.execute_on ? 1 : 0, replica.execute_on ? 1 : 0);
+    }
+    if (!SameDrawState(sent.draw_state, replica.draw_manager.draw_state)) {
+        differs("draw_state (instance count)", 0, sent.draw_state.instance_count,
+                replica.draw_manager.draw_state.instance_count);
+    }
+    if (!SameIndirect(sent.indirect_state, replica.draw_manager.indirect_state)) {
+        differs("indirect_state (address)", 0, sent.indirect_state.indirect_start_address,
+                replica.draw_manager.indirect_state.indirect_start_address);
+    }
+    if (std::memcmp(&sent.draw_texture_state, &replica.draw_manager.draw_texture_state,
+                    sizeof(DrawTextureState)) != 0) {
+        differs("draw_texture_state (texture)", 0, sent.draw_texture_state.src_texture,
+                replica.draw_manager.draw_texture_state.src_texture);
+    }
+    // light: its changes are checked with each draw (StageApplySide, =2); rebound goes in with
+    // the draw and the draw clears it on the replica. armed, same_writes and cb_writes only the
+    // replica makes (its constant buffer writes, its draws): the primary has none to compare.
+    return same;
 }
 
 } // namespace Tegra::Engines

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -41,6 +42,9 @@ class MemoryManager;
 
 namespace VideoCommon {
 class GpuSplit;
+namespace Nx2RegReplica {
+class RegCapture;
+}
 }
 
 namespace VideoCore {
@@ -3257,6 +3261,43 @@ public:
 
     DrawManager draw_manager;
 
+    // Back stages (nx2_stage_api.h, EDEN_NX2_BACK_STAGES; T2). A runs the primary Maxwell3D of a
+    // staged channel; the stages below read replicas of it, kept equal with what A sends.
+
+    /// The primary's register capture while its channel is staged (null otherwise and in
+    /// replicas): ProcessDirtyRegisters notes each write in it, after its DrawDeferred (S18).
+    VideoCommon::Nx2RegReplica::RegCapture* stage_capture{};
+    /// The primary's replicas while staged: B's (BC with cut a alone) and C's (cut c).
+    std::array<Maxwell3D*, 2> stage_replicas{};
+    /// The primary's side state (nx2_reg_replica.h, SidePart) as A last sent it.
+    struct StageSent;
+    std::unique_ptr<StageSent> stage_sent;
+
+    /// Replica: becomes a copy of `primary` (registers, dirty flags and tables, state, draw
+    /// manager, light, engine_state, replace_table, execute_on; its macro context and
+    /// native_turing; S18), unarmed, drawing with `rasterizer` (the real one).
+    void StageCopyFrom(Maxwell3D& primary, VideoCore::RasterizerInterface* rasterizer);
+    /// Primary: staged, noting its writes in `capture` (StageChannel); what it holds is what
+    /// `replicas` hold. Unstaged (UnstageChannel): every dirty flag set, light unarmed (S18).
+    void StageBegin(VideoCommon::Nx2RegReplica::RegCapture* capture,
+                    std::array<Maxwell3D*, 2> replicas);
+    void StageEnd();
+    /// Replica: applies delta words (Nx2RegReplica::ApplyDelta), noting light changes as
+    /// ProcessDirtyRegisters does.
+    void StageApplyDelta(const u64* words, u32 count);
+    /// Replica: what ProcessCBMultiData writes on the primary, at `address` (a CbData record):
+    /// IsLightSameWrite, SAME_SKIP, NoteLightWrite, WriteBlockCached; the offset moves on.
+    void StageCbWrite(GPUVAddr address, const u32* data, u32 amount);
+    /// Primary (A): words of the side state parts changed since they were last sent (0: none);
+    /// StageWriteSide writes them (after StageSideWords) and notes them sent.
+    u32 StageSideWords();
+    void StageWriteSide(u64* out);
+    /// Replica: applies a side state (light.rebound ORed in, S2; =2 checks the light changes).
+    void StageApplySide(const u64* words, u32 count);
+    /// Primary, =2: whether `replica` holds the registers it holds and the side state sent
+    /// (VerifyReplica); logs the first differences.
+    [[nodiscard]] bool StageVerify(const Maxwell3D& replica) const;
+
     GPUVAddr GetMacroAddress(size_t index) const {
         size_t base = 0;
         for (const auto& [addr, count] : macro_segments) {
@@ -3385,6 +3426,12 @@ private:
 
     /// Handles conditional rendering.
     void ProcessQueryCondition();
+
+    // Back stages, the primary on A while staged (T2): the paths the old functions take there.
+    void StageNoteWrite(u32 method, u32 argument);
+    void StageNoteDirect(u32 method, bool changed);
+    void StageCbForward(const u32* start_base, u32 amount);
+    void StageQueryCondition();
 
     /// Handles counter resets.
     void ProcessCounterReset();
