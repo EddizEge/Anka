@@ -1015,6 +1015,9 @@ public:
         if (m_vsync_timer) {
             system.CoreTiming().UnscheduleEvent(m_vsync_timer);
         }
+        if (m_vrr_present_timer) {
+            system.CoreTiming().UnscheduleEvent(m_vrr_present_timer);
+        }
         for (auto* event : m_events) {
             m_context.CloseEvent(event);
         }
@@ -1158,6 +1161,9 @@ private:
             }
         }
         const auto paced = std::chrono::steady_clock::now();
+        if (m_vrr_present_timer) {
+            PresentVrrVsync();
+        }
         if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
         }
@@ -1214,6 +1220,15 @@ private:
                 if (PresentRateOn()) {
                     extra += fmt::format(", {} paced at the word's rate (last {} Hz)",
                                          m_stats.rate_presents, m_rate != 0 ? m_rate : 60);
+                }
+                if (m_vrr_present_timer) {
+                    std::scoped_lock lk{m_vsync->mutex};
+                    extra += fmt::format(", VRR vsync scans: {} at a present, {} held to the top "
+                                         "rate, {} at the bottom rate",
+                                         m_vsync->vrr_presented, m_vsync->vrr_delayed, m_vsync->vrr_bottom);
+                    m_vsync->vrr_presented = 0;
+                    m_vsync->vrr_delayed = 0;
+                    m_vsync->vrr_bottom = 0;
                 }
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
@@ -2406,6 +2421,105 @@ private:
         m_once_events.clear();
     }
 
+    // EDEN_NX2_VRR_VSYNC=1 (off by default; "<max Hz>:<min Hz>", 1 = 120:40): the vsync events
+    // follow the presents like a VRR panel's scans instead of a fixed clock. A present starts a
+    // scan (the vblank the game starts its next frame on) at once, but no sooner than 1/max s
+    // after the previous scan; without a present the panel scans again 1/min s after the
+    // previous one. CoreTiming's clock, the speed limit not applied. EDEN_NX2_VSYNC_HZ is
+    // ignored; off with EDEN_NX2_VBLANK_GRID (a 60 Hz grid laid on the vsync events).
+    static const std::optional<Nx2Vi2Events::VrrVsyncRates>& VrrVsyncRates() {
+        static const std::optional<Nx2Vi2Events::VrrVsyncRates> rates =
+            []() -> std::optional<Nx2Vi2Events::VrrVsyncRates> {
+            const char* text = std::getenv("EDEN_NX2_VRR_VSYNC");
+            if (text == nullptr || text[0] == '\0' || std::string_view{text} == "0") {
+                return std::nullopt;
+            }
+            const auto parsed = Nx2Vi2Events::ParseVrrVsync(text);
+            if (!parsed.rates) {
+                LOG_WARNING(Service, "EDEN_NX2_VRR_VSYNC=\"{}\": {}: off", text, parsed.error);
+                return std::nullopt;
+            }
+            if (VblankGridMode() != 0) {
+                LOG_WARNING(Service, "EDEN_NX2_VRR_VSYNC with EDEN_NX2_VBLANK_GRID (a 60 Hz grid): off");
+                return std::nullopt;
+            }
+            if (std::getenv("EDEN_NX2_VSYNC_HZ") != nullptr) {
+                LOG_WARNING(Service, "EDEN_NX2_VSYNC_HZ ignored: EDEN_NX2_VRR_VSYNC is on");
+            }
+            LOG_INFO(Service, "nx2:vi2 VRR vsync (EDEN_NX2_VRR_VSYNC): the vsync events follow the "
+                              "presents, at most {} Hz, at least {} Hz",
+                     parsed.rates->max_hz, parsed.rates->min_hz);
+            return parsed.rates;
+        }();
+        return rates;
+    }
+
+    // The present scans that waited for the top rate (EDEN_NX2_VRR_VSYNC).
+    std::shared_ptr<Core::Timing::EventType> m_vrr_present_timer;
+
+    void StartVrrVsync(const Nx2Vi2Events::VrrVsyncRates& rates) {
+        const auto clock = Nx2Vi2Events::VrrVsyncClock::FromRates(rates);
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            m_vsync->vrr = clock;
+        }
+        // The bottom rate: no present for 1/min s. Fires at most that long after the previous
+        // scan, whatever started it.
+        m_vsync_timer = Core::Timing::CreateEvent(
+            "nx2:vi2 vrr vsync",
+            [vsync_state = m_vsync, &system = system](
+                s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                std::scoped_lock lk{vsync_state->mutex};
+                auto& vrr = vsync_state->vrr;
+                const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+                if (vrr.DeadlineDue(now)) {
+                    VblankLocked(*vsync_state, system);
+                    vrr.Scanned(now);
+                    ++vsync_state->vrr_bottom;
+                }
+                return std::chrono::nanoseconds{vrr.NextDeadlineFrom(time)};
+            });
+        // A present too soon after the previous scan: its scan at the top rate.
+        m_vrr_present_timer = Core::Timing::CreateEvent(
+            "nx2:vi2 vrr present",
+            [vsync_state = m_vsync, &system = system](
+                s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                std::scoped_lock lk{vsync_state->mutex};
+                if (!vsync_state->vrr_pending) {
+                    return std::nullopt;
+                }
+                vsync_state->vrr_pending = false;
+                VblankLocked(*vsync_state, system);
+                vsync_state->vrr.Scanned(system.CoreTiming().GetGlobalTimeNs().count());
+                ++vsync_state->vrr_delayed;
+                return std::nullopt;
+            });
+        m_vsync_origin_ns = -1; // no fixed vblank grid
+        system.CoreTiming().ScheduleLoopingEvent(std::chrono::nanoseconds{clock.max_ns},
+                                                 std::chrono::nanoseconds{clock.max_ns}, m_vsync_timer);
+    }
+
+    // EDEN_NX2_VRR_VSYNC: the shown present starts a scan, now or at the top rate.
+    void PresentVrrVsync() {
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        s64 due{};
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            if (m_vsync->vrr_pending) {
+                return; // the scan already waiting shows this present too
+            }
+            due = m_vsync->vrr.PresentDue(now);
+            if (due <= now) {
+                VblankLocked(*m_vsync, system);
+                m_vsync->vrr.Scanned(now);
+                ++m_vsync->vrr_presented;
+                return;
+            }
+            m_vsync->vrr_pending = true;
+        }
+        system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{due}, m_vrr_present_timer, true);
+    }
+
     // 31(u32 kind) and 32(u32 display): events signalled on every vblank. Title 1's main thread
     // waits on the 32 event until it has fired twice before it submits any GPU work, and hung
     // there while it never fired.
@@ -2432,6 +2546,9 @@ private:
                 tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
                 m_diag_event = event;
             }
+        }
+        if (!m_vsync_timer && VrrVsyncRates()) {
+            StartVrrVsync(*VrrVsyncRates());
         }
         if (!m_vsync_timer) {
             m_vsync_timer = Core::Timing::CreateEvent(
@@ -2485,6 +2602,10 @@ private:
         u32 diag_ticks{};
         u64 diag_presents{};
         u32 diag_get_notifications{};
+        // EDEN_NX2_VRR_VSYNC
+        Nx2Vi2Events::VrrVsyncClock vrr{};
+        bool vrr_pending{}; // a present's scan waits for the top rate
+        u32 vrr_presented{}, vrr_delayed{}, vrr_bottom{}; // scans since the last 600 presents
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
 
