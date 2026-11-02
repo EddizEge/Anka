@@ -251,13 +251,20 @@ private:
     // buffer cache, the pipeline lookup, the light decision; its Vulkan commands into a record
     // list) and sends C the rest in ring 3, C (the only stage that records) replays B's list and
     // does the texture half, the recording and the draw. Everywhere else (C, A in a join, other
-    // threads, B in a join of its own) the old bodies run; PrepareDraw and TryLightDraw are
-    // unchanged and unused on B.
+    // threads, B the record owner in a join's op) the old bodies run; PrepareDraw and
+    // TryLightDraw are unchanged and unused on B.
     using StageDrawReader = VideoCommon::Nx2Stages::StageDrawReader;
 
     [[nodiscard]] bool SplitOnB() const noexcept {
         return split_draws && VideoCommon::Nx2Stages::OnStage(VideoCommon::Nx2Stages::Stage::B) &&
-               !b_in_join;
+               !OwnsRecordsB();
+    }
+    /// B the record owner, C parked: inside a join's `op` (JoinB, the record owner hook, a
+    /// JoinFromB made elsewhere: the proxy's TickFrame, SignalSyncPoint, fences). The old bodies
+    /// run there and C's half of B's own work runs at once: nothing goes to ring 3.
+    [[nodiscard]] bool OwnsRecordsB() const noexcept {
+        return b_in_join ||
+               VideoCommon::Nx2Stages::RecordOwner() == VideoCommon::Nx2Stages::Stage::B;
     }
 
     /// What C records for a packet (StageDrawParams::command).
@@ -328,9 +335,13 @@ private:
     template <typename Func>
     void JoinBLocked(Func&& func);
     /// B: buffer cache work with the cache locked (Nx2Record::CacheLock), its records in a packet
-    /// of their own (sent when not empty) unless one is open.
+    /// of their own (sent when not empty) unless one is open; the record owner records them.
     template <typename Func>
     void StageBufferWork(Func&& work);
+    /// B, no cache lock held: C's half of an event, to ring 3 after B's pending invalidations;
+    /// the record owner runs it at once.
+    template <typename Func>
+    void StageToC(const Func& func);
     /// Nx2Stages::SetStageHooks (constructor): Start stages the buffer runtime (BeginStages, its
     /// record owner hook bound to JoinFromBLocked) before B and C start, Stop ends it after they
     /// stopped; nothing runs behind either.
@@ -339,7 +350,7 @@ private:
     static void StageRecordOwnerHook(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     /// B, no cache lock held: C's half of B's invalidations so far (texture WriteMemory, query
-    /// InvalidateRegion), then a packet's records, to ring 3.
+    /// InvalidateRegion), then a packet's records, to ring 3 (the record owner: at once).
     void FlushStageCWork();
     void SendStageRecords(u64 seq, RecordList* records);
     /// B, no cache lock held: the draw packet in stage_writer.

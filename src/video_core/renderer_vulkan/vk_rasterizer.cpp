@@ -3696,6 +3696,8 @@ Tegra::Engines::Maxwell3D& RasterizerVulkan::EngineB() {
 
 template <typename Func>
 void RasterizerVulkan::JoinB(Func&& func) {
+    // What B has for C goes first: C runs it before it parks.
+    FlushStageCWork();
     VideoCommon::Nx2Stages::JoinFromB([&] {
         const bool was_in_join = b_in_join;
         b_in_join = true;
@@ -3712,6 +3714,17 @@ void RasterizerVulkan::JoinBLocked(Func&& func) {
         func();
         b_in_join = was_in_join;
     });
+}
+
+template <typename Func>
+void RasterizerVulkan::StageToC(const Func& func) {
+    FlushStageCWork();
+    if (OwnsRecordsB()) [[unlikely]] {
+        // C parked: its half here, in its place in the stream.
+        func();
+        return;
+    }
+    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, func);
 }
 
 void RasterizerVulkan::BeginStagesHook(void* context) {
@@ -3761,6 +3774,12 @@ void RasterizerVulkan::StageBufferWork(Func&& work) {
         work();
         return;
     }
+    if (OwnsRecordsB()) [[unlikely]] {
+        // The runtime records straight to the scheduler.
+        Nx2Record::CacheLock lock{buffer_cache.mutex};
+        work();
+        return;
+    }
     u64 seq;
     RecordList* records;
     {
@@ -3779,6 +3798,12 @@ void RasterizerVulkan::FlushStageCWork() {
         return;
     }
     const size_t ranges = stage_c_ranges.size() / 2;
+    if (OwnsRecordsB()) [[unlikely]] {
+        // C parked: its half here.
+        RunStageInvalidations(stage_c_ranges.data(), static_cast<u32>(ranges));
+        stage_c_ranges.clear();
+        return;
+    }
     for (size_t first = 0; first < ranges; first += StageRangesPerRecord) {
         const size_t count = (std::min)(StageRangesPerRecord, ranges - first);
         u64* const out = Stages::Reserve(Stages::Ring::ToC, &StageInvalidateThunk,
@@ -3791,18 +3816,24 @@ void RasterizerVulkan::FlushStageCWork() {
 }
 
 void RasterizerVulkan::SendStageRecords(u64 seq, RecordList* records) {
-    FlushStageCWork();
     if (records == nullptr) {
         // C notes the seq with a later one.
+        FlushStageCWork();
         return;
     }
-    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC,
-                                 [this, records, seq] { RunStageRecords(records, seq); });
+    StageToC([this, records, seq] { RunStageRecords(records, seq); });
 }
 
 void RasterizerVulkan::SendStageDraw() {
     namespace Stages = VideoCommon::Nx2Stages;
     FlushStageCWork();
+    if (OwnsRecordsB()) [[unlikely]] {
+        // C parked: the packet runs here (no draw is set up in a join's op so far).
+        std::vector<u64> words(stage_writer.Words());
+        stage_writer.WriteTo(words.data());
+        StageDrawThunk(words.data(), static_cast<u32>(words.size()));
+        return;
+    }
     u64* const out = Stages::Reserve(Stages::Ring::ToC, &StageDrawThunk, stage_writer.Words());
     stage_writer.WriteTo(out);
     Stages::Commit(Stages::Ring::ToC);
@@ -4718,8 +4749,7 @@ void RasterizerVulkan::ClearB(u32 layer_count) {
     gpu_memory->FlushCaching();
     // T8: the clear writes the bound targets, before the next packet.
     PreSetTargets(EngineB(), NextStageSeq());
-    FlushStageCWork();
-    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, layer_count] {
+    StageToC([this, layer_count] {
         VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Clear};
         FlushWork();
         ClearRecord(layer_count);
@@ -4732,8 +4762,7 @@ void RasterizerVulkan::DrawTextureB() {
     const auto state = EngineB().draw_manager.draw_texture_state;
     // T8: the blit writes the bound targets, before the next packet.
     PreSetTargets(EngineB(), NextStageSeq());
-    FlushStageCWork();
-    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this, state] {
+    StageToC([this, state] {
         maxwell3d->draw_manager.draw_texture_state = state;
         // The blit binds its own pipeline: no draw's pipeline-dependent state now (kayit-1).
         stage_dynamic = {.active = true, .pipeline = nullptr};
@@ -4747,10 +4776,7 @@ void RasterizerVulkan::WaitForIdleB() {
     // C: the query cache and the wait recorded.
     NoteLightWork();
     fence_manager.SignalOrdering();
-    FlushStageCWork();
-    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this] {
-        WaitForIdleRecord();
-    });
+    StageToC([this] { WaitForIdleRecord(); });
 }
 
 void RasterizerVulkan::TickFrameB() {
@@ -4759,8 +4785,7 @@ void RasterizerVulkan::TickFrameB() {
     // registers).
     stage_targets.valid = false;
     StageBufferWork([&] { buffer_cache.TickFrame(); });
-    FlushStageCWork();
-    VideoCommon::Nx2Stages::Post(VideoCommon::Nx2Stages::Ring::ToC, [this] { TickFrameC(); });
+    StageToC([this] { TickFrameC(); });
 }
 
 void RasterizerVulkan::TickFrameC() {
