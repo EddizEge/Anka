@@ -148,7 +148,9 @@ void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address,
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// A ran ring 1 up to `ring1_position` (the end of each batch, every 4096 words). The last stage
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,
-/// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7).
+/// Nx2BusyClock::BackStored (D1): Drain then means every stage ran everything (E7). K2: C holds
+/// it while its ParkB or boundary work is pending (StageTickWork's requests run after it in the
+/// stream), until their op ran.
 void PostMark(Ring ring, u64 ring1_position);
 
 /// Why A joins (counted: Counter::JoinsAEngine + reason).

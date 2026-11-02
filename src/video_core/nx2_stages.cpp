@@ -167,6 +167,9 @@ StagePipeline<GpuHandler> g_pipeline{g_handler};
 /// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
 /// and run the GPU's sync requests (StageTickWork).
 thread_local bool t_park_op{};
+/// The same for the other threads (CheckRecordOwner): C uses the caches and the scheduler, the
+/// front may not, caught up or not (C holds the mark until the op ran: T9b review protokol-1).
+std::atomic<bool> g_c_park_op{};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
 /// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
@@ -439,7 +442,13 @@ void ParkB(FunctionRef op) {
     g_pipeline.ParkB([&] {
         const bool was_park_op = t_park_op;
         t_park_op = true;
+        if (g_check) {
+            g_c_park_op.store(true, std::memory_order_seq_cst);
+        }
         op();
+        if (g_check) {
+            g_c_park_op.store(was_park_op, std::memory_order_seq_cst);
+        }
         t_park_op = was_park_op;
     });
 }
@@ -605,11 +614,12 @@ void CheckRecordOwner(const char* where) {
     if (OnStage(Stage::A) && !InJoin()) {
         // A reached the real rasterizer outside a join (S3).
         Nx2Profile::Add(Counter::StageUnproxied, 1);
-    } else if (t_stage == NoStage &&
+    } else if (t_stage == NoStage && !g_c_park_op.load(std::memory_order_seq_cst) &&
                (!g_record_busy.load(std::memory_order_acquire) || GpuSplit::Get().BackCaughtUp())) {
         // The front after a drain, CPU threads: the stages are idle (as GpuSplit::CheckOwner).
         // Caught up, the last stage may still end its batch (busy) after the mark it stored, a
-        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3).
+        // check (=2), a release: it touches no cache and no scheduler then (R1 eszaman-3). Not
+        // while C runs a ParkB's op: it does, past the marks it ran on to.
         return;
     }
     ReportStack("stages owner check", where);

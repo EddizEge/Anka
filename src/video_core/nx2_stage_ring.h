@@ -486,7 +486,9 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   B with cut c passes them on to C, in the next record it sends there (K11);
 /// - Call / Forward: the thunk, with the payload; Target: Handler::Target (B passes it on);
 ///   CbData: Handler::CbData; ExecA: Handler::ExecA (=3);
-/// - Mark: the last stage stores it (Handler::Mark), B with cut c passes it on (D1);
+/// - Mark: the last stage stores it (Handler::Mark), B with cut c passes it on (D1); C holds
+///   the last one while its ParkB or boundary work is pending and stores it after (their op
+///   runs past the mark: the front's Drain waits for it);
 /// - Join: B with cut c makes C park first; then the stage acks the producer and waits for its
 ///   release (park).
 /// =2 (lockstep, depth 1): a producer waits after each record until it ran, Handler::Verify
@@ -589,6 +591,8 @@ public:
         park_position.store(0, std::memory_order_relaxed);
         boundary_work.store(false, std::memory_order_relaxed);
         c_in_record = false;
+        c_hold_marks = false;
+        mark_held = false;
         join_served = 0;
         join_count = 0;
         stop_b.store(false, std::memory_order_relaxed);
@@ -796,11 +800,16 @@ public:
             handler.Hazard(StageIdC, StageHazard::ParkInRecord, c.read, 0);
         }
         const u32 id = ++park_count;
+        // The marks C runs on to wait for the op (Step).
+        const bool was_holding = c_hold_marks;
+        c_hold_marks = true;
         park_request.store(id, std::memory_order_seq_cst);
         // B may sleep waiting for ring 2's records.
         to_b->ring.Wake();
         AwaitParked(id, !in_record);
         op();
+        c_hold_marks = was_holding;
+        StoreHeldMark();
         Signal(park_release, id);
     }
 
@@ -1005,6 +1014,17 @@ private:
     void RunBoundaryWork() {
         boundary_work.store(false, std::memory_order_seq_cst);
         handler.BoundaryWork();
+        StoreHeldMark();
+    }
+
+    /// C: stores the last mark it held (Step) once nothing it waited for is left: no ParkB of its
+    /// own pending, no boundary work asked. The front's Drain then means C ran everything up to
+    /// the mark and touches no cache and no scheduler for it any more (E7, R1 eszaman-3).
+    void StoreHeldMark() {
+        if (mark_held && !c_hold_marks && !boundary_work.load(std::memory_order_seq_cst)) {
+            mark_held = false;
+            handler.Mark(StageIdC, held_mark, held_caught_up);
+        }
     }
 
     /// B: the deltas it ran that C has not got, at most one header's (MaxDeltaWords) before they
@@ -1101,6 +1121,19 @@ private:
                     to_c->ring.Publish();
                     break;
                 }
+            } else {
+                // C's ParkB pending, or its boundary work asked before this mark (B and A ask
+                // before they send one): its op runs after the mark in the stream and uses the
+                // caches and the scheduler. The front's Drain ends once the last stage stored the
+                // mark and then uses them itself (R1 eszaman-3): C holds it until the op ran
+                // (StoreHeldMark; T9b review protokol-1).
+                if (c_hold_marks || boundary_work.load(std::memory_order_seq_cst)) [[unlikely]] {
+                    held_mark = body[0];
+                    held_caught_up = (HeaderFlags(header) & MarkCaughtUp) != 0;
+                    mark_held = true;
+                    break;
+                }
+                mark_held = false;
             }
             handler.Mark(stage, body[0], (HeaderFlags(header) & MarkCaughtUp) != 0);
             break;
@@ -1263,6 +1296,11 @@ private:
     void RunC() {
         handler.ThreadStart(StageIdC);
         Loop<false>(*to_c, c, stop_c);
+        // Stopped (B before): nothing runs after the mark C held.
+        if (mark_held) {
+            mark_held = false;
+            handler.Mark(StageIdC, held_mark, held_caught_up);
+        }
     }
 
     // What A reads for each record (BeginB, EndB): one line, written by Start and Stop, and by
@@ -1288,6 +1326,10 @@ private:
     u32 park_count{};  ///< C: ParkB requests made
     u32 join_served{}; ///< C: the last JoinFromB request it served
     bool c_in_record{}; ///< C: inside a record of ring 3 (Step)
+    bool c_hold_marks{}; ///< C: in its ParkB, from the request to the op's end
+    bool mark_held{};    ///< C: a mark it ran and holds (Step, StoreHeldMark)
+    bool held_caught_up{};
+    u64 held_mark{};
 
     // ParkB: C asks (park_request), B acks once parked (ring 3 published up to park_position),
     // C runs ring 3 up to there, then releases.

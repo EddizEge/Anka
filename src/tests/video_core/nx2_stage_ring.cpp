@@ -1343,6 +1343,70 @@ TEST_CASE("Nx2StagePipeline: C stores B's marks without a join (R1 dikis-1)", "[
 }
 
 namespace {
+/// T9b review protokol-1: the mark after which a ParkB's op runs (B asked for it before).
+std::atomic<u64> g_held_position{};
+std::atomic<bool> g_held_op_ran{};
+void HeldMarkOp() {
+    // The front's Drain waits for the mark: it must not end while the op uses the caches.
+    Expect(g_stored_mark.load() != g_held_position.load(),
+           "ParkB's op runs before C stores the mark after its ask", g_stored_mark.load(),
+           g_held_position.load());
+    g_held_op_ran = true;
+    ++g_park_ops;
+}
+void StoreMarkAfterOp(u64 position) {
+    if (position == g_held_position.load()) {
+        Expect(g_held_op_ran.load(), "C stores the mark once the op ran", position);
+    }
+    StoreMark(position);
+}
+/// On B: counted records for C (some long: C behind), then what StageTickWork does on B: C's
+/// boundary work asked, for a ParkB. A's caught-up mark comes next (RunStagedBack's batch end).
+void SendThenAskBoundaryOnB(const u64* payload, u32) {
+    for (u64 i = 0; i < payload[0]; ++i) {
+        PostCallC(*g_pipe, &CountOnC, g_sent++, i % 4 == 0 ? 200 : 0);
+    }
+    g_pipe->PublishC();
+    Spin(g_spin_b.load(std::memory_order_relaxed));
+    g_park_at_boundary = &HeldMarkOp;
+    g_pipe->RequestBoundaryWork();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: C stores a mark after the ParkB asked before it (protokol-1)",
+          "[video_core]") {
+    Watchdog watchdog{"held mark"};
+    std::mt19937 random{2027};
+    for (const u8 mode : {u8{1}, u8{2}}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetK3(handler, pipe);
+        handler.on_mark = &StoreMarkAfterOp;
+        g_stored_mark = 0;
+        g_held_position = 0;
+        REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
+        u64 position = 0;
+        for (u32 round = 0; round < 300; ++round) {
+            g_spin_b = random() % 20000;
+            g_held_op_ran = false;
+            position += 100;
+            g_held_position = position;
+            PostCallB(pipe, &SendThenAskBoundaryOnB, random() % 40);
+            PostMarkB(pipe, position, true);
+            pipe.PublishB();
+            // The front's Drain: it ends once C stored the mark, the op having run.
+            REQUIRE(WaitStored(position));
+            REQUIRE(g_held_op_ran);
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        REQUIRE(g_park_ops == 300);
+        REQUIRE(handler.parks == 300);
+    }
+}
+
+namespace {
 std::atomic<u64> g_verified_target{};
 void VerifyTarget(u8 stage) {
     // A Target record is not checked: the target checked is always the one of a record after it.
