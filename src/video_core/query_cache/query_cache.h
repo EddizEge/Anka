@@ -24,6 +24,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_gpu_pages.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/query_base.h"
@@ -263,8 +264,14 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return;
     }
     DAddr cpu_addr = *cpu_addr_opt;
-    // Its value (and timestamp) go to guest memory around the caches.
+    // Its value (and timestamp) go to guest memory around the caches. Back stages, cut c: this
+    // mark, made before the query is cached, is also how the page summary B asks covers the
+    // pages HoldsQueries reports (Nx2GpuPages::Holds reads it); STAGE_CHECK counts it if B relied
+    // on the page holding nothing at a later point of the stream (HazardUntracked).
     Tegra::Nx2MarkUntrackedWrite(cpu_addr, 16);
+    if (VideoCommon::Nx2Stages::GpuPages().Checking()) [[unlikely]] {
+        VideoCommon::Nx2Stages::GpuPages().NoteUntracked(cpu_addr, 16);
+    }
     const size_t new_query_id = streamer->WriteCounter(cpu_addr, has_timestamp, payload, subreport);
     auto* query = streamer->GetQuery(new_query_id);
     if (is_fence) {
