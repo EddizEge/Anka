@@ -30,8 +30,10 @@ using VideoCommon::Accelerated::BlockLinearSwizzle3DParams;
 
 class Device;
 class StagingBufferPool;
+class StageStagingBufferPool;
 class Scheduler;
 class Image;
+struct RecordTarget;
 struct StagingBufferRef;
 
 class ComputePass {
@@ -68,6 +70,13 @@ public:
     std::pair<VkBuffer, VkDeviceSize> Assemble(u32 num_vertices, VkBuffer src_buffer,
                                                u32 src_offset);
 
+    /// Cut c, B inside a packet (S11): Assemble from B's staging pool, recorded through `target`
+    /// (B's list), the descriptor entries carried by the command (the compute pass queue is C's).
+    std::pair<VkBuffer, VkDeviceSize> Assemble(RecordTarget& target,
+                                               StageStagingBufferPool& stage_pool,
+                                               u32 num_vertices, VkBuffer src_buffer,
+                                               u32 src_offset);
+
 private:
     Scheduler& scheduler;
     StagingBufferPool& staging_buffer_pool;
@@ -83,6 +92,12 @@ public:
     ~QuadIndexedPass();
 
     std::pair<VkBuffer, VkDeviceSize> Assemble(
+        Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format, u32 num_vertices,
+        u32 base_vertex, VkBuffer src_buffer, u32 src_offset, bool is_strip);
+
+    /// Cut c, B inside a packet (S11): as Uint8Pass's.
+    std::pair<VkBuffer, VkDeviceSize> Assemble(
+        RecordTarget& target, StageStagingBufferPool& stage_pool,
         Tegra::Engines::Maxwell3D::Regs::IndexFormat index_format, u32 num_vertices,
         u32 base_vertex, VkBuffer src_buffer, u32 src_offset, bool is_strip);
 

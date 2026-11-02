@@ -166,6 +166,10 @@ public:
     [[nodiscard]] u64 Seq() const noexcept {
         return seq;
     }
+    /// The list's id in its arena (Begin makes a new one).
+    [[nodiscard]] u64 Id() const noexcept {
+        return id;
+    }
     [[nodiscard]] u32 Commands() const noexcept {
         return commands;
     }
@@ -320,6 +324,144 @@ private:
     std::array<HeldLocks::Entry, sizeof...(Mutexes)> held;
 };
 
+inline void SeqTicks::Note(u64 seq, u64 tick) noexcept {
+    const u64 done = done_seq.load(std::memory_order_relaxed);
+    if (seq < done) {
+        return;
+    }
+    if (seq == done) {
+        std::atomic<u64>& entry = ticks[seq & (WINDOW - 1)];
+        if (entry.load(std::memory_order_relaxed) < tick) {
+            entry.store(tick, std::memory_order_relaxed);
+        }
+        return;
+    }
+    // Seqs C never saw (B sent nothing for them) get this tick too: a later tick than theirs is
+    // only later to free. Past the window, every entry is this tick.
+    const u64 begin = seq - done > WINDOW ? seq - WINDOW + 1 : done + 1;
+    for (u64 next = begin; next <= seq; ++next) {
+        ticks[next & (WINDOW - 1)].store(tick, std::memory_order_relaxed);
+    }
+    done_seq.store(seq, std::memory_order_release);
+}
+
+inline u64 SeqTicks::TickOf(u64 seq) const noexcept {
+    // Entries are overwritten only with later ticks (seqs WINDOW ahead), so a racing read is at
+    // worst later than the seq's tick; past the window the oldest entry is later than it too.
+    const u64 done = DoneSeq();
+    if (done - seq >= WINDOW) {
+        seq = done - WINDOW + 1;
+    }
+    return ticks[seq & (WINDOW - 1)].load(std::memory_order_relaxed);
+}
+
+inline bool SeqTicks::IsFree(u64 seq, u64 known_gpu_tick) const noexcept {
+    return seq <= DoneSeq() && known_gpu_tick >= TickOf(seq);
+}
+
+inline void* ChunkArena::Allocate(size_t size, size_t align, u64 list) {
+    if (!in_use.empty()) {
+        Chunk& chunk = *in_use.back();
+        const size_t offset = (chunk.used + align - 1) & ~(align - 1);
+        if (offset + size <= CHUNK_BYTES) {
+            chunk.used = offset + size;
+            chunk.last_list = list;
+            return chunk.data.data() + offset;
+        }
+    }
+    // The back chunk is full: the oldest ones whose lists all ran become free (the back one,
+    // being filled, never: it holds the newest list).
+    const u64 released = ReleasedList();
+    while (in_use.size() > 1 && in_use.front()->last_list <= released) {
+        free_chunks.push_back(std::move(in_use.front()));
+        in_use.pop_front();
+    }
+    if (free_chunks.empty()) {
+        in_use.push_back(std::make_unique<Chunk>());
+    } else {
+        in_use.push_back(std::move(free_chunks.back()));
+        free_chunks.pop_back();
+    }
+    Chunk& chunk = *in_use.back();
+    chunk.used = size;
+    chunk.last_list = list;
+    return chunk.data.data();
+}
+
+template <typename Context>
+void List<Context>::Group::Run(Context& context) const {
+    for (Item* item = first; item != end;) {
+        Item* const next = item->next;
+        item->run(item, context);
+        item = next;
+    }
+    if (release != nullptr) {
+        release->Release(id);
+    }
+}
+
+template <typename Context>
+void List<Context>::Append(Item* item) noexcept {
+    item->next = nullptr;
+    if (last != nullptr) {
+        last->next = item;
+    } else {
+        first = item;
+    }
+    last = item;
+}
+
+template <typename Context>
+template <typename T>
+void List<Context>::Record(T&& command) {
+    using Command = std::remove_cvref_t<T>;
+    using Typed = TypedItem<Command>;
+    static_assert(sizeof(Typed) <= ChunkArena::CHUNK_BYTES, "Command is too large");
+    static_assert(alignof(Typed) <= alignof(std::max_align_t));
+    void* const memory = arena->Allocate(sizeof(Typed), alignof(Typed), id);
+    Typed* const typed = new (memory) Typed{{nullptr, nullptr}, std::forward<T>(command)};
+    typed->run = [](Item* item, Context& context) {
+        Typed* const self = static_cast<Typed*>(item);
+        self->command(context);
+        self->~Typed();
+    };
+    Append(typed);
+    ++commands;
+}
+
+template <typename Context>
+void List<Context>::MarkOutsideRenderPass() {
+    if (last != nullptr && last->run == nullptr) {
+        return;
+    }
+    void* const memory = arena->Allocate(sizeof(Item), alignof(Item), id);
+    Append(new (memory) Item{nullptr, nullptr});
+    ++marks;
+}
+
+template <typename Context>
+template <typename MarkFunc, typename GroupFunc>
+void List<Context>::Replay(MarkFunc&& mark, GroupFunc&& group) const {
+    // Each group's items are read here before the group is handed over, never after: the worker
+    // may run and destroy them while the next ones are walked.
+    Item* item = first;
+    while (item != nullptr) {
+        if (item->run == nullptr) {
+            mark();
+            item = item->next;
+            continue;
+        }
+        Item* const begin = item;
+        while (item != nullptr && item->run != nullptr) {
+            item = item->next;
+        }
+        group(Group{begin, item, item == nullptr ? arena : nullptr, id});
+    }
+    if (last != nullptr && last->run == nullptr) {
+        group(Group{nullptr, nullptr, arena, id});
+    }
+}
+
 inline HeldLocks::List& HeldLocks::ThisThread() noexcept {
     static thread_local List list;
     return list;
@@ -399,6 +541,5 @@ inline HeldLocks::Unlocked::~Unlocked() {
     list.entries = entries;
     list.count = count;
 }
-
 
 } // namespace Vulkan::Nx2Record
