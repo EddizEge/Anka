@@ -553,8 +553,9 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 ///   release (park).
 /// =2 (lockstep, depth 1): a producer waits after each record until it ran, Handler::Verify
 /// before its end (not after a Target or a CallNoVerify, which B writes as it parks with A going
-/// on); for a Join the joiner waits for the park ack instead, Verify before the ack (S8, K8). A stage stops at a record boundary once asked (Stop): with nothing left after a
-/// drain, and at shutdown without running what it holds.
+/// on); for a Join the joiner waits for the park ack instead, Verify before the ack (S8, K8). A
+/// stage stops at a record boundary once asked (Stop): with nothing left after a drain, and at
+/// shutdown without running what it holds.
 /// Between B and C (K2; S13, K3 as decided after R2, nx2_stages.h): JoinFromB, JoinFromBLocked
 /// and ParkB ask with flags outside the rings; the one asked answers at a park point:
 /// - B at each record boundary of ring 2 and its wait for ring 2, nothing else: there it passes
