@@ -38,7 +38,7 @@ namespace VideoCommon::Nx2ModeDiag {
 //    that ask for a timestamp (dropped today), rejected native compute dispatches per program
 //    and the render target / viewport sizes; then a "nx2 mode diag addresses" line: the report
 //    addresses written most this second, with the average time between two writes of each;
-//  - at each of the first 48 mode changes: the 16 frames before it (one line each) and the
+//  - at each of the first 48 mode changes (EDEN_NX2_MODE_DIAG_MAX=<1-100000>): the 16 frames before it (one line each) and the
 //    timestamp writes of the last 3 frames before it (at most 96), then the writes of the 6
 //    frames after it (at most 400 lines); the same 6-frame window at present 300 and every
 //    1800th present after it;
@@ -55,6 +55,24 @@ inline bool Enabled() {
         return text != nullptr && text[0] != '0';
     }();
     return enabled;
+}
+
+/// EDEN_NX2_MODE_DIAG_MAX: how many mode changes get their frames dumped (default 48).
+inline u32 MaxTransitions() {
+    static const u32 max = [] {
+        const char* text = std::getenv("EDEN_NX2_MODE_DIAG_MAX");
+        const long value = text != nullptr ? std::strtol(text, nullptr, 10) : 48;
+        if (value < 1 || value > 100000) {
+            LOG_WARNING(HW_GPU, "EDEN_NX2_MODE_DIAG_MAX={} out of 1-100000: 48", text);
+            return 48U;
+        }
+        if (value != 48) {
+            LOG_INFO(HW_GPU, "nx2 mode diag: the first {} mode changes dumped (EDEN_NX2_MODE_DIAG_MAX)",
+                     value);
+        }
+        return static_cast<u32>(value);
+    }();
+    return max;
 }
 
 enum class Source : u8 { Other, Report3D, PullerLong, ComputeReport, DmaFourWord };
@@ -443,7 +461,7 @@ inline void Present(const u32* words, u32 interval, std::chrono::steady_clock::t
     s.slice_first_busy = s.slice_last_busy = 0;
 
     const bool changed = s.have_mode && words[12] != s.last_mode_word;
-    if (changed && s.transitions < 48) {
+    if (changed && s.transitions < MaxTransitions()) {
         ++s.transitions;
         LOG_INFO(HW_GPU,
                  "nx2 mode diag: mode word {:#x} -> {:#x} at present {} (change {}); the 16 "
