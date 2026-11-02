@@ -4444,6 +4444,10 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
             if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
                 return;
             }
+            // Configure bound every vertex stream and cleared B's flag (UpdateVertexBuffers); C's
+            // replica's, set by the deltas the join passed, is cleared too: no vertex input
+            // recorded again for it alone (kayit-2, as PrepareDrawC after B's list).
+            maxwell3d->dirty.flags[VideoCommon::Dirty::VertexBuffers] = false;
             {
                 // The draw's pipeline, not the cache's current one (kayit-1).
                 Profile::Scope scope{Profile::Zone::DynamicState};
