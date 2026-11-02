@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -332,6 +333,109 @@ TEST_CASE("Nx2RecordList: stamps and u64 seqs", "[video_core]") {
     REQUIRE(ticks.IsFree(0x1'0000'0002ULL, 8));
     REQUIRE(!ticks.IsFree(0x1'0000'0003ULL, 1000));
     REQUIRE(!ticks.IsFree(0x2'0000'0002ULL, 1000));
+}
+
+/// A lock that counts its holders, for the K3 tests.
+struct CountingMutex {
+    std::recursive_mutex mutex;
+    std::atomic<int> depth{};
+    void lock() {
+        mutex.lock();
+        ++depth;
+    }
+    bool try_lock() {
+        if (!mutex.try_lock()) {
+            return false;
+        }
+        ++depth;
+        return true;
+    }
+    void unlock() {
+        --depth;
+        mutex.unlock();
+    }
+};
+
+bool TakenElsewhere(CountingMutex& mutex) {
+    bool taken = false;
+    std::thread other([&] {
+        if (mutex.try_lock()) {
+            taken = true;
+            mutex.unlock();
+        }
+    });
+    other.join();
+    return taken;
+}
+
+TEST_CASE("Nx2RecordList: a join lets go of the cache locks and takes them again", "[video_core]") {
+    CountingMutex buffer;
+    CountingMutex texture;
+    REQUIRE(HeldLocks::Count() == 0);
+    {
+        CacheLock outer{buffer};
+        CacheLock inner{buffer}; // recursive: listed twice
+        CacheLock both{texture};
+        REQUIRE(HeldLocks::Count() == 3);
+        REQUIRE(buffer.depth == 2);
+        REQUIRE(!TakenElsewhere(buffer));
+        {
+            HeldLocks::Unlocked unlocked;
+            REQUIRE(unlocked.Released() == 3);
+            REQUIRE(HeldLocks::Count() == 0);
+            REQUIRE(buffer.depth == 0);
+            REQUIRE(texture.depth == 0);
+            REQUIRE(TakenElsewhere(buffer));
+            REQUIRE(TakenElsewhere(texture));
+            {
+                // What runs meanwhile (the join's op) may take them again.
+                CacheLock again{texture, buffer};
+                REQUIRE(HeldLocks::Count() == 2);
+                REQUIRE(!TakenElsewhere(texture));
+            }
+            REQUIRE(HeldLocks::Count() == 0);
+        }
+        REQUIRE(HeldLocks::Count() == 3);
+        REQUIRE(buffer.depth == 2);
+        REQUIRE(texture.depth == 1);
+        REQUIRE(!TakenElsewhere(buffer));
+    }
+    REQUIRE(HeldLocks::Count() == 0);
+    REQUIRE(buffer.depth == 0);
+    REQUIRE(texture.depth == 0);
+    {
+        // Nothing listed: nothing to do.
+        HeldLocks::Unlocked unlocked;
+        REQUIRE(unlocked.Released() == 0);
+    }
+}
+
+TEST_CASE("Nx2RecordList: taking the locks again keeps no order", "[video_core]") {
+    // B holds buffer then texture and lets go in a join; another thread takes them in the other
+    // order all the while. Taking them again in the listed order would deadlock against it.
+    CountingMutex buffer;
+    CountingMutex texture;
+    std::atomic<bool> stop{false};
+    std::atomic<u64> rounds{0};
+    std::thread other([&] {
+        while (!stop.load()) {
+            std::scoped_lock lock{texture.mutex};
+            std::this_thread::yield();
+            std::scoped_lock lock2{buffer.mutex};
+            ++rounds;
+        }
+    });
+    {
+        CacheLock held{buffer, texture};
+        for (int join = 0; join < 2000; ++join) {
+            HeldLocks::Unlocked unlocked;
+            std::this_thread::yield();
+        }
+        REQUIRE(HeldLocks::Count() == 2);
+    }
+    stop = true;
+    other.join();
+    REQUIRE(HeldLocks::Count() == 0);
 }
 
 TEST_CASE("Nx2RecordList: the graveyard frees in seq order", "[video_core]") {

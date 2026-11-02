@@ -869,6 +869,8 @@ void BufferCacheRuntime::JoinRecordOwner(StageJoin why,
     RecordList* const sent = TakeRecords();
     target.list = nullptr;
     if (record_owner_hook != nullptr) [[likely]] {
+        // K3: the hook writes ring 3 and calls JoinFromB holding no cache lock.
+        const Nx2Record::HeldLocks::Unlocked unlocked;
         record_owner_hook(record_owner_context, sent, op);
     } else {
         // Nothing bound the hook (T9): record here, the stage owning the scheduler unchecked.
