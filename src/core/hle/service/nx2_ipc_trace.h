@@ -318,4 +318,15 @@ bool Enabled();
 void OnRequest(Core::System& system, std::string_view service, const char* handler,
                HLERequestContext& ctx);
 
+// Whether the filter traces this service's command (OnRequest logs it the first time).
+bool Traces(std::string_view service, u32 command);
+
+// At most this many TraceNow backtraces.
+constexpr u32 MaxForced = 32;
+
+// Logs the request's backtrace now, whatever the filter (EDEN_NX2_VI2_DIAG: a vi2 command not seen
+// before). Never throws.
+void TraceNow(Core::System& system, std::string_view service, const char* handler,
+              HLERequestContext& ctx);
+
 } // namespace Service::Nx2IpcTrace

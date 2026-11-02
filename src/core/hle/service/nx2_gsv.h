@@ -66,8 +66,12 @@
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
+#include "core/arm/debug.h"
+#include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
+#include "core/hle/service/nx2_vi2_events.h"
 #include "core/hle/service/nx2_vi2_reply.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/server_manager.h"
@@ -1021,10 +1025,89 @@ public:
         if (PresentDiagEnabled() && ctx.IsTipc()) {
             DiagRequest(ctx);
         }
+        if (Vi2DiagEnabled() && ctx.IsTipc()) {
+            return HandleWithVi2Diag(session, ctx);
+        }
         return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
     }
 
 private:
+    // EDEN_NX2_VI2_DIAG=1 (off by default): what the game does with vi2's events and setup
+    // replies. Logs (a) each command's first call with its request and reply words, marked NEW
+    // (with a backtrace unless EDEN_NX2_IPC_TRACE traces it anyway) when Bananza was never seen
+    // sending it; (b) the handle each 11/31/32 reply carries and the event behind it; (c) the
+    // notification flow: Notify, 21's handed-over bits; (d) every 10 s, per event: signals, clears
+    // by the guest (signalled at one vblank, no longer at the next: a thread consumed it, a
+    // 0-timeout poll included) and the threads seen waiting on it.
+    static bool Vi2DiagEnabled() {
+        static const bool enabled = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_DIAG");
+            const bool on = text != nullptr && text[0] != '\0' && text[0] != '0';
+            if (on) {
+                LOG_INFO(Service, "nx2:vi2 diag (EDEN_NX2_VI2_DIAG): first calls of vi2 commands, "
+                                  "event handles, notifications; every 10 s each event's signals, "
+                                  "clears by the guest and waiters");
+            }
+            return on;
+        }();
+        return enabled;
+    }
+
+    // True the first time any vi2 session sees the command.
+    static bool Vi2DiagFirstCall(u32 command) {
+        static std::mutex mutex;
+        static std::set<u32> seen;
+        std::scoped_lock lk{mutex};
+        return seen.insert(command).second;
+    }
+
+    Result HandleWithVi2Diag(Kernel::KServerSession& session, HLERequestContext& ctx) {
+        const u32 command = ctx.GetCommand();
+        const auto request = Nx2IpcTrace::RequestDataWords(
+            std::span<const u32>{ctx.CommandBuffer(), IPC::COMMAND_BUFFER_LENGTH}, true, 0, false);
+        const auto handler = handlers_tipc.find(command);
+        const char* name = handler != handlers_tipc.end() ? handler->second.name : "auto stub";
+        const bool first = Vi2DiagFirstCall(command);
+        const bool known = Nx2Vi2Events::IsKnownCommand(command);
+        if (first && !known && !Nx2IpcTrace::Traces(service_name, command)) {
+            Nx2IpcTrace::TraceNow(system, service_name, name, ctx);
+        }
+        m_diag_event = nullptr;
+        const Result result = ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        const auto* reply = ctx.CommandBuffer();
+        if (first) {
+            LOG_INFO(Service, "nx2:vi2 diag: {}first call of {} \"{}\" (present #{}): request {} -> reply {}",
+                     known ? "" : "NEW: ", command, name, m_presents,
+                     Nx2Vi2Reply::FormatWords(request),
+                     Nx2Vi2Reply::FormatWords(Nx2Vi2Events::TipcWords(
+                         std::span<const u32>{reply, IPC::COMMAND_BUFFER_LENGTH})));
+        }
+        // 11/31/32: one copied handle at word 3.
+        if (m_diag_event != nullptr && (reply[1] & 0x80000000U) != 0 && ((reply[2] >> 1) & 0xFU) != 0) {
+            std::string event_name;
+            {
+                std::scoped_lock lk{m_vsync->mutex};
+                for (auto& tracked : m_vsync->events) {
+                    if (tracked.event == m_diag_event) {
+                        tracked.handle = reply[3];
+                        event_name = tracked.name;
+                    }
+                }
+            }
+            LOG_INFO(Service, "nx2:vi2 diag: {} {} -> {}, handle {:#x}", command,
+                     Nx2Vi2Reply::FormatWords(request), event_name, reply[3]);
+        }
+        m_diag_event = nullptr;
+        return result;
+    }
+
+    // The event the request being handled created or returned (EDEN_NX2_VI2_DIAG).
+    Kernel::KEvent* m_diag_event{};
+
+    // Up to 32 lines each.
+    u32 m_diag_notify_lines{};
+    u32 m_diag_handover_lines{};
+
     // 229(u64 client token, u32 slot, u32 image, ...fences): result, u64 mask of buffer slots the
     // client may acquire next, four zero words. Nothing is shown yet; every slot is handed back
     // at once (changes.patch's default mask is 0x7fff).
@@ -1998,11 +2081,23 @@ private:
     // signalled event per call left that thread blocked forever after 202.
     void GetNotificationEvent(HLERequestContext& ctx) {
         if (!m_notification_event) {
-            m_notification_event = m_context.CreateEvent(fmt::format("nx2:vi2:Notify{}", m_events.size()));
+            const std::string name = fmt::format("nx2:vi2:Notify{}", m_events.size());
+            m_notification_event = m_context.CreateEvent(std::string{name});
             m_events.push_back(m_notification_event);
+            if (Vi2DiagEnabled()) {
+                std::scoped_lock lk{m_vsync->mutex};
+                auto& tracked = m_vsync->events.emplace_back();
+                tracked.event = m_notification_event;
+                tracked.on_vsync = false;
+                tracked.name = fmt::format("{} (11)", name);
+            }
+        }
+        if (Vi2DiagEnabled()) {
+            m_diag_event = m_notification_event;
         }
         if (AnyNotification()) {
             m_notification_event->Signal(system.Kernel());
+            DiagSignalled(m_notification_event);
         }
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
@@ -2012,6 +2107,9 @@ private:
     // 21(W: 32 u32 notification counts): hand them over and clear.
     void GetNotifications(HLERequestContext& ctx) {
         const auto size = std::min<std::size_t>(ctx.GetWriteBufferSize(), sizeof(m_notifications));
+        if (Vi2DiagEnabled()) {
+            DiagHandOver(size);
+        }
         if (size != 0) {
             ctx.WriteBuffer(m_notifications.data(), size);
         }
@@ -2019,6 +2117,15 @@ private:
             m_notifications.fill(0);
             if (m_notification_event) {
                 m_notification_event->Clear(system.Kernel());
+                if (Vi2DiagEnabled()) {
+                    std::scoped_lock lk{m_vsync->mutex};
+                    for (auto& tracked : m_vsync->events) {
+                        if (tracked.event == m_notification_event && tracked.was_signalled) {
+                            tracked.was_signalled = false; // not the guest's clear
+                            ++tracked.handed_over;
+                        }
+                    }
+                }
             }
         }
         IPC::ResponseBuilder rb{ctx, 2};
@@ -2035,7 +2142,7 @@ private:
 
     // 102(u64 display): the display retired, wake whoever waits for that notification.
     void CloseDisplay(HLERequestContext& ctx) {
-        Notify(m_display_notification);
+        Notify(m_display_notification, "102 CloseDisplay");
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -2059,7 +2166,7 @@ private:
         const auto client = m_clients.find(token);
         if (client != m_clients.end()) {
             LOG_INFO(Service, "nx2:vi2 client {:#x} retired, notification {}", token, client->second);
-            Notify(client->second);
+            Notify(client->second, "202 UnregisterClientState");
             m_clients.erase(client);
         }
         IPC::ResponseBuilder rb{ctx, 2};
@@ -2070,14 +2177,56 @@ private:
         return std::ranges::any_of(m_notifications, [](u32 bits) { return bits != 0; });
     }
 
-    void Notify(u32 index) {
+    // `why`: for EDEN_NX2_VI2_DIAG's line.
+    void Notify(u32 index, std::string_view why) {
         if (index >= m_notifications.size() * 32) {
             return;
         }
         m_notifications[index / 32] |= 1U << (index % 32);
         if (m_notification_event) {
             m_notification_event->Signal(system.Kernel());
+            DiagSignalled(m_notification_event);
         }
+        if (Vi2DiagEnabled() && m_diag_notify_lines < 32) {
+            ++m_diag_notify_lines;
+            LOG_INFO(Service, "nx2:vi2 diag: notify {} ({}, present #{}): bitmap word {} = {:#x}, {}", index,
+                     why, m_presents, index / 32, m_notifications[index / 32],
+                     m_notification_event ? "event signalled" : "no notification event yet (11)");
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: `event` was signalled outside a vblank.
+    void DiagSignalled(Kernel::KEvent* event) {
+        if (!Vi2DiagEnabled()) {
+            return;
+        }
+        std::scoped_lock lk{m_vsync->mutex};
+        for (auto& tracked : m_vsync->events) {
+            if (tracked.event == event) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: a 21 call, its bits when there are any.
+    void DiagHandOver(std::size_t size) {
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            ++m_vsync->diag_get_notifications;
+        }
+        if (!AnyNotification() || m_diag_handover_lines >= 32) {
+            return;
+        }
+        ++m_diag_handover_lines;
+        std::string bits;
+        for (u32 index = 0; index < m_notifications.size() * 32; ++index) {
+            if ((m_notifications[index / 32] >> (index % 32)) & 1) {
+                bits += fmt::format("{}{}", bits.empty() ? "" : ",", index);
+            }
+        }
+        LOG_INFO(Service, "nx2:vi2 diag: 21 hands over notification bits {} ({} of {} bytes, present #{})",
+                 bits, size, sizeof(m_notifications), m_presents);
     }
 
     std::map<u64, u32> m_clients; // token -> retire notification index
@@ -2090,22 +2239,25 @@ private:
     // there while it never fired.
     void GetVsyncEvent(HLERequestContext& ctx) {
         LOG_INFO(Service, "nx2:vi2 {} vsync event, [2]={:#x}", ctx.GetCommand(), ctx.CommandBuffer()[2]);
-        auto* event = m_context.CreateEvent(fmt::format("nx2:vi2:Vsync{}", m_events.size()));
+        const std::string name = fmt::format("nx2:vi2:Vsync{}", m_events.size());
+        auto* event = m_context.CreateEvent(std::string{name});
         m_events.push_back(event);
         {
             std::scoped_lock lk{m_vsync->mutex};
-            m_vsync->events.push_back(event);
+            auto& tracked = m_vsync->events.emplace_back();
+            tracked.event = event;
+            if (Vi2DiagEnabled()) {
+                tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
+                m_diag_event = event;
+            }
         }
         if (!m_vsync_timer) {
             m_vsync_timer = Core::Timing::CreateEvent(
                 "nx2:vi2 vsync",
-                [vsync_state = m_vsync, &kernel = system.Kernel()](
+                [vsync_state = m_vsync, &system = system](
                     s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                     std::scoped_lock lk{vsync_state->mutex};
-                    vsync_state->ticks.fetch_add(1, std::memory_order_relaxed);
-                    for (auto* vsync : vsync_state->events) {
-                        vsync->Signal(kernel);
-                    }
+                    VblankLocked(*vsync_state, system);
                     return std::nullopt;
                 });
             // EDEN_NX2_VSYNC_HZ=<rate> (experiment): the game starts frames on this event, so a
@@ -2130,11 +2282,123 @@ private:
     std::vector<Kernel::KEvent*> m_events;
     // Shared with the vsync timer callback, which can outlive the session by one call.
     struct VsyncState {
+        struct Event {
+            Kernel::KEvent* event{};
+            bool on_vsync{true}; // signalled on every vblank
+            // EDEN_NX2_VI2_DIAG, since the last summary but the waiter names
+            std::string name;
+            u32 handle{};
+            bool was_signalled{}; // after the previous vblank
+            u32 signalled{};
+            u32 cleared{};       // by the guest: signalled at one vblank, not at the next
+            u32 handed_over{};   // 21 (GetNotifications) cleared it
+            u32 waited{};        // vblanks with a thread waiting on it
+            std::map<u64, std::string> waiters; // thread id -> name, every one seen
+        };
         std::mutex mutex;
-        std::vector<Kernel::KEvent*> events;
+        std::vector<Event> events;
         std::atomic<u32> ticks{}; // vblanks signalled (EDEN_NX2_PRESENT_DIAG)
+        // EDEN_NX2_VI2_DIAG summary
+        s64 diag_since{-1}; // CoreTiming ns
+        u32 diag_ticks{};
+        u64 diag_presents{};
+        u32 diag_get_notifications{};
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
+
+    // A vblank: signal the events on it. Under state.mutex.
+    static void VblankLocked(VsyncState& state, Core::System& system) {
+        state.ticks.fetch_add(1, std::memory_order_relaxed);
+        if (Vi2DiagEnabled()) {
+            DiagBeforeVblank(state, system.Kernel());
+        }
+        for (auto& tracked : state.events) {
+            if (tracked.on_vsync) {
+                tracked.event->Signal(system.Kernel());
+            }
+        }
+        if (Vi2DiagEnabled()) {
+            DiagAfterVblank(state, system);
+        }
+    }
+
+    static std::string_view DiagThreadName(Kernel::KThread* thread, std::string& storage) {
+        if (thread->IsDummyThread() || thread->GetOwnerProcess() == nullptr) {
+            return "host thread";
+        }
+        storage = Core::GetThreadName(thread).value_or("?");
+        return storage;
+    }
+
+    // Each event's state since the previous vblank: cleared by the guest, waited on (by whom).
+    static void DiagBeforeVblank(VsyncState& state, Kernel::KernelCore& kernel) {
+        for (auto& tracked : state.events) {
+            auto& readable = tracked.event->GetReadableEvent();
+            const auto waiters = readable.GetWaitingThreadsForDebugging(kernel);
+            bool signalled{};
+            {
+                Kernel::KScopedSchedulerLock lk{kernel};
+                signalled = readable.IsSignaled(kernel);
+            }
+            if (tracked.was_signalled && !signalled) {
+                ++tracked.cleared;
+            }
+            tracked.was_signalled = signalled;
+            if (!waiters.empty()) {
+                ++tracked.waited;
+            }
+            for (auto* thread : waiters) {
+                if (!tracked.waiters.contains(thread->GetThreadId())) {
+                    std::string storage;
+                    tracked.waiters.emplace(thread->GetThreadId(), std::string{DiagThreadName(thread, storage)});
+                }
+            }
+        }
+    }
+
+    static void DiagAfterVblank(VsyncState& state, Core::System& system) {
+        for (auto& tracked : state.events) {
+            if (tracked.on_vsync) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+        }
+        ++state.diag_ticks;
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+        if (state.diag_since < 0) {
+            state.diag_since = now;
+            state.diag_presents = presents;
+            return;
+        }
+        if (now - state.diag_since < 10'000'000'000LL) {
+            return;
+        }
+        std::string text;
+        for (auto& tracked : state.events) {
+            std::string waiters;
+            for (const auto& [id, thread_name] : tracked.waiters) {
+                waiters += fmt::format("{}{} {:#x}", waiters.empty() ? "" : ", ", thread_name, id);
+            }
+            text += fmt::format("; {} handle {:#x} {}: signalled {}, cleared by the guest {}{}, "
+                                "waited on at {} vblanks{}",
+                                tracked.name, tracked.handle, tracked.on_vsync ? "on vblanks" : "not on vblanks",
+                                tracked.signalled, tracked.cleared,
+                                tracked.handed_over != 0 ? fmt::format(", handed over by 21 {}", tracked.handed_over) : "",
+                                tracked.waited, waiters.empty() ? "" : fmt::format(" (ever: {})", waiters));
+            tracked.signalled = 0;
+            tracked.cleared = 0;
+            tracked.handed_over = 0;
+            tracked.waited = 0;
+        }
+        LOG_INFO(Service, "nx2:vi2 diag events, last {:.1f} s ({} vblanks, {} presents, 21 called {} times){}",
+                 (now - state.diag_since) / 1e9, state.diag_ticks, presents - state.diag_presents,
+                 state.diag_get_notifications, text);
+        state.diag_since = now;
+        state.diag_ticks = 0;
+        state.diag_presents = presents;
+        state.diag_get_notifications = 0;
+    }
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
     u64 m_presents{};
     u64 m_shown_layout{}; // image and crop size last logged
