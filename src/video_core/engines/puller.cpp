@@ -68,10 +68,20 @@ Peek::Mode PeekMode() {
     return mode;
 }
 
-// Switch 2 acquires and the puller's releases are tracked with the split on, for the switch or
+// EDEN_NX2_SEMEXEC_DEFER=1 (ProcessSemaphoreExecute): read once.
+bool SemExecuteDefer() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SEMEXEC_DEFER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+// Switch 2 acquires and the puller's releases are tracked with the split on, for the switches or
 // while profiling (the acquire peek line). Front thread only.
 bool PeekTracking() {
-    return (PeekMode() != Peek::Mode::Off || VideoCommon::Nx2Profile::Enabled()) &&
+    return (PeekMode() != Peek::Mode::Off || SemExecuteDefer() ||
+            VideoCommon::Nx2Profile::Enabled()) &&
            VideoCommon::GpuSplit::Get().Active();
 }
 
@@ -120,7 +130,7 @@ struct PeekStats {
     u64 skipped{};        ///< Went on without a drain (=1)
     u64 met_then_unmet{}; ///< Met in memory before the drain, not after it
     u64 may_skip_unmet{}; ///< Of them: Decide said Skip
-    u64 resumes{};        ///< Pending acquires checked again (CanResumeAcquire)
+    u64 resumes{}; ///< Checks of a pending acquire (CanResumeAcquire: the scheduler's, Step's)
     u64 resumes_met{};    ///< Of them: met in memory before the drain
     u64 resumes_may_skip{};
     u64 resumes_latched{}; ///< Resumed without a drain, latched by a release (=1)
@@ -147,7 +157,7 @@ void LogPeekStats(const PeekStats& stats, u64 window_ns) {
              "{:.0f}): may skip {:.0f}, skipped {:.0f}; drain kept for mask {:.0f}, wrapped "
              "{:.0f}, queued release {:.0f}, not monotonic {:.0f}, new {:.0f}, not advanced "
              "{:.0f}, untracked {:.0f}; "
-             "met in memory but not after the drain {:.0f} (may skip {:.0f}) | resumes {:.0f} "
+             "met in memory but not after the drain {:.0f} (may skip {:.0f}) | resume checks {:.0f} "
              "(met in memory {:.0f}, may skip {:.0f}; skipped: latched {:.0f}, met {:.0f}) | "
              "sem execute acquires deferred {:.0f} | words {} ({} went down), releases queued {}",
              rate(stats.acquires[0] + stats.acquires[1] + stats.acquires[2]),
@@ -184,6 +194,8 @@ void CountPeek(u64 PeekStats::*counter) {
     }
 }
 
+enum class PeekSite { Acquire, Resume, SemExecute };
+
 // An acquire's word in guest memory before the drain (PeekTracking), and what Decide says of it.
 struct PeekRead {
     bool tracked{};
@@ -193,7 +205,7 @@ struct PeekRead {
 };
 
 PeekRead PeekBefore(DmaPusher& dma_pusher, GPUVAddr address, u32 operation, u32 value,
-                    bool resume) {
+                    PeekSite site) {
     PeekRead read;
     if (!PeekTracking()) {
         return read;
@@ -214,11 +226,11 @@ PeekRead PeekBefore(DmaPusher& dma_pusher, GPUVAddr address, u32 operation, u32 
         return read;
     }
     auto& stats = PeekStatsNow();
-    if (resume) {
+    if (site == PeekSite::Resume) {
         ++stats.resumes;
         stats.resumes_met += met ? 1 : 0;
         stats.resumes_may_skip += read.verdict == Peek::Verdict::Skip ? 1 : 0;
-    } else {
+    } else if (site == PeekSite::Acquire) {
         const size_t index = OperationIndex(operation);
         ++stats.acquires[index];
         if (met) {
@@ -262,15 +274,6 @@ void PeekAfter(DmaPusher& dma_pusher, const PeekRead& read, GPUVAddr address, u3
         LOG_WARNING(HW_GPU, "Acquire peek: {} acquires met in memory but not after the drain",
                     reported);
     }
-}
-
-// EDEN_NX2_SEMEXEC_DEFER=1 (ProcessSemaphoreExecute): read once.
-bool SemExecuteDefer() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_SEMEXEC_DEFER");
-        return value != nullptr && value[0] == '1';
-    }();
-    return enabled;
 }
 
 bool SemExecuteReady(u32 operation, u32 word, u32 payload) {
@@ -335,7 +338,8 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         }
     };
     const PeekRead peek = PeekBefore(dma_pusher, pending_acquire->address,
-                                     pending_acquire->operation, pending_acquire->value, true);
+                                     pending_acquire->operation, pending_acquire->value,
+                                     PeekSite::Resume);
     if (peek.tracked && PeekMode() == Peek::Mode::Skip) {
         // A release that met the value latched the channel, which no drain undoes; or memory
         // meets it where Decide allows.
@@ -389,6 +393,9 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
 }
 
 bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
+    if (!pending_acquire) {
+        return true;
+    }
     if (!CanResumeAcquire(dma_pusher)) {
         return false;
     }
@@ -524,7 +531,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         const PeekRead peek =
-            PeekBefore(dma_pusher, acquire.address, acquire.operation, acquire.value, false);
+            PeekBefore(dma_pusher, acquire.address, acquire.operation, acquire.value,
+                       PeekSite::Acquire);
         if (peek.verdict == Peek::Verdict::Skip && PeekMode() == Peek::Mode::Skip) {
             CountPeek(&PeekStats::skipped);
             PeekMet(dma_pusher, peek, acquire.value);
@@ -646,21 +654,37 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
     // The check only logs: with EDEN_NX2_SEMEXEC_DEFER=1 and the split on, the back releases the
     // fences and checks after what was sent before, as after a drain, and the front goes on. Only
-    // where guest memory meets it already: the release ran, so the work before it ran too (the
-    // pages it wrote are marked for the front's command list reads), as the drain had it.
-    if (SemExecuteDefer() && VideoCommon::GpuSplit::Get().Active() &&
-        SemExecuteReady(operation, dma_pusher.memory_manager.Read<u32>(address), payload)) {
-        CountPeek(&PeekStats::sem_execute_deferred);
-        OnBack([rasterizer = dma_pusher.rasterizer, memory_manager = &dma_pusher.memory_manager,
-                operation, address, payload] {
-            rasterizer->ReleaseFences();
-            CheckSemExecute(operation, address, memory_manager->Read<u32>(address), payload);
-        });
-        return;
+    // where the acquire peek would let such an acquire go on (Decide): the release ran, so the
+    // work before it ran too (the pages it wrote are marked for the front's command list reads),
+    // as the drain had it. Equal as equal, both greater-or-equal kinds as greater or equal (the
+    // circular one is met only within 2^31: Wrapped); masks drain. 6 and 7 wait for nothing.
+    const u32 peek_operation = operation == 0                     ? Peek::OpEqual
+                               : operation == 2 || operation == 3 ? Peek::OpGequal
+                                                                  : 0;
+    PeekRead peek;
+    if (SemExecuteDefer() && VideoCommon::GpuSplit::Get().Active()) {
+        if (peek_operation != 0) {
+            peek = PeekBefore(dma_pusher, address, peek_operation, payload, PeekSite::SemExecute);
+        }
+        if (operation >= 6 || peek.verdict == Peek::Verdict::Skip) {
+            PeekMet(dma_pusher, peek, payload);
+            CountPeek(&PeekStats::sem_execute_deferred);
+            OnBack([rasterizer = dma_pusher.rasterizer,
+                    memory_manager = &dma_pusher.memory_manager, operation, address, payload] {
+                rasterizer->ReleaseFences();
+                CheckSemExecute(operation, address, memory_manager->Read<u32>(address), payload);
+            });
+            return;
+        }
     }
     DrainBack(VideoCommon::Nx2Profile::DrainSite::PullerExecute);
     dma_pusher.rasterizer->ReleaseFences();
-    CheckSemExecute(operation, address, dma_pusher.memory_manager.Read<u32>(address), payload);
+    const u32 word = dma_pusher.memory_manager.Read<u32>(address);
+    PeekAfter(dma_pusher, peek, address, peek_operation, payload, word);
+    if (SemExecuteReady(operation, word, payload)) {
+        PeekMet(dma_pusher, peek, payload);
+    }
+    CheckSemExecute(operation, address, word, payload);
 }
 
 /// Calls a GPU puller method.

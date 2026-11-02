@@ -214,41 +214,45 @@ TEST_CASE("Nx2AcquirePeek: too many words: the others drain", "[video_core]") {
 // now and then; acquires read guest memory, rechecks of a suspended one poll it, and a drain runs
 // everything. A skip is right where the console could have met the acquire: with every write this
 // channel queued before it done (theirs come first on its channel) and those of other channels in
-// any state.
-// Three kinds of words:
+// any state. Kinds of words:
 // - counters only go up, from a producer channel that does not acquire (a 3D queue ticking a counter
 //   others acquire value by value) and from the puller of acquiring channels; acquiring channels
 //   wait for growing values, as each wait follows the last;
 // - flags (0 and 1): set by the producer's engine, cleared by an acquiring channel's own engine (not
 //   noted) or its puller (noted); each round waits for 1 again;
 // - counters a channel resets each round with its own engine (not noted), the producer counting
-//   again from 0 after that, the channel waiting for 1, 2, ... again.
+//   again from 0, the channel waiting for 1, 2, ... again;
+// - counters a channel resets with its puller (noted) and then waits for more than before;
+// - the same reset by the channel's engine (not noted): the tracker cannot tell before it saw the
+//   word go down once. Those skips are counted as the known limit, not checked.
 TEST_CASE("Nx2AcquirePeek: model: a skip never runs ahead of its own channel", "[video_core]") {
     struct Write {
         u64 address;
         s32 channel;
         u32 value;
     };
-    constexpr u32 Counters = 3;
-    constexpr u32 Flags = 2;
-    constexpr u32 Resets = 2;
-    constexpr u64 FlagBase = 0x100;
-    constexpr u64 ResetBase = 0x200;
+    enum Kind : u32 { Counter, Flag, Restart, NotedReset, EngineReset, Kinds };
+    constexpr std::array<u32, Kinds> words_of{3, 2, 2, 2, 2};
     constexpr s32 Channels = 3;
     constexpr s32 Producer = 3;
+    const auto word_of = [](u32 kind, u32 index) { return u64{kind} * 0x100 + index * 4; };
     std::mt19937 rng{12345};
     const auto pick = [&rng](u32 count) {
         return std::uniform_int_distribution<u32>{0, count - 1}(rng);
     };
-    u64 counter_skips = 0;
-    u64 flag_skips = 0;
+    std::array<u64, Kinds> skips{};
     u64 checks = 0;
+    u64 known_limit = 0;
+    u64 queued_release_decided = 0;
+    u64 not_monotonic_decided = 0;
     for (u32 round = 0; round < 300; ++round) {
         Tracker tracker;
         std::map<u64, u32> memory;
-        std::map<u64, u32> issued; // Counters and reset counters: the last value released
+        std::map<u64, u32> issued; // Counting words: the last value released
         // What each channel's program waits for next on a word (its own count, not the tracker's).
         std::map<std::pair<u64, s32>, u32> next_wait;
+        std::map<u64, u32> seen;
+        std::map<u64, bool> dipped; // The tracker read the word going down
         std::deque<Write> queue;
         const auto run_back = [&](size_t count) {
             for (; count != 0 && !queue.empty(); --count) {
@@ -256,55 +260,59 @@ TEST_CASE("Nx2AcquirePeek: model: a skip never runs ahead of its own channel", "
                 queue.pop_front();
             }
         };
+        const auto observe = [&](u64 address) {
+            const u32 value = memory[address];
+            if (const auto it = seen.find(address); it != seen.end() && value < it->second) {
+                dipped[address] = true;
+            }
+            seen[address] = value;
+            tracker.Observe(address, value);
+        };
         for (u32 step = 0; step < 3000; ++step) {
             const s32 channel = static_cast<s32>(pick(Channels));
-            const u32 action = pick(16);
-            if (action < 4) {
-                // A counter release: the puller's (noted) on an acquiring channel, or the
-                // producer's engine.
-                const u64 address = pick(Counters) * 4;
-                issued[address] += 1 + pick(3);
-                if (pick(2) == 0) {
-                    queue.push_back({address, channel, issued[address]});
-                    tracker.NoteRelease(address, channel, issued[address]);
-                } else {
-                    queue.push_back({address, Producer, issued[address]});
-                }
-            } else if (action < 6) {
-                // A flag: set by the producer, cleared by the channel's engine or its puller.
-                const u64 address = FlagBase + pick(Flags) * 4;
-                const u32 how = pick(3);
-                if (how == 0) {
-                    queue.push_back({address, Producer, 1});
-                } else {
-                    queue.push_back({address, channel, 0});
+            const u32 action = pick(20);
+            if (action < 10) {
+                const u32 kind = action / 2;
+                const u64 address = word_of(kind, pick(words_of[kind]));
+                if (kind == Counter) {
+                    // The puller's release (noted) on an acquiring channel, or the producer's.
+                    issued[address] += 1 + pick(3);
+                    const bool noted = pick(2) == 0;
+                    queue.push_back({address, noted ? channel : Producer, issued[address]});
+                    if (noted) {
+                        tracker.NoteRelease(address, channel, issued[address]);
+                    }
+                } else if (kind == Flag) {
+                    const u32 how = pick(3);
+                    queue.push_back({address, how == 0 ? Producer : channel, how == 0 ? 1U : 0U});
                     if (how == 1) {
                         tracker.NoteRelease(address, channel, 0);
                     }
-                }
-            } else if (action < 8) {
-                // A reset counter: the producer counts on, or a channel starts a round: its
-                // engine resets the word and its waits start over.
-                const u64 address = ResetBase + pick(Resets) * 4;
-                if (pick(4) != 0) {
-                    issued[address] += 1;
+                } else if (pick(4) != 0) {
+                    issued[address] += 1 + pick(2);
                     queue.push_back({address, Producer, issued[address]});
                 } else {
+                    // A channel resets the word: with its engine (restarting its waits, or not)
+                    // or with its puller.
                     issued[address] = 0;
                     queue.push_back({address, channel, 0});
-                    next_wait[{address, channel}] = 1;
+                    if (kind == NotedReset) {
+                        tracker.NoteRelease(address, channel, 0);
+                    } else if (kind == Restart) {
+                        next_wait[{address, channel}] = 1;
+                    }
                 }
-            } else if (action < 10) {
+            } else if (action < 13) {
                 run_back(pick(4));
             } else {
-                const u32 kind = pick(4);
-                u64 address;
-                u32 operation;
-                u32 value;
-                if (kind < 2) {
-                    address = pick(Counters) * 4;
-                    u32& wait = next_wait[{address, channel}];
-                    const u32 raw = memory[address];
+                const u32 kind = pick(Kinds);
+                const u64 address = word_of(kind, pick(words_of[kind]));
+                u32& wait = next_wait[{address, channel}];
+                wait = wait == 0 ? 1 : wait;
+                const u32 raw = memory[address];
+                u32 operation = OpGequal;
+                u32 value = wait;
+                if (kind == Counter) {
                     // Equal waits for the value there is, or the next one; on a value this
                     // channel's own queue already passes the console never meets it (no program
                     // waits so), so those come only as greater or equal.
@@ -314,19 +322,13 @@ TEST_CASE("Nx2AcquirePeek: model: a skip never runs ahead of its own channel", "
                     }
                     operation = !own_ahead && pick(2) == 0 ? OpEqual : OpGequal;
                     value = operation == OpEqual ? (raw > wait ? raw : wait) : wait + pick(3);
-                } else if (kind == 2) {
-                    address = FlagBase + pick(Flags) * 4;
+                } else if (kind == Flag) {
                     operation = pick(3) == 0 ? OpMask : (pick(2) == 0 ? OpEqual : OpGequal);
                     value = 1;
-                } else {
-                    address = ResetBase + pick(Resets) * 4;
-                    u32& wait = next_wait[{address, channel}];
-                    wait = wait == 0 ? 1 : wait;
-                    operation = OpGequal;
-                    value = wait;
+                } else if (kind != Restart) {
+                    value = wait + pick(2);
                 }
-                const u32 raw = memory[address];
-                tracker.Observe(address, raw);
+                observe(address);
                 const Verdict verdict = tracker.Decide(address, channel, operation, value, raw);
                 // The console's view at the acquire: this channel's queued writes ran first.
                 u32 console = raw;
@@ -336,35 +338,49 @@ TEST_CASE("Nx2AcquirePeek: model: a skip never runs ahead of its own channel", "
                     }
                 }
                 ++checks;
+                queued_release_decided += verdict == Verdict::QueuedRelease ? 1 : 0;
+                not_monotonic_decided +=
+                    verdict == Verdict::NotMonotonic && kind == EngineReset ? 1 : 0;
                 bool met = false;
                 if (verdict == Verdict::Skip) {
-                    counter_skips += kind < 2 ? 1 : 0;
-                    flag_skips += kind == 2 ? 1 : 0;
-                    REQUIRE(Matches(operation, console, value));
+                    ++skips[kind];
+                    if (kind == EngineReset && !dipped[address] &&
+                        !Matches(operation, console, value)) {
+                        ++known_limit;
+                    } else {
+                        REQUIRE(Matches(operation, console, value));
+                    }
                     met = true;
                 } else {
                     // The drain, and the polls of a suspended acquire after it.
                     run_back(queue.size());
                     tracker.Drained();
-                    tracker.Observe(address, memory[address]);
+                    observe(address);
                     met = Matches(operation, memory[address], value);
                     for (u32 poll = pick(3); poll != 0; --poll) {
-                        tracker.Observe(address, memory[address]);
+                        observe(address);
                     }
                 }
                 if (met) {
                     tracker.Met(address, channel, value);
-                    if (kind != 2) {
-                        next_wait[{address, channel}] = value + 1;
+                    if (kind != Flag) {
+                        wait = value + 1;
                     }
                 }
             }
         }
     }
     // The model must let a good share of the counter waits skip, or it checks nothing; a flag's
-    // wait for 1 again never does.
-    REQUIRE(counter_skips > checks / 20);
-    REQUIRE(flag_skips == 0);
+    // wait for 1 again never does. The queued release and going-down rules must decide some.
+    REQUIRE(skips[Counter] > checks / 40);
+    REQUIRE(skips[Flag] == 0);
+    REQUIRE(queued_release_decided > 0);
+    REQUIRE(not_monotonic_decided > 0);
+    // The known limit (an engine's reset on the acquire's own channel the tracker has not seen
+    // go down yet, the channel then waiting for more than before) shows up in this model. It
+    // stays the first round of such a word: after a dip it is checked above.
+    REQUIRE(known_limit > 0);
+    REQUIRE(known_limit < skips[EngineReset]);
 }
 
 // What the tracker cannot see: an engine's write of the acquire's own channel taking a counter
