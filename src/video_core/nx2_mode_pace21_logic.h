@@ -37,7 +37,9 @@ namespace VideoCommon::Nx2ModePace {
 //    while C <= cap_up_ms for up_dwell_s.
 // A push ends when the game changes its mode, after its frames (gave up) or at a stall (aborted);
 // a failed push rests its kind rest * 2^(n - 1) (at most rest_max) after its n-th failure in a row,
-// never blocks, and a success resets that.
+// never blocks, and a success resets that. rel20 and rel60 succeed only once their mode lasted
+// verify30_s / verify60_s: until then a done one keeps its failures, and leaving the mode within
+// that time (whatever took the game there) is its next failure, so a 20 <-> 30 round slows down.
 
 enum class Push21 : u8 { None, Down, To20, Rel20, Rel60 };
 
@@ -247,6 +249,16 @@ public:
         for (Backoff& b : backoff) {
             b.rest = (std::max)(b.rest - dt, 0.0);
         }
+        // A released mode that lasted until this present (Verify forgets one the game left): its
+        // push worked.
+        if (rel20_done_at != Never && clock - rel20_done_at >= params.verify30_s) {
+            Of(Push21::Rel20) = {};
+            rel20_done_at = Never;
+        }
+        if (rel60_done_at != Never && clock - rel60_done_at >= params.verify60_s) {
+            Of(Push21::Rel60) = {};
+            rel60_done_at = Never;
+        }
 
         // 1. The game changed its mode.
         if (in.mode != mode) {
@@ -255,9 +267,7 @@ public:
             if (push != Push21::None) {
                 End(out, ResultOnMode(push, in.mode));
             }
-            if (by == Push21::None) {
-                Verify(out, in.mode);
-            }
+            Verify(out, in.mode);
             if (mode == 2 && in.mode == 1) {
                 // An escape from 30: how full that 30 was decides where the next down push goes.
                 escapes[escape_next++ % escapes.size()] = {clock, out.change_cap_ms};
@@ -496,17 +506,25 @@ private:
         return full >= params.full30_escapes;
     }
 
-    /// The game changed its mode by itself: a released mode that did not last fails its push.
+    /// The game changed its mode (by itself or by a push): a released mode it did not keep for its
+    /// verify time fails its push. rel20's 30 is kept while the game stays out of 20 (a 30 -> 60
+    /// escape followed by 20 is no 30 that lasted).
     void Verify(Output21& out, u32 new_mode) {
-        if (mode == 2 && new_mode == 3 && clock - rel20_done_at < params.verify30_s) {
+        if (new_mode == 3 && rel20_done_at != Never &&
+            clock - rel20_done_at < params.verify30_s) {
             Fail(out, Push21::Rel20);
             out.unverified = Push21::Rel20;
         }
-        if (mode == 1 && new_mode != 1 && clock - rel60_done_at < params.verify60_s) {
+        if (new_mode == 3) {
+            rel20_done_at = Never;
+        }
+        if (mode == 1 && rel60_done_at != Never && clock - rel60_done_at < params.verify60_s) {
             Fail(out, Push21::Rel60);
             out.unverified = Push21::Rel60;
         }
-        rel20_done_at = rel60_done_at = -1e9;
+        if (mode == 1) {
+            rel60_done_at = Never;
+        }
     }
 
     void Fail(Output21& out, Push21 kind) {
@@ -574,11 +592,15 @@ private:
         out.result = result;
         out.frames = frames;
         const bool done = result == Result::Done || result == Result::Done20;
+        const bool released = push == Push21::Rel20 || push == Push21::Rel60;
         if (!push_probe) {
-            if (done) {
-                Of(push) = {};
-            } else {
+            if (!done) {
                 Fail(out, push);
+            } else if (released) {
+                // Its mode has yet to last (Verify): the failures stay until it does.
+                Of(push).rest = 0.0;
+            } else {
+                Of(push) = {};
             }
         }
         if (result == Result::Done && push == Push21::Rel20) {
@@ -586,13 +608,6 @@ private:
         }
         if (result == Result::Done && push == Push21::Rel60) {
             rel60_done_at = clock;
-        }
-        if (result == Result::Done && push == Push21::To20 &&
-            clock - rel20_done_at < params.verify30_s) {
-            // 20 -> 30 -> 20 round: rel20's 30 did not last.
-            Fail(out, Push21::Rel20);
-            out.unverified = Push21::Rel20;
-            rel20_done_at = -1e9;
         }
         if (done && (push == Push21::To20 || push_to20)) {
             // A 20 Eden chose: the escapes that chose it are spent.
@@ -625,8 +640,9 @@ private:
     double since_stall{1e9};
     double stint{};
     double since_probe{};
-    double rel20_done_at{-1e9};
-    double rel60_done_at{-1e9};
+    static constexpr double Never = -1e9;
+    double rel20_done_at{Never}; ///< Never: no done rel20 whose 30 has yet to last
+    double rel60_done_at{Never};
     std::array<Escape, 4> escapes{};
     std::size_t escape_next{};
 
