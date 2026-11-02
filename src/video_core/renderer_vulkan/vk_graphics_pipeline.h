@@ -10,9 +10,11 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -20,6 +22,7 @@
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_stage_draw.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -243,12 +246,163 @@ public:
         gpu_memory = gpu_memory_;
     }
 
+    // Back stages, cut c (Kesim-2, EDEN_NX2_BACK_STAGES with 'c'; PLAN.md §4.3 T6, tasarim
+    // §3.5): Configure in two halves on two threads. B (the memory stage) does the buffer half:
+    // uniform buffer state, storage buffer binds, reading the texture handles, the buffer
+    // updates and binds (its Vulkan commands into its record list, its descriptor entries into
+    // its scratch queue: T3) and the copy barrier; it writes what C needs into the draw's ring 3
+    // packet (nx2_stage_draw.h). C (the record stage) does the texture half from the packet:
+    // descriptor tables, samplers and image views from B's handle values, the descriptor payload
+    // (per stage B's buffer entries, then the images, the bytes in ConfigureImpl's order), render
+    // targets and the draw's recording (ConfigureDraw). ConfigureImpl and ConfigureUniformsImpl
+    // stay as they are: with the stages off nothing below is called.
+    //
+    // Which half owns which member (R11). B writes its members only in the B functions (and
+    // SetEngine, CheckDescriptorWords reading), C its own only in the C functions; the old ones
+    // (Configure, ConfigureUniforms) write both and run only with the stages off, or in a join
+    // (DrawKind::Joined, =2's double setup) with the other stage parked.
+    //   | Member                                                   | Owner                     |
+    //   |----------------------------------------------------------|---------------------------|
+    //   | key, device, the caches' and queues' references,         | read-only after the       |
+    //   | stage_infos, enabled_uniform_buffer_masks,               | constructor: any stage    |
+    //   | uniform_buffer_sizes, num_*, writes_memory,              |                           |
+    //   | fragment_has_color0_output, descriptor_words,            |                           |
+    //   | storage_word_begin, layouts, template, uses_*,           |                           |
+    //   | configure funcs, split_funcs, spv_modules                |                           |
+    //   | transition_keys, transitions (AddTransition, Next)       | B (pipeline cache lookup) |
+    //   | maxwell3d, gpu_memory (SetEngine: B's replica)           | B                         |
+    //   | descriptor_values, descriptor_values_valid, used_tics,   | B (read by B's light      |
+    //   | used_tscs                                                | decision)                 |
+    //   | views_repeat, last_draw_changes, last_rescaling,         | C                         |
+    //   | last_render_area, last_uses_render_area                  |                           |
+    //   | image_descriptor_memos (EDEN_NX2_DESC_REUSE)             | C                         |
+    //   | last_descriptor_payload, last_descriptor_buffer_*,       | C                         |
+    //   | descriptor_allocator (Commit on the Vulkan worker)       |                           |
+    //   | last_handles                                             | C                         |
+    //   | pipeline, is_built, build_mutex, build_condvar           | the build worker, then C  |
+    //   |                                                          | (IsBuilt: any stage)      |
+    // The caller holds the caches' locks as PrepareDraw does: B the buffer cache's (through
+    // Nx2Record::CacheLock, K3), C the texture cache's; neither half takes the other's.
+
+    enum class BufferHalf : u8 {
+        Ready, ///< Set up; the writer holds the packet's descriptor entries and handles
+        Join,  ///< The draw needs the old setup with C parked (DrawKind::Joined): a stage has
+               ///< texture or image buffers (their binds read C's image views) or transform
+               ///< feedback is on. Nothing was done.
+    };
+
+    /// B: whether ConfigureBuffers would say Join (from the members SetEngine set).
+    [[nodiscard]] bool SplitJoins() const;
+
+    /// B, inside a packet (BufferCacheRuntime::BeginRecords), after SetEngine with B's replica:
+    /// ConfigureImpl's buffer half. Restarts the runtime's descriptor scratch queue in this
+    /// pipeline's descriptor form, then as ConfigureImpl: uniform buffer state, per stage the
+    /// storage buffer binds and the handle reads (to `out`, values kept for the light way as
+    /// ConfigureImpl keeps them), the texture buffer unbinds, UpdateGraphicsBuffers,
+    /// BindHostGeometryBuffers, per stage BindHostStageBuffers (its entries to `out`) and, after
+    /// an upload, PostCopyBarrier (into the record list). Sets out's kind (Full), pipeline and
+    /// is_indexed and its descriptor entries and handles (ClearSetup first); the rest is T7's.
+    [[nodiscard]] BufferHalf ConfigureBuffers(bool is_indexed,
+                                              VideoCommon::Nx2Stages::StageDrawWriter& out);
+
+    /// C, after replaying the packet's record list: ConfigureImpl's texture half with B's
+    /// handles and descriptor entries from `in`, `maxwell3d_c` being C's replica (the render
+    /// area's registers). As ConfigureImpl: SynchronizeDescriptors, the samplers and image views
+    /// of the handle values, FillImageViews, Acquire, per stage B's entries then the image
+    /// descriptors, UpdateRenderTargets, CheckFeedbackLoop, ViewsNeedRepeat and ConfigureDraw.
+    /// False as Configure's: no draw.
+    [[nodiscard]] bool ConfigureTextures(const VideoCommon::Nx2Stages::StageDrawReader& in,
+                                         Tegra::Engines::Maxwell3D& maxwell3d_c);
+
+    /// B, inside a packet, the light way with uniforms (the anchor's SetEngine holds):
+    /// ConfigureUniformsImpl's buffer half. As it: uniform buffer state, with rebind_storage the
+    /// storage buffers bound again (descriptor_values kept), UpdateGraphicsBuffers,
+    /// BindHostGeometryBuffers, per stage BindHostStageBuffers (its entries to `out`, ClearSetup
+    /// first). Sets out's kind (LightUniform), pipeline and is_indexed. False after an upload,
+    /// as ConfigureUniformsImpl (the full setup follows: ConfigureBuffers, which records the
+    /// barrier). It does not check the image descriptor memos: they are C's (RecordUniformsFrom).
+    [[nodiscard]] bool ConfigureUniformsBuffers(bool is_indexed, bool rebind_storage,
+                                                VideoCommon::Nx2Stages::StageDrawWriter& out);
+
+    /// C, after replaying the packet's record list: ConfigureUniformsImpl's texture half. False,
+    /// with nothing recorded, where each stage's image descriptor memo does not hold or the
+    /// render pass is not active (as ConfigureUniformsImpl): C then repairs (T7), e.g. with
+    /// ConfigureTextures(in.WithHandles(LastHandles()), ...): B's light decision says the
+    /// handles are the anchor's. Else as it: Acquire, per stage B's entries then the memo's,
+    /// written storage images marked modified, RecordDescriptors.
+    [[nodiscard]] bool RecordUniformsFrom(const VideoCommon::Nx2Stages::StageDrawReader& in);
+
+    /// C: the handles of the last ConfigureTextures of this pipeline (kept with
+    /// EDEN_NX2_LIGHT_UNIFORM on), for a light draw's repair.
+    [[nodiscard]] std::span<const u32> LastHandles() const noexcept {
+        return last_handles;
+    }
+
+    /// EDEN_NX2_BACK_STAGES=2, the double setup (T7): C sets a draw up the split way, takes a
+    /// snapshot (with the packet's handles), sets it up again the old way (Configure, with A and
+    /// B parked at the lockstep point and no SetEngine: maxwell3d and gpu_memory are B's, its
+    /// replica equal to C's there), takes another (no handles: used_tics / used_tscs) and
+    /// compares them (CompareSetups). Take each right after its setup: the next Acquire reuses
+    /// the payload.
+    struct SetupSnapshot {
+        std::vector<DescriptorUpdateEntry> payload; ///< The descriptor payload (all entries)
+        std::vector<u32> tics;   ///< Image view pool indices, in the views' order
+        std::vector<u32> tscs;   ///< Sampler pool indices of the textures, in order
+        std::vector<u32> values; ///< descriptor_values, when valid
+        std::array<u32, NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling{};
+        std::array<f32, 4> render_area{};
+        bool uses_render_area{};
+        bool draw_state{};   ///< rescaling and render area kept (EDEN_NX2_LIGHT_UNIFORM=2)
+        bool values_valid{};
+        bool views_repeat{};
+    };
+    /// `handles`: the split setup's (the packet's); empty for the old one (its used_tics and
+    /// used_tscs, kept with EDEN_NX2_LIGHT_UNIFORM on).
+    void TakeSetupSnapshot(SetupSnapshot& out, std::span<const u32> handles) const;
+
+    /// A uniform buffer entry's mapped bytes and range (RasterizerVulkan: the scheduler's staging
+    /// pool or B's, StageStagingBufferPool::MappedBytes); empty if unknown.
+    using MappedBytesFunc =
+        std::function<std::span<const u8>(const DescriptorUpdateEntry& entry, VkDeviceSize& range)>;
+    /// The differences of two setups of this pipeline, field by field, empty when none: the
+    /// descriptor payload (a uniform buffer streamed to another slice counts as the same when
+    /// `bytes` gives the same bytes, as CheckLightVerify), the handles, the descriptor words
+    /// read, the push constants (when both kept them) and ViewsNeedRepeat.
+    [[nodiscard]] std::string CompareSetups(const SetupSnapshot& split, const SetupSnapshot& full,
+                                            const MappedBytesFunc& bytes) const;
+
+    /// Cut c's halves of this pipeline's Spec, picked with configure_func (ConfigureFunc).
+    struct SplitFuncs {
+        BufferHalf (*buffers)(GraphicsPipeline*, bool, VideoCommon::Nx2Stages::StageDrawWriter&){};
+        bool (*textures)(GraphicsPipeline*, const VideoCommon::Nx2Stages::StageDrawReader&,
+                         Tegra::Engines::Maxwell3D&){};
+        bool (*uniform_buffers)(GraphicsPipeline*, bool, bool,
+                                VideoCommon::Nx2Stages::StageDrawWriter&){};
+        bool (*record_uniforms)(GraphicsPipeline*, const VideoCommon::Nx2Stages::StageDrawReader&){};
+        bool texel_buffers{}; ///< A stage has texture or image buffers: every draw joins
+    };
+
+    template <typename Spec>
+    static SplitFuncs MakeSplitFuncs(bool texel_buffers);
+
 private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
     template <typename Spec>
     bool ConfigureUniformsImpl(bool is_indexed, bool rebind_storage);
+
+    // Cut c's halves (see ConfigureBuffers).
+    template <typename Spec>
+    BufferHalf ConfigureBuffersImpl(bool is_indexed, VideoCommon::Nx2Stages::StageDrawWriter& out);
+    template <typename Spec>
+    bool ConfigureTexturesImpl(const VideoCommon::Nx2Stages::StageDrawReader& in,
+                               Tegra::Engines::Maxwell3D& maxwell3d_c);
+    template <typename Spec>
+    bool ConfigureUniformsBuffersImpl(bool is_indexed, bool rebind_storage,
+                                      VideoCommon::Nx2Stages::StageDrawWriter& out);
+    template <typename Spec>
+    bool RecordUniformsFromImpl(const VideoCommon::Nx2Stages::StageDrawReader& in);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
@@ -283,6 +437,7 @@ private:
 
     bool (*configure_func)(GraphicsPipeline*, bool){};
     bool (*configure_uniforms_func)(GraphicsPipeline*, bool, bool){};
+    SplitFuncs split_funcs{}; ///< Cut c (ConfigureBuffers ...)
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
@@ -347,6 +502,9 @@ private:
         bool valid{};
     };
     std::array<ImageDescriptorMemo, NUM_STAGES> image_descriptor_memos;
+
+    /// Cut c, C: the handles of the last ConfigureTextures (LastHandles).
+    std::vector<u32> last_handles;
 
     std::condition_variable build_condvar;
     std::mutex build_mutex;
