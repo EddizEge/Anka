@@ -165,13 +165,27 @@ private:
 /// logged. =2 lockstep: for a Join record the producer waits for the park ack, never for the
 /// record's end (the consumer ends it only once A releases; S8).
 void JoinFromA(JoinReason reason, FunctionRef op);
+// K2: joins between B and C (K1 calls neither: BC owns every cache). T1 writes them now, with
+// their unit tests; T9 calls them. The rules (S13, K3):
+// - A request is a flag outside the rings, not a record: the one asked answers it where it
+//   stands, at a park point; it acks, waits for the release and runs nothing meanwhile.
+// - B's park points (for ParkB): each record boundary of ring 2 and its wait for ring 2; each
+//   wait on ring 3: for room (ring 3 full while C waits in ParkB), for the end of a record at =2
+//   (C may be in ParkB inside it), for C's park ack of a Join B forwards from A.
+// - C's park points (for JoinFromB): each record boundary of ring 3, its wait for ring 3, and
+//   its wait in ParkB (priority: a JoinFromB B made first wins; C parks for it, then asks again).
+//   B's wait in JoinFromB is no park point, else each would park for the other.
+// - No lock across a wait: a stage holds no cache lock (buffer, texture, query, the scheduler's)
+//   at a park point, when it calls JoinFromB or ParkB, or while it writes or waits on ring 3. So
+//   `op` may take any lock: the parked stage holds none. `op` waits on no ring and no stage.
+
 /// K2, B: C runs everything before this point and parks; `op` runs on B (RESETFIX's FlushRegion,
-/// Wait/Finish from the buffer runtime, ...). B never calls it holding the buffer cache mutex
-/// (S13).
+/// Wait/Finish from the buffer runtime, ...). B calls it holding no cache lock (the buffer cache
+/// mutex included, S13).
 void JoinFromB(FunctionRef op);
-/// K2, C: B stops at a record boundary and parks; `op` runs on C (CPU FlushRegion requests run in
-/// TickWork, gpu.cpp:284-303). Priority (S13): while C waits for B's park, a JoinFromB B made
-/// first wins: C parks for it, then asks again. C takes no buffer cache lock while parked.
+/// K2, C: B parks at its next park point (a record boundary of ring 2, or a wait on a ring);
+/// `op` runs on C (CPU FlushRegion requests run in TickWork, gpu.cpp:284-303), then B goes on. C
+/// calls it holding no cache lock and answers B's JoinFromB while it waits (S13).
 void ParkB(FunctionRef op);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and

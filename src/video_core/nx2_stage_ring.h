@@ -68,6 +68,8 @@ inline constexpr size_t RingToCWords = size_t{1} << 18;
 /// GpuSplit::WaitForSpace), commits it, and publishes every PublishEvery words, at the end of a
 /// batch, and after a drain from 8 words doubling (GpuSplit::PublishRing); the consumer spins
 /// briefly, then sleeps on an atomic wait (GpuSplit::BackLoop), and hands space back as it goes.
+/// Either wait may be a park point (nx2_stages.h, K3: B's on ring 3 and ring 2, C's on ring 3):
+/// it then also answers a park request, and the one asking wakes it where it sleeps.
 template <size_t Words>
 class StageRing {
 public:
