@@ -118,6 +118,7 @@ struct PeekStats {
     u64 resumes_may_skip{};
     u64 resumes_latched{}; ///< Resumed without a drain, latched by a release (=1)
     u64 resumes_skipped{}; ///< Resumed without a drain, met in memory (=1)
+    u64 sem_execute_deferred{}; ///< SEM_EXECUTE acquires checked on the back (SEMEXEC_DEFER)
 };
 
 thread_local PeekStats t_peek_stats;
@@ -140,7 +141,7 @@ void LogPeekStats(const PeekStats& stats, u64 window_ns) {
              "{:.0f}, queued release {:.0f}, not monotonic {:.0f}, new {:.0f}, untracked {:.0f}; "
              "met in memory but not after the drain {:.0f} (may skip {:.0f}) | resumes {:.0f} "
              "(met in memory {:.0f}, may skip {:.0f}; skipped: latched {:.0f}, met {:.0f}) | "
-             "words {} ({} went down), releases queued {}",
+             "sem execute acquires deferred {:.0f} | words {} ({} went down), releases queued {}",
              rate(stats.acquires[0] + stats.acquires[1] + stats.acquires[2]),
              rate(stats.acquires[0]), rate(stats.acquires[1]), rate(stats.acquires[2]),
              rate(stats.met_in_memory[0] + stats.met_in_memory[1] + stats.met_in_memory[2]),
@@ -151,8 +152,8 @@ void LogPeekStats(const PeekStats& stats, u64 window_ns) {
              verdict(Peek::Verdict::New), verdict(Peek::Verdict::Untracked),
              rate(stats.met_then_unmet), rate(stats.may_skip_unmet), rate(stats.resumes),
              rate(stats.resumes_met), rate(stats.resumes_may_skip), rate(stats.resumes_latched),
-             rate(stats.resumes_skipped), tracker.Words(), tracker.WordsNotMonotonic(),
-             tracker.QueuedReleases());
+             rate(stats.resumes_skipped), rate(stats.sem_execute_deferred), tracker.Words(),
+             tracker.WordsNotMonotonic(), tracker.QueuedReleases());
 }
 
 PeekStats& PeekStatsNow() {
@@ -251,6 +252,32 @@ void PeekAfter(DmaPusher& dma_pusher, const PeekRead& read, GPUVAddr address, u3
     } else if ((reported & (reported - 1)) == 0) {
         LOG_WARNING(HW_GPU, "Acquire peek: {} acquires met in memory but not after the drain",
                     reported);
+    }
+}
+
+// EDEN_NX2_SEMEXEC_DEFER=1 (ProcessSemaphoreExecute): read once.
+bool SemExecuteDefer() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SEMEXEC_DEFER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+// A SEM_EXECUTE acquire's check: it only logs a value it finds unmet.
+void CheckSemExecute(u32 operation, GPUVAddr address, u32 word, u32 payload) {
+    const bool ready = operation == 0   ? word == payload
+                       : operation == 2 ? word >= payload
+                       : operation == 3 ? static_cast<s32>(word - payload) >= 0
+                       : operation == 4 ? (word & payload) != 0
+                       : operation == 5 ? (word & payload) == 0
+                                        : true;
+    if (!ready) {
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1) < 8) {
+            LOG_WARNING(HW_GPU, "SEM_EXECUTE op {} at {:#x}: {:#x} vs {:#x} not met, continuing",
+                        operation, address, word, payload);
+        }
     }
 }
 
@@ -589,22 +616,20 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         return;
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
+    // The check only logs: with EDEN_NX2_SEMEXEC_DEFER=1 and the split on, the back releases the
+    // fences and checks after what was sent before, as after a drain, and the front goes on.
+    if (SemExecuteDefer() && VideoCommon::GpuSplit::Get().Active()) {
+        CountPeek(&PeekStats::sem_execute_deferred);
+        OnBack([rasterizer = dma_pusher.rasterizer, memory_manager = &dma_pusher.memory_manager,
+                operation, address, payload] {
+            rasterizer->ReleaseFences();
+            CheckSemExecute(operation, address, memory_manager->Read<u32>(address), payload);
+        });
+        return;
+    }
     DrainBack(VideoCommon::Nx2Profile::DrainSite::PullerExecute);
     dma_pusher.rasterizer->ReleaseFences();
-    const u32 word = dma_pusher.memory_manager.Read<u32>(address);
-    const bool ready = operation == 0   ? word == payload
-                       : operation == 2 ? word >= payload
-                       : operation == 3 ? static_cast<s32>(word - payload) >= 0
-                       : operation == 4 ? (word & payload) != 0
-                       : operation == 5 ? (word & payload) == 0
-                                        : true;
-    if (!ready) {
-        static std::atomic<u32> reported{};
-        if (reported.fetch_add(1) < 8) {
-            LOG_WARNING(HW_GPU, "SEM_EXECUTE op {} at {:#x}: {:#x} vs {:#x} not met, continuing",
-                        operation, address, word, payload);
-        }
-    }
+    CheckSemExecute(operation, address, dma_pusher.memory_manager.Read<u32>(address), payload);
 }
 
 /// Calls a GPU puller method.
