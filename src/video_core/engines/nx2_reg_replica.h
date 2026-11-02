@@ -7,7 +7,10 @@
 #include <bitset>
 
 #include "common/common_types.h"
-#include "video_core/nx2_stages.h"
+
+namespace Tegra::Engines {
+class Maxwell3D;
+}
 
 // Back stages (nx2_stages.h): what keeps a stage's replica of Maxwell3D equal to the primary A
 // runs. Header-only, without Maxwell3D itself, so the unit tests take it alone. Owner: T2.
@@ -19,7 +22,7 @@ inline constexpr u32 NumRegs = 0xE00;
 using DirtyFlags = std::bitset<256>;
 using DirtyTables = std::array<std::array<u8, NumRegs>, 2>;
 
-/// A delta word:
+/// A delta word (in a record after its header, nx2_stage_ring.h):
 ///   bits 0-15  the register (method)
 ///   bit 16     Dirty: A's write set the register's dirty flags (ProcessDirtyRegisters)
 ///   bit 17     Changed: A's write was a light change (another value, or an executable method)
@@ -41,13 +44,29 @@ constexpr u32 DeltaValue(u64 word) {
 
 /// A's register capture: the Maxwell3D writes since the last record A sent, one word per register
 /// (its last value, Dirty and Changed ORed over its writes), in the order of their first writes.
+/// Maxwell3D's stage_capture points at it while staged (Nx2Stages::Capture, nx2_stage_api.h).
 class RegCapture {
 public:
-    /// ProcessDirtyRegisters' write.
-    void Note(u32 method, u32 value, bool changed, bool executable) {}
-    /// Sends what was captured as one Call record applying it to the replica, and starts over
-    /// (Nx2Stages::FlushBeforeForward).
-    void FlushTo(Nx2Stages::Ring ring) {}
+    /// ProcessDirtyRegisters' write, made after its DrawDeferred (S18). Writes
+    /// ProcessDirtyRegisters does not make (const_buffer.offset +=, shadow_scratch, ...) are noted
+    /// with dirty false.
+    /// The constant buffer data registers (const_buffer.buffer[0..15]) are left out but at =2
+    /// (S5/4: no stage reads them). A write to another engine than Source() first sends
+    /// Nx2Stages::PostTarget(Ring::ToB, &engine): what is pending goes there, for the old one.
+    void Note(Tegra::Engines::Maxwell3D& engine, u32 method, u32 value, bool dirty, bool changed) {}
+
+    /// Delta words pending (each record from A takes them, Nx2Stages::Reserve).
+    [[nodiscard]] u32 PendingWords() const {
+        return 0;
+    }
+    /// The engine they were written to.
+    [[nodiscard]] Tegra::Engines::Maxwell3D* Source() const {
+        return nullptr;
+    }
+    /// Writes the PendingWords() words at `out` and starts over.
+    void TakeWords(u64* out) {}
+    /// Drops everything (Start, Stop).
+    void Reset() {}
 };
 
 /// Applies delta words to a replica's registers (B and C; T2): writes each value, sets the
@@ -58,17 +77,20 @@ template <typename NoteLight>
 void ApplyDelta(u32* regs, DirtyFlags& flags, const DirtyTables& tables, const u64* words,
                 u32 count, NoteLight&& note_light) {}
 
-/// Side state (D4): what a draw reads of Maxwell3D outside its registers, sent when it changes or
-/// with a draw (T5). Wire format: a header word (bits 0-15 the parts, bits 32-63 the words after
-/// it), then the parts in the order of their bits; each part's layout is T2's.
+/// Side state (D4): what a draw reads of Maxwell3D outside its registers. A sends the parts that
+/// changed since they were last sent (generation counters, S5/2) before the draw reading them
+/// (T5, Nx2Stages::WriteSideState). Wire format: a header word (bits 0-15 the parts, bits 32-63
+/// the words after it), then the parts in the order of their bits; each part's layout is T2's.
 enum SidePart : u32 {
     SideConstBuffers = 1 << 0,  ///< state.shader_stages[].const_buffers (binds)
-    SideEngineState = 1 << 1,   ///< engine_state
-    SideReplaceTable = 1 << 2,  ///< replace_table
-    SideExecuteOn = 1 << 3,     ///< execute_on
-    SideDrawState = 1 << 4,     ///< draw_manager.draw_state with its inline index data
-    SideIndirectState = 1 << 5, ///< draw_manager.indirect_state
-    SideDirtyFlags = 1 << 6,    ///< dirty.flags set outside ProcessDirtyRegisters: ORed in
+    SideRebound = 1 << 1,       ///< light.rebound set since the last send: ORed in (S2)
+    SideEngineState = 1 << 2,   ///< engine_state
+    SideReplaceTable = 1 << 3,  ///< replace_table
+    SideExecuteOn = 1 << 4,     ///< execute_on
+    SideDrawState = 1 << 5,     ///< draw_manager.draw_state with its inline index data
+    SideIndirectState = 1 << 6, ///< draw_manager.indirect_state
+    SideDrawTexture = 1 << 7,   ///< draw_manager.draw_texture_state (S18)
+    SideDirtyFlags = 1 << 8,    ///< dirty.flags set outside ProcessDirtyRegisters: ORed in
 };
 
 constexpr u64 MakeSideHeader(u32 parts, u32 words) {

@@ -214,4 +214,8 @@ void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {}
 
 void UninstallProxy(Core::System& system) {}
 
+Nx2StageProxy* Proxy() {
+    return nullptr;
+}
+
 } // namespace VideoCommon::Nx2Stages
