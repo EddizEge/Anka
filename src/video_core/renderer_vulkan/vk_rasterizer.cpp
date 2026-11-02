@@ -4975,17 +4975,33 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
     // SetEngine: =2's lockstep keeps B at the end of this packet, its replica this draw's) with B
     // parked, compared. The draw records with the old setup. A light draw that differs is an
     // error (the split chain took a light way the full setup would not match); the reverse (the
-    // old chain light where the split one set up in full) is not seen here.
+    // old chain light where the split one set up in full) is not seen here. Besides the
+    // descriptors (CompareSetups), as CheckLightVerify (esdeger-6): the pipeline the cache looks up
+    // for B's replica (B parked: safe here), a render pass the old setup begins and the dynamic
+    // state it records after it. Not compared: the geometry binds (no geometry mirror yet) and
+    // the rescaling and render area outside EDEN_NX2_LIGHT_UNIFORM=2 (TakeSetupSnapshot, T6).
     GraphicsPipeline::SetupSnapshot split;
     pipeline.TakeSetupSnapshot(split, handles);
     GraphicsPipeline::SetupSnapshot full;
     bool configured = false;
+    GraphicsPipeline* looked_up = nullptr;
+    u64 render_passes = 0;
+    u64 dynamic_records = 0;
     VideoCommon::Nx2Stages::ParkB([&] {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        looked_up = pipeline_cache.CurrentGraphicsPipeline();
+        const u64 render_pass_begins = scheduler.RenderPassBegins();
         configured = pipeline.Configure(is_indexed);
-        if (configured) {
-            pipeline.TakeSetupSnapshot(full, {});
+        if (!configured) {
+            return;
         }
+        pipeline.TakeSetupSnapshot(full, {});
+        const u64 records = scheduler.RecordCount();
+        stage_dynamic = {.active = true, .pipeline = &pipeline};
+        UpdateDynamicStates();
+        stage_dynamic = {};
+        dynamic_records = scheduler.RecordCount() - records;
+        render_passes = scheduler.RenderPassBegins() - render_pass_begins;
     });
     if (!configured) {
         return;
@@ -5005,7 +5021,18 @@ void RasterizerVulkan::CheckSplitSetup(GraphicsPipeline& pipeline, std::span<con
     thread_local u64 mismatches{};
     thread_local u64 light_errors{};
     ++checks;
-    const std::string differences = pipeline.CompareSetups(split, full, bytes);
+    std::string differences = pipeline.CompareSetups(split, full, bytes);
+    if (looked_up != &pipeline) {
+        differences += fmt::format(" pipeline: the cache looks up {} for the packet's {};",
+                                   fmt::ptr(looked_up), fmt::ptr(&pipeline));
+    }
+    if (render_passes != 0) {
+        differences += fmt::format(" the old setup began {} render passes;", render_passes);
+    }
+    if (dynamic_records != 0) {
+        differences += fmt::format(" the old setup recorded {} dynamic state commands after it;",
+                                   dynamic_records);
+    }
     if (!differences.empty()) {
         ++mismatches;
         light_errors += light ? 1 : 0;
