@@ -4,11 +4,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <span>
 #include <vector>
 
 #include "common/common_types.h"
 #include "common/settings.h"
+#include "video_core/nx2_stage_draw.h"
 #include "video_core/query_cache/types.h"
 
 // Back stages, cut c (T7): what B decides when the Vulkan rasterizer splits an event between B and
@@ -102,6 +105,91 @@ private:
 
     std::vector<Range> ranges;
     size_t prune_at = MinPrune;
+};
+
+/// B: whether a draw packet binds every vertex stream again (ForceVertexBinds) instead of only
+/// those B's replica has dirty. `reset`: B's flags were cleared by binds C's geometry mirror did
+/// not see (the stages began, a join's old setup bound straight to C's command buffer, a light
+/// attempt fell back); `tick` / `forced_tick`: C's command buffer now and at the last forced
+/// packet. Once per command buffer B marks the streams' use (Buffer::MarkUsage) as the old path
+/// does after each submission, which keeps uploads from being reordered ahead of draws C binds
+/// from the mirror (CanReorderUpload); packets B made before it saw the new command buffer are
+/// not covered.
+[[nodiscard]] constexpr bool GeometryForced(bool reset, u64 tick, u64 forced_tick) noexcept {
+    return reset || tick != forced_tick;
+}
+
+/// C: the geometry mirror (§3.6/6; R2 kayit-4, T3 R2 geometri-2 / geometri-3). The vertex streams
+/// B's packets bound, kept while B keeps them live (DrawToC::vertex_live), and the index buffer of
+/// the packet in hand. Right before the draw C binds again what its command buffer may have lost
+/// since the packet's records were replayed: a submission, or InvalidateState (a blit's pipeline
+/// leaves the dynamic strides undefined). Only live streams bind again, never a stream B stopped
+/// using (its buffer may be gone), and only the packet's own index buffer (every indexed or quad
+/// draw binds it in its packet).
+class GeometryMirror {
+public:
+    static constexpr u32 VertexSlots = 32;
+    static constexpr u8 IndexSlot = 32;
+
+    /// After the packet's records were replayed at `tick`, or in a join before (`early`: B's
+    /// record owner hook, maybe in an older command buffer). Returns the vertex streams the packet
+    /// bound: clean where it bound them in this command buffer, to bind again where `early`.
+    u32 Apply(std::span<const GeometrySlot> slots, u32 live, u64 tick, bool early) {
+        u32 bound = 0;
+        has_index = false;
+        for (const GeometrySlot& slot : slots) {
+            if (slot.slot < VertexSlots) {
+                vertex[slot.slot] = slot;
+                bound |= 1u << slot.slot;
+            } else if (slot.slot == IndexSlot) {
+                index = slot;
+                has_index = true;
+            }
+        }
+        known = (known | bound) & live;
+        index_tick = early ? NoTick : tick;
+        return bound;
+    }
+
+    /// Before the draw: the live streams to bind again (`dirty`: the command buffer may not hold
+    /// them).
+    [[nodiscard]] u32 Rebind(u32 live, u32 dirty) const noexcept {
+        return live & dirty & known;
+    }
+    /// Live dirty streams the mirror does not know (none expected: every bind B makes is in a
+    /// packet, and B sends every stream again after binds outside one).
+    [[nodiscard]] u32 Missing(u32 live, u32 dirty) const noexcept {
+        return live & dirty & ~known;
+    }
+    /// Whether the packet's index buffer binds again: replayed in another command buffer.
+    [[nodiscard]] bool RebindIndex(u64 tick) const noexcept {
+        return has_index && index_tick != tick;
+    }
+
+    [[nodiscard]] const GeometrySlot& Vertex(u32 slot) const noexcept {
+        return vertex[slot];
+    }
+    [[nodiscard]] const GeometrySlot& Index() const noexcept {
+        return index;
+    }
+    [[nodiscard]] u32 Known() const noexcept {
+        return known;
+    }
+
+    void Clear() noexcept {
+        known = 0;
+        has_index = false;
+        index_tick = NoTick;
+    }
+
+private:
+    static constexpr u64 NoTick = ~u64{0};
+
+    std::array<GeometrySlot, VertexSlots> vertex{};
+    GeometrySlot index{};
+    u64 index_tick = NoTick;
+    u32 known = 0;
+    bool has_index = false;
 };
 
 } // namespace VideoCommon::Nx2Stages

@@ -386,6 +386,13 @@ private:
     /// B: whether a write of [address, address + size) hits a pool C may still read for work
     /// B sent (the ones C ran dropped first).
     [[nodiscard]] bool WritesPoolsB(GPUVAddr address, u64 size);
+    /// B, before a draw packet's buffer half: every vertex stream binds again where
+    /// GeometryForced says so (nx2_stage_split.h), else only those B's replica has dirty.
+    void ForceGeometryB(Tegra::Engines::Maxwell3D& mb);
+    /// An old Draw / DrawIndirect with the stages on (A or B in a join, the front after a drain):
+    /// B's replica binds every vertex stream, and B's next packet sends them all (C's mirror did
+    /// not see these binds).
+    void ForceGeometryForJoin();
 
     /// C: ring 3's records.
     static void StageDrawThunk(const u64* payload, u32 words);
@@ -394,6 +401,11 @@ private:
     void RunStageRecords(RecordList* records, u64 seq);
     void RunStageInvalidations(const u64* ranges, u32 count);
     void RecordStageDraw(const StageDrawParams& params);
+    /// C, once a packet's records were replayed (from `replay_tick` on): its geometry binds into
+    /// the mirror.
+    void ApplyGeometryC(const StageDrawReader& in, u64 replay_tick);
+    /// C, right before the draw: what the command buffer lost since binds again (kayit-4).
+    void BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head);
     void ClearRecord(u32 layer_count);
     void WaitForIdleRecord();
     /// C: a packet's seq recorded; the anchor's held back while a light draw may repair with
@@ -571,6 +583,15 @@ private:
     /// B (T7c review finding 3): the guest memory query reports B sent C write ([address,
     /// address + 16)): C writes a payload release at once, so a write of B's own there waits.
     VideoCommon::Nx2Stages::InFlightRanges stage_query_writes;
+    /// B (geometry mirror): the next draw packet sends every vertex stream (GeometryForced).
+    bool geometry_reset_b{true};
+    /// B: C's command buffer tick at the last packet that sent every vertex stream.
+    u64 geometry_tick_b{};
+    /// C: the geometry mirror (nx2_stage_split.h).
+    VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
+    /// C: B's record owner hook replayed B's list in a join since C's last draw packet: that
+    /// packet's binds may be in an older command buffer. Written by B with C parked.
+    bool geometry_replayed_c{};
 };
 
 } // namespace Vulkan

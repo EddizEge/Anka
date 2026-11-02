@@ -438,6 +438,12 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectCount();
 
+    /// The vertex streams BindHostVertexBuffers binds (a non-null binding of non-zero size): back
+    /// stages, cut c, the geometry mirror's live streams (DrawToC::vertex_live).
+    [[nodiscard]] u32 EnabledVertexBuffersMask() const noexcept {
+        return enabled_vertex_buffers_mask;
+    }
+
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
     template <typename Func>

@@ -77,10 +77,13 @@ struct DrawToC {
     u16 handles;        ///< u32 texture / sampler pool indices (tail part 2)
     u16 geometry_slots; ///< GeometrySlot (tail part 3)
     u16 draw_words;     ///< u64 draw parameter words (tail part 4)
+    u32 vertex_live;    ///< The vertex streams B's buffer cache has enabled after the packet
+                        ///< (EnabledVertexBuffersMask): the geometry mirror's live streams (T7)
 };
 static_assert(std::is_trivially_copyable_v<DrawToC>);
 static_assert(std::is_trivially_copyable_v<GeometrySlot>);
 static_assert(sizeof(DrawToC) % sizeof(u64) == 0 && alignof(DrawToC) <= alignof(u64));
+static_assert(sizeof(DrawToC) == 72, "vertex_live takes the head's tail padding");
 static_assert(sizeof(GeometrySlot) % sizeof(u64) == 0 && alignof(GeometrySlot) <= alignof(u64));
 
 /// u64 words of the head and of one GeometrySlot.
