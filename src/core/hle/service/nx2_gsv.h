@@ -2017,6 +2017,10 @@ private:
         return replies.get();
     }
 
+    // Commands below this without a handler answer from the table even when it lists them only
+    // later (TIPC command numbers go up to 0xffef; vi2's seen so far up to 351).
+    static constexpr u32 MaxTableCommand = 4096;
+
     // Answers from the table: Bananza's per-frame queries (104, 105: empty success before), its
     // setup queries (107, 261, 265, 267, 271, 351: auto-stubbed before) and any other command in
     // the table when the session opens that has no handler of its own.
@@ -2050,6 +2054,15 @@ private:
                 handlers_tipc.erase(it);
             }
             functions.push_back({command, &INx2Vi2Session::ReplyFromTable, "ReplyFromTable (EDEN_NX2_VI2_REPLY)"});
+        }
+        // Every other command without a handler too, so a command the game has not sent before
+        // answers from the table once a line for it is added while it runs: the auto stub's empty
+        // success otherwise, as before. EDEN_NX2_VI2_DIAG marks its first call NEW.
+        for (u32 command = 0; command < MaxTableCommand; ++command) {
+            if (!commands.contains(command) && !handlers_tipc.contains(command)) {
+                functions.push_back({command, &INx2Vi2Session::ReplyFromTable,
+                                     "ReplyFromTable (EDEN_NX2_VI2_REPLY, no handler)"});
+            }
         }
         RegisterHandlersTipc(functions.data(), functions.size());
         std::scoped_lock lk{replies.mutex};
