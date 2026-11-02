@@ -532,6 +532,30 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
                      diag.updates, diag.assigned, diag.style_set, diag.pad_input, diag.style,
                      diag.connected, diag.active, diag.written, diag.seen_buttons,
                      diag.written_buttons, diag.aruid);
+            for (std::size_t slot = 0; slot < AruidIndexMax; ++slot) {
+                const auto* slot_data = applet_resource_holder.applet_resource->GetAruidDataByIndex(slot);
+                const auto& first = controller_data[slot][0];
+                if (slot_data == nullptr || !slot_data->flag.is_assigned || first.shared_memory == nullptr) {
+                    continue;
+                }
+                const auto* entry = first.shared_memory;
+                const auto& last = entry->fullkey_lifo.ReadCurrentEntry().state;
+                LOG_INFO(Service_HID,
+                         "nx2 hid diag npad1: slot {} npad connected {} style tag 0x{:x} assignment {} device type "
+                         "0x{:x} system properties 0x{:x} buttons properties 0x{:x} battery {} color attribute {} "
+                         "footer {} lark {}/{} lucia {} lager {}; fullkey last: buttons 0x{:x} attribute 0x{:x} "
+                         "sampling {}",
+                         slot, first.is_connected, static_cast<u32>(entry->style_tag.raw),
+                         static_cast<u32>(entry->assignment_mode), entry->device_type.raw,
+                         entry->system_properties.raw, entry->button_properties.raw,
+                         static_cast<u32>(entry->battery_level_dual),
+                         static_cast<u32>(entry->fullkey_color.attribute),
+                         static_cast<u32>(entry->applet_footer_type),
+                         static_cast<u32>(entry->lark_type_l_and_main),
+                         static_cast<u32>(entry->lark_type_r), static_cast<u32>(entry->lucia_type),
+                         static_cast<u32>(entry->lager_type), static_cast<u64>(last.npad_buttons.raw),
+                         static_cast<u32>(last.connection_status.raw), last.sampling_number);
+            }
             diag.updates = diag.assigned = diag.style_set = diag.pad_input = 0;
             diag.connected = diag.active = diag.written = 0;
             diag.seen_buttons = diag.written_buttons = 0;
