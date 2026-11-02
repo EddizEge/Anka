@@ -327,7 +327,6 @@ private:
     void ClearB(u32 layer_count);
     void DrawTextureB();
     void WaitForIdleB();
-    void TickFrameB();
     /// B: a join of its own: C parked, the old bodies run here (b_in_join).
     template <typename Func>
     void JoinB(Func&& func);
@@ -371,7 +370,6 @@ private:
     void RecordStageDraw(const StageDrawParams& params);
     void ClearRecord(u32 layer_count);
     void WaitForIdleRecord();
-    void TickFrameC();
     /// C: a packet's seq recorded; the anchor's held back while a light draw may repair with
     /// its descriptor entries (their uniform data in B's staging pool).
     void NoteStageSeq(u64 seq);

@@ -2326,9 +2326,19 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
-    if (SplitOnB()) [[unlikely]] {
-        TickFrameB();
-        return;
+    if (split_draws) [[unlikely]] {
+        if (SplitOnB()) {
+            // Never split (F4 / F5): Composite's TickFrame runs on C inside a ParkB (GPU::TickWork)
+            // or on B the record owner (the proxy's joins); B outside one joins.
+            JoinB([this] { TickFrame(); });
+            return;
+        }
+        // Both stages at one point of the stream: the buffer cache's half here too (its garbage
+        // collector's downloads never inside B's packet). B's next draw is set up in full and
+        // finds the targets' device ranges again; nothing repairs with C's anchor.
+        light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
+        stage_targets.valid = false;
+        ReleaseAnchorC();
     }
     NoteLightWork();
     draw_counter = 0;
@@ -4779,30 +4789,6 @@ void RasterizerVulkan::WaitForIdleB() {
     StageToC([this] { WaitForIdleRecord(); });
 }
 
-void RasterizerVulkan::TickFrameB() {
-    NoteLightWork();
-    // The targets' device ranges are found again (a mapping that changed under the same
-    // registers).
-    stage_targets.valid = false;
-    StageBufferWork([&] { buffer_cache.TickFrame(); });
-    StageToC([this] { TickFrameC(); });
-}
-
-void RasterizerVulkan::TickFrameC() {
-    draw_counter = 0;
-    guest_descriptor_queue.TickFrame();
-    compute_pass_descriptor_queue.TickFrame();
-    descriptor_buffer_ring.TickFrame();
-    fence_manager.TickFrame();
-    staging_pool.TickFrame();
-    {
-        std::scoped_lock lock{texture_cache.mutex};
-        texture_cache.TickFrame();
-    }
-    // B's next draw is set up in full (its epoch moved): nothing repairs with the anchor.
-    ReleaseAnchorC();
-}
-
 void RasterizerVulkan::StageDrawThunk(const u64* payload, u32 words) {
     const StageDrawReader in{payload, words};
     StageDrawParams params;
@@ -4952,7 +4938,8 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
             Profile::Add(Profile::Counter::LightRefusedTargets, 1);
             // B does not see this part of LightFollowable: its next draw in full. The light
             // draws it sends meanwhile are repaired with the anchor's payload, so its seq stays
-            // held (esdeger-5 / omur-2): only a new anchor, ReleaseAnchorC or TickFrameC let go.
+            // held (esdeger-5 / omur-2): only a new anchor or ReleaseAnchorC (TickFrame, a broken
+            // chain) lets go.
             light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
         }
     }
