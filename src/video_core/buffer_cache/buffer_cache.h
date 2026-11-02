@@ -1725,11 +1725,17 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
-            // As DeleteBuffer: memo entries naming this id are stale from here on.
-            if (inline_buffer_id.Value() < vertex_memo_generations.size()) {
-                ++vertex_memo_generations[inline_buffer_id.Value()];
+            if (Nx2InlineFix()) {
+                // DeleteBuffer drops it from page_table (a later CreateBuffer would join a
+                // freed slot found there) and the LRU list, and keeps it until the GPU is done.
+                DeleteBuffer(inline_buffer_id, true);
+            } else {
+                // As DeleteBuffer: memo entries naming this id are stale from here on.
+                if (inline_buffer_id.Value() < vertex_memo_generations.size()) {
+                    ++vertex_memo_generations[inline_buffer_id.Value()];
+                }
+                slot_buffers.erase(inline_buffer_id);
             }
-            slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         channel_state->index_buffer = Binding{
@@ -2890,6 +2896,11 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    if (buffer_id == inline_buffer_id && Nx2InlineFix()) {
+        // EDEN_NX2_INLINE_FIX: the collector may take the inline index buffer; made again at its
+        // next use.
+        inline_buffer_id = NULL_BUFFER_ID;
+    }
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }

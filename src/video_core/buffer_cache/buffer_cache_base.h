@@ -119,6 +119,14 @@ inline int Nx2UboBindSkip() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_UBO_BIND_SKIP");
 }
+/// EDEN_NX2_INLINE_FIX (Duck912 4a6b890171): the inline index buffer, when it grows or the
+/// collector takes it, is deleted as any other buffer (DeleteBuffer: unregistered from page_table
+/// and the LRU list, destroyed after the GPU is done with it). =0 erases its slot as before, which
+/// left page_table entries and an LRU item naming a freed slot and destroyed the buffer at once.
+inline bool Nx2InlineFix() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_INLINE_FIX") != 0;
+}
 /// EDEN_NX2_VERTEX_FAST=0: UpdateVertexBuffer tests page_table on every memo hit and keeps no
 /// per-stream memo, and vertex slots are reached through VertexBufferSlot's index check, as before.
 inline bool Nx2VertexFast() {
