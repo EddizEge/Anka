@@ -64,6 +64,15 @@ enum class Zone : u32 {
     SplitWait,    ///< Split GPU thread: the back waits for work
     ParameterFlush, ///< Macro parameters / command lists downloaded from the GPU (full GPU wait)
     LightDraw,      ///< Draws set up the light way (EDEN_NX2_LIGHT_DRAW, vk_rasterizer.cpp)
+    // Back stages (EDEN_NX2_BACK_STAGES, nx2_stages.h):
+    StageInWait,  ///< A stage waits for records
+    StageOutWait, ///< A stage waits for room in the ring to the next one
+    JoinWait,     ///< A (or B) waits for the stages below to park
+    ParkWait,     ///< A parked stage waits to go on; C waits for B to park (ParkB)
+    ReplicaApply, ///< Register deltas and side states applied to a replica
+    PacketBuild,  ///< A draw record built (side state, arguments)
+    ListReplay,   ///< C replays B's record list (cut c)
+    LightRepair,  ///< C repairs a light draw B decided (cut c)
     Count,
 };
 
@@ -75,6 +84,15 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait", "parameter flush", "light draw",
+    "stage in wait", "stage out wait", "join wait", "park wait", "replica apply",
+    "packet build", "list replay", "light repair",
+};
+
+/// Report's thread names for the back stages (nx2_stages.h): A, B (BC with cut a alone), C.
+inline constexpr std::array<const char*, 3> stage_report_names{
+    "GPU back thread",
+    "GPU memory stage",
+    "GPU record stage",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
@@ -133,7 +151,7 @@ struct HistogramData {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ticks{}; ///< See Ticks
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 128> counters{}; ///< See Counter
+    std::array<u64, 192> counters{}; ///< See Counter
     std::array<std::array<u64, 3>, 9> drains{}; ///< See DrainSite: calls, waits, wait ticks
     std::array<HistogramData, static_cast<size_t>(Histogram::Count)> histograms{};
     u64 child_ticks{}; ///< Time of the zones nested in the current one
@@ -290,6 +308,65 @@ enum class Counter : u32 {
     SyncMemoMissPartial,  ///< The slot held one overlapping or touching it, not covering it
     SyncMemoMissStamped,  ///< The slot covered it, but a 4 MiB region of it was stamped since
     SyncMemoMissUploaded, ///< Of the misses: the walk uploaded something
+    // Back stages (EDEN_NX2_BACK_STAGES, nx2_stages.h), where they happen:
+    JoinsA,          ///< Joins from A (JoinFromA); of them by reason, in JoinReason's order:
+    JoinsAEngine,
+    JoinsAChannel,
+    JoinsAValue,
+    JoinsAFlush,
+    JoinsACondition,
+    JoinsAUpload,
+    JoinsATagged,
+    JoinsAOther,
+    JoinCandidates,        ///< Ring 1 entries with an executable method of an engine but Maxwell3D
+    JoinCandidatesCompute, ///< Of JoinCandidates: KeplerCompute's
+    JoinsB,                ///< Joins from B (cut c)
+    Parks,                 ///< B parked for C (ParkB, cut c)
+    RingBytesB,            ///< Bytes written to ring 2 (A to B)
+    RingBytesC,            ///< Bytes written to ring 3 (B to C)
+    DeltaWords,            ///< Register delta words sent
+    SideStates,            ///< Side states sent
+    PassThrough,           ///< =3: ring 1 words run from A's ranges
+    LightRepairsState,     ///< Light draws C repaired: command state (cut c)
+    LightRepairsTexture,   ///< ... textures set up again
+    GeometryReplays,       ///< The geometry mirror recorded in full again (cut c)
+    // EDEN_NX2_STAGE_CHECK and =2:
+    HazardPages,      ///< The page summary said no GPU-written data, the caches said some (D6)
+    HazardUntracked,  ///< A write around the caches B did not see yet (S12)
+    HazardEpoch,      ///< Work C did that B's light epoch did not count yet (S12)
+    StageViolations,  ///< CheckStage reports
+    StageUnproxied,   ///< A reached the real rasterizer outside a join (S3)
+    VerifyChecks,     ///< =2: replica comparisons
+    VerifyMismatches, ///< Of VerifyChecks: differed
+    // Diagnostics choosing the cut c classes (T4; counted unstaged too, where draws are set up):
+    TextureBufferDraws,    ///< Draws whose pipeline has texture buffers
+    ImageBufferDraws,      ///< ... image buffers
+    TransformFeedbackDraws,
+    ResetFixLists,         ///< Indirect draw reset fix lists set up (RESETFIX)
+    ResetFixFlushes,       ///< Of ResetFixLists: with a FlushRegion
+    InlineWrites,          ///< Inline-to-memory writes (AccelerateInlineToMemory)
+    InlineOnImages,        ///< Of InlineWrites: on a page an image holds
+    InlineOnPools,         ///< ... on a texture header or sampler pool page
+    DmaWrites,             ///< MaxwellDMA copies and fills writing guest memory
+    DmaOnImages,
+    DmaOnPools,
+    CbDataOnImages,        ///< Constant buffer data writes on a page an image holds
+    CbDataOnPools,         ///< ... on a texture header or sampler pool page
+    HoldsGpuWrittenQuery,  ///< HoldsGpuWrittenData true for: the query cache
+    HoldsGpuWrittenBuffer, ///< ... the buffer cache
+    HoldsGpuWrittenTexture, ///< ... the texture cache
+    LightRecordedSubmit,   ///< Light candidates after recorded commands, made by: a submit
+    LightRecordedTickWork, ///< ... TickWork (presents, CPU requests)
+    LightRecordedEvent,    ///< ... another event (clear, query, fence, ...)
+    TickWorkRequests,      ///< Requests TickWork ran
+    TickWorkFlushes,       ///< Of them: CPU flush requests
+    TickWorkComposites,    ///< ... presents
+    ComputeDispatches,
+    Clears,
+    FencesSignaled,
+    MemoryDirtyQueries,    ///< MemoryManager::IsMemoryDirty calls
+    MemoryDirtyThunks,     ///< Of them: DmaPusher's deferred ones
+    ConditionalRenderings, ///< AccelerateConditionalRendering calls (S1)
     Count,
 };
 
@@ -443,7 +520,11 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (const u64 draws = data.count[static_cast<size_t>(Zone::Draw)]; draws != 0) {
         const u64 waiting = exclusive_ns[static_cast<size_t>(Zone::SplitWait)] +
                             exclusive_ns[static_cast<size_t>(Zone::Idle)] +
-                            exclusive_ns[static_cast<size_t>(Zone::PendingSleep)];
+                            exclusive_ns[static_cast<size_t>(Zone::PendingSleep)] +
+                            exclusive_ns[static_cast<size_t>(Zone::StageInWait)] +
+                            exclusive_ns[static_cast<size_t>(Zone::StageOutWait)] +
+                            exclusive_ns[static_cast<size_t>(Zone::JoinWait)] +
+                            exclusive_ns[static_cast<size_t>(Zone::ParkWait)];
         const u64 busy = window > waiting ? window - waiting : 0;
         line += fmt::format(" | busy {:.1f} ms over {:.0f} draws: {:.3f} us/draw",
                             static_cast<double>(busy) * 1000.0 / window,
@@ -634,6 +715,68 @@ inline void Report(const char* thread_name = "GPU thread") {
             counter(Counter::SyncMemoMissEmpty), counter(Counter::SyncMemoMissOther),
             counter(Counter::SyncMemoMissPartial), counter(Counter::SyncMemoMissStamped),
             counter(Counter::SyncMemoMissUploaded));
+    }
+    // Back stages and the diagnostics for them: each group only when it counted anything.
+    const auto any = [&](Counter first, Counter last) {
+        for (auto i = static_cast<size_t>(first); i <= static_cast<size_t>(last); ++i) {
+            if (data.counters[i] != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (any(Counter::JoinsA, Counter::GeometryReplays)) {
+        line += fmt::format(
+            " | stages: joins from A {:.0f} (engine {:.0f}, channel {:.0f}, value {:.0f}, flush "
+            "{:.0f}, condition {:.0f}, upload {:.0f}, tagged {:.0f}, other {:.0f}; candidates "
+            "{:.0f}, compute {:.0f}), joins from B {:.0f}, parks {:.0f}, ring KiB B {:.0f} C "
+            "{:.0f}, delta words {:.0f}, side states {:.0f}, pass-through words {:.0f}, light "
+            "repairs state {:.0f} textures {:.0f}, geometry replays {:.0f}",
+            counter(Counter::JoinsA), counter(Counter::JoinsAEngine),
+            counter(Counter::JoinsAChannel), counter(Counter::JoinsAValue),
+            counter(Counter::JoinsAFlush), counter(Counter::JoinsACondition),
+            counter(Counter::JoinsAUpload), counter(Counter::JoinsATagged),
+            counter(Counter::JoinsAOther), counter(Counter::JoinCandidates),
+            counter(Counter::JoinCandidatesCompute), counter(Counter::JoinsB),
+            counter(Counter::Parks), counter(Counter::RingBytesB) / 1024.0,
+            counter(Counter::RingBytesC) / 1024.0, counter(Counter::DeltaWords),
+            counter(Counter::SideStates), counter(Counter::PassThrough),
+            counter(Counter::LightRepairsState), counter(Counter::LightRepairsTexture),
+            counter(Counter::GeometryReplays));
+    }
+    if (any(Counter::HazardPages, Counter::VerifyMismatches)) {
+        line += fmt::format(" | stage check: violations {:.0f}, unproxied {:.0f}, hazards pages "
+                            "{:.0f} untracked {:.0f} epoch {:.0f}; verified {:.0f} ({:.0f} "
+                            "mismatches)",
+                            counter(Counter::StageViolations), counter(Counter::StageUnproxied),
+                            counter(Counter::HazardPages), counter(Counter::HazardUntracked),
+                            counter(Counter::HazardEpoch), counter(Counter::VerifyChecks),
+                            counter(Counter::VerifyMismatches));
+    }
+    if (any(Counter::TextureBufferDraws, Counter::ConditionalRenderings)) {
+        line += fmt::format(
+            " | stage diagnostics: texture buffer draws {:.0f}, image buffer draws {:.0f}, "
+            "transform feedback draws {:.0f}, reset fix lists {:.0f} ({:.0f} flushed), inline "
+            "writes {:.0f} ({:.0f} on images, {:.0f} on pools), DMA writes {:.0f} ({:.0f} on "
+            "images, {:.0f} on pools), cb data on images {:.0f} on pools {:.0f}, GPU-written data "
+            "held: query {:.0f} buffer {:.0f} texture {:.0f}, light candidates after recording: "
+            "submit {:.0f} tick work {:.0f} event {:.0f}, tick work requests {:.0f} ({:.0f} "
+            "flushes, {:.0f} presents), compute {:.0f}, clears {:.0f}, fences {:.0f}, memory "
+            "dirty queries {:.0f} ({:.0f} deferred), conditional renderings {:.0f}",
+            counter(Counter::TextureBufferDraws), counter(Counter::ImageBufferDraws),
+            counter(Counter::TransformFeedbackDraws), counter(Counter::ResetFixLists),
+            counter(Counter::ResetFixFlushes), counter(Counter::InlineWrites),
+            counter(Counter::InlineOnImages), counter(Counter::InlineOnPools),
+            counter(Counter::DmaWrites), counter(Counter::DmaOnImages),
+            counter(Counter::DmaOnPools), counter(Counter::CbDataOnImages),
+            counter(Counter::CbDataOnPools), counter(Counter::HoldsGpuWrittenQuery),
+            counter(Counter::HoldsGpuWrittenBuffer), counter(Counter::HoldsGpuWrittenTexture),
+            counter(Counter::LightRecordedSubmit), counter(Counter::LightRecordedTickWork),
+            counter(Counter::LightRecordedEvent), counter(Counter::TickWorkRequests),
+            counter(Counter::TickWorkFlushes), counter(Counter::TickWorkComposites),
+            counter(Counter::ComputeDispatches), counter(Counter::Clears),
+            counter(Counter::FencesSignaled), counter(Counter::MemoryDirtyQueries),
+            counter(Counter::MemoryDirtyThunks), counter(Counter::ConditionalRenderings));
     }
     // Counted where drains are called: the front's line with the split on.
     std::string drains;
