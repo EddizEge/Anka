@@ -464,6 +464,24 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     samplers.reserve(num_textures);
 
     namespace Profile = VideoCommon::Nx2Profile;
+    if constexpr (Spec::has_texture_buffers || Spec::has_image_buffers) {
+        // Stage diagnostics: full setups of a pipeline with texture or image buffers.
+        if (Profile::Enabled()) {
+            const auto any_stage = [this](auto&& descriptors) {
+                return std::ranges::any_of(stage_infos, [&](const Shader::Info& stage_info) {
+                    return !descriptors(stage_info).empty();
+                });
+            };
+            if (Spec::has_texture_buffers &&
+                any_stage([](const Shader::Info& i) -> auto& { return i.texture_buffer_descriptors; })) {
+                Profile::Add(Profile::Counter::TextureBufferDraws, 1);
+            }
+            if (Spec::has_image_buffers &&
+                any_stage([](const Shader::Info& i) -> auto& { return i.image_buffer_descriptors; })) {
+                Profile::Add(Profile::Counter::ImageBufferDraws, 1);
+            }
+        }
+    }
     {
         Profile::Scope scope{Profile::Zone::SyncDescriptors};
         texture_cache.SynchronizeDescriptors(false);
