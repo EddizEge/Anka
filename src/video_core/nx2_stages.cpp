@@ -21,6 +21,7 @@
 #include "common/logging.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "shader_recompiler/ir_opt/nx2_root.h"
 #include "video_core/engines/nx2_reg_replica.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
@@ -748,6 +749,15 @@ void Start(Core::System& system) {
     if (options.cut_c && !cut_c_warned.test_and_set(std::memory_order_relaxed)) {
         LOG_WARNING(HW_GPU, "GPU back stages: cut c is a plumbing trial only until T9 "
                             "(EDEN_NX2_BACK_CUTS holds 'c'): not for play or measuring");
+    }
+    // EDEN_NX2_ROOT_TABLES (perf/hafif 53ac7bee8) keeps the root tables in the primary Maxwell3D:
+    // A runs their methods, the replicas B and C draw with never get them (StageCopyFrom, the
+    // deltas), so no unbound bank 17 is streamed from table 0. =3 draws with the primaries.
+    static std::atomic_flag root_tables_warned{};
+    if (config.mode != 3 && Shader::Optimization::Nx2Root::TablesEnabled() &&
+        !root_tables_warned.test_and_set(std::memory_order_relaxed)) {
+        LOG_WARNING(HW_GPU, "GPU back stages: EDEN_NX2_ROOT_TABLES does not reach the replicas "
+                            "(no bank 17 from root table 0); use it with EDEN_NX2_BACK_STAGES=0");
     }
 }
 
