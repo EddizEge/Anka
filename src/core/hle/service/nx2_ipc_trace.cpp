@@ -471,9 +471,10 @@ void OnRequest(Core::System& system, std::string_view service, const char* handl
     }
 }
 
-bool Traces(std::string_view service, u32 command) {
+bool WillTrace(std::string_view service, u32 command) {
     const auto& filter = GetFilter();
-    return filter && filter->Matches(service, command);
+    return filter && filter->Matches(service, command) &&
+           GetState().traced.load(std::memory_order_relaxed) < MaxTraced;
 }
 
 void TraceNow(Core::System& system, std::string_view service, const char* handler,

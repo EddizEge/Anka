@@ -1072,7 +1072,7 @@ private:
         const char* name = handler != handlers_tipc.end() ? handler->second.name : "auto stub";
         const bool first = Vi2DiagFirstCall(command);
         const bool known = Nx2Vi2Events::IsKnownCommand(command);
-        if (first && !known && !Nx2IpcTrace::Traces(service_name, command)) {
+        if (first && !known && !Nx2IpcTrace::WillTrace(service_name, command)) {
             Nx2IpcTrace::TraceNow(system, service_name, name, ctx);
         }
         m_diag_event = nullptr;
@@ -2226,15 +2226,10 @@ private:
         if (size >= sizeof(m_notifications)) {
             m_notifications.fill(0);
             if (m_notification_event) {
-                m_notification_event->Clear(system.Kernel());
                 if (Vi2DiagEnabled()) {
-                    std::scoped_lock lk{m_vsync->mutex};
-                    for (auto& tracked : m_vsync->events) {
-                        if (tracked.event == m_notification_event && tracked.was_signalled) {
-                            tracked.was_signalled = false; // not the guest's clear
-                            ++tracked.handed_over;
-                        }
-                    }
+                    DiagClearHandedOver();
+                } else {
+                    m_notification_event->Clear(system.Kernel());
                 }
             }
         }
@@ -2354,6 +2349,37 @@ private:
             if (tracked.event == event) {
                 tracked.was_signalled = true;
                 ++tracked.signalled;
+            }
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: 21 clears the notification event. Still signalled: handed over; already
+    // clear: the guest cleared it first. The vblanks leave it alone meanwhile; the kernel calls
+    // run without the vsync mutex (this is a guest thread, see StartVrrVsync).
+    void DiagClearHandedOver() {
+        Kernel::KEvent* const event = m_notification_event;
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            for (auto& tracked : m_vsync->events) {
+                if (tracked.event == event) {
+                    tracked.handing_over = true;
+                }
+            }
+        }
+        bool still_signalled{};
+        {
+            Kernel::KScopedSchedulerLock lk{system.Kernel()};
+            still_signalled = event->GetReadableEvent().IsSignaled(system.Kernel());
+        }
+        event->Clear(system.Kernel());
+        std::scoped_lock lk{m_vsync->mutex};
+        for (auto& tracked : m_vsync->events) {
+            if (tracked.event == event) {
+                tracked.handing_over = false;
+                if (tracked.was_signalled) {
+                    ++(still_signalled ? tracked.handed_over : tracked.cleared);
+                }
+                tracked.was_signalled = false;
             }
         }
     }
@@ -2589,6 +2615,7 @@ private:
             std::string name;
             u32 handle{};
             bool was_signalled{}; // after the previous vblank
+            bool handing_over{};  // 21 is clearing it
             u32 signalled{};
             u32 cleared{};       // by the guest: signalled at one vblank, not at the next
             u32 handed_over{};   // 21 (GetNotifications) cleared it
@@ -2645,10 +2672,12 @@ private:
                 Kernel::KScopedSchedulerLock lk{kernel};
                 signalled = readable.IsSignaled(kernel);
             }
-            if (tracked.was_signalled && !signalled) {
-                ++tracked.cleared;
+            if (!tracked.handing_over) {
+                if (tracked.was_signalled && !signalled) {
+                    ++tracked.cleared;
+                }
+                tracked.was_signalled = signalled;
             }
-            tracked.was_signalled = signalled;
             if (!waiters.empty()) {
                 ++tracked.waited;
             }

@@ -318,8 +318,9 @@ bool Enabled();
 void OnRequest(Core::System& system, std::string_view service, const char* handler,
                HLERequestContext& ctx);
 
-// Whether the filter traces this service's command (OnRequest logs it the first time).
-bool Traces(std::string_view service, u32 command);
+// Whether OnRequest will log this service's command the first time: the filter covers it and
+// its budget (MaxTraced) is not spent.
+bool WillTrace(std::string_view service, u32 command);
 
 // At most this many TraceNow backtraces.
 constexpr u32 MaxForced = 32;
