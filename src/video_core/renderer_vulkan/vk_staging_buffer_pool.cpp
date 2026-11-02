@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -317,6 +319,292 @@ std::span<const u8> StagingBufferPool::MappedBytes(VkBuffer buffer, VkDeviceSize
 
 std::span<const u8> StagingBufferPool::MappedBytesAt(VkDeviceAddress address,
                                                      VkDeviceSize size) const {
+    if (address == 0) {
+        return {};
+    }
+    if (stream_buffer_address != 0 && address >= stream_buffer_address) {
+        const std::span<const u8> bytes =
+            Within(stream_pointer, address - stream_buffer_address, size);
+        if (!bytes.empty()) {
+            return bytes;
+        }
+    }
+    for (const StagingBuffers& level : upload_cache) {
+        for (const StagingBuffer& entry : level.entries) {
+            if (entry.device_address != 0 && address >= entry.device_address) {
+                const std::span<const u8> bytes =
+                    Within(entry.mapped_span, address - entry.device_address, size);
+                if (!bytes.empty()) {
+                    return bytes;
+                }
+            }
+        }
+    }
+    return {};
+}
+
+StageStagingBufferPool::StageStagingBufferPool(const Device& device_,
+                                               MemoryAllocator& memory_allocator_,
+                                               Scheduler& scheduler_, const u64& pending_seq_)
+    : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
+      pending_seq{pending_seq_},
+      stream_buffer_size{Common::AlignUp(GetStreamBufferSize(device) / 2, MAX_ALIGNMENT)},
+      region_size{stream_buffer_size / NUM_SYNCS} {
+    VkBufferCreateInfo stream_ci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = stream_buffer_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    if (device.IsExtTransformFeedbackSupported()) {
+        stream_ci.usage |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+    }
+    if (device.IsBufferDeviceAddressSupported()) {
+        stream_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
+    stream_buffer = memory_allocator.CreateBuffer(stream_ci, MemoryUsage::Stream);
+    if (device.HasDebuggingToolAttached()) {
+        stream_buffer.SetObjectNameEXT("Stage Stream Buffer");
+    }
+    if (device.IsBufferDeviceAddressSupported()) {
+        stream_buffer_address = device.GetLogical().GetBufferDeviceAddress(*stream_buffer);
+    }
+    stream_pointer = stream_buffer.Mapped();
+    ASSERT_MSG(!stream_pointer.empty(), "Stream buffer must be host visible!");
+}
+
+StageStagingBufferPool::~StageStagingBufferPool() = default;
+
+u64 StageStagingBufferPool::Stamp() const noexcept {
+    return Nx2Record::SeqTicks::Stamp(pending_seq);
+}
+
+bool StageStagingBufferPool::IsStampFree(u64 stamp) const noexcept {
+    // 0: never handed out
+    return stamp == 0 || scheduler.IsSeqFree(Nx2Record::SeqTicks::SeqOf(stamp));
+}
+
+StagingBufferRef StageStagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
+    if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
+        return GetStreamBuffer(size);
+    }
+    return GetStagingBuffer(size, usage, deferred);
+}
+
+void StageStagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
+    auto& entries = GetCache(ref.usage)[ref.log2_level].entries;
+    const auto is_this_one = [&ref](const StagingBuffer& entry) {
+        return entry.index == ref.index;
+    };
+    auto it = std::find_if(entries.begin(), entries.end(), is_this_one);
+    ASSERT(it != entries.end());
+    ASSERT(it->deferred);
+    it->stamp = Stamp();
+    it->deferred = false;
+}
+
+void StageStagingBufferPool::HoldStream(VkDeviceSize offset, VkDeviceSize size) {
+    if (size == 0 || offset >= stream_buffer_size) {
+        return;
+    }
+    const u64 stamp = Stamp();
+    const size_t last = (std::min)(Region(offset + size - 1), NUM_SYNCS - 1);
+    for (size_t region = Region(offset); region <= last; ++region) {
+        sync_stamps[region] = (std::max)(sync_stamps[region], stamp);
+    }
+}
+
+void StageStagingBufferPool::TickFrame() {
+    current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
+
+    ReleaseLevel(GetCache(MemoryUsage::DeviceLocal), current_delete_level);
+    ReleaseLevel(GetCache(MemoryUsage::Upload), current_delete_level);
+    ReleaseLevel(GetCache(MemoryUsage::Download), current_delete_level);
+}
+
+StagingBufferRef StageStagingBufferPool::GetStreamBuffer(size_t size) {
+    if (AreRegionsActive(Region(free_iterator) + 1,
+                         (std::min)(Region(iterator + size) + 1, NUM_SYNCS))) {
+        // Avoid waiting for the previous usages to be free
+        return GetStagingBuffer(size, MemoryUsage::Upload);
+    }
+    const u64 stamp = Stamp();
+    std::fill(sync_stamps.begin() + Region(used_iterator), sync_stamps.begin() + Region(iterator),
+              stamp);
+    used_iterator = iterator;
+    free_iterator = (std::max)(free_iterator, iterator + size);
+
+    if (iterator + size >= stream_buffer_size) {
+        std::fill(sync_stamps.begin() + Region(used_iterator), sync_stamps.begin() + NUM_SYNCS,
+                  stamp);
+        used_iterator = 0;
+        iterator = 0;
+        free_iterator = size;
+        ++stream_epoch;
+
+        if (AreRegionsActive(0, Region(size) + 1)) {
+            // Avoid waiting for the previous usages to be free
+            return GetStagingBuffer(size, MemoryUsage::Upload);
+        }
+    }
+    const size_t offset = iterator;
+    iterator = Common::AlignUp(iterator + size, MAX_ALIGNMENT);
+    return StagingBufferRef{
+        .buffer = *stream_buffer,
+        .device_address = stream_buffer_address,
+        .offset = static_cast<VkDeviceSize>(offset),
+        .mapped_span = stream_pointer.subspan(offset, size),
+        .usage{},
+        .log2_level{},
+        .index{},
+    };
+}
+
+bool StageStagingBufferPool::AreRegionsActive(size_t region_begin, size_t region_end) const {
+    return std::any_of(sync_stamps.begin() + region_begin, sync_stamps.begin() + region_end,
+                       [this](u64 stamp) { return !IsStampFree(stamp); });
+}
+
+StagingBufferRef StageStagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage usage,
+                                                          bool deferred) {
+    if (const std::optional<StagingBufferRef> ref = TryGetReservedBuffer(size, usage, deferred)) {
+        return *ref;
+    }
+    return CreateStagingBuffer(size, usage, deferred);
+}
+
+std::optional<StagingBufferRef> StageStagingBufferPool::TryGetReservedBuffer(size_t size,
+                                                                             MemoryUsage usage,
+                                                                             bool deferred) {
+    StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
+
+    const auto is_free = [this](const StagingBuffer& entry) {
+        return !entry.deferred && IsStampFree(entry.stamp);
+    };
+    auto& entries = cache_level.entries;
+    const auto hint_it = entries.begin() + cache_level.iterate_index;
+    auto it = std::find_if(entries.begin() + cache_level.iterate_index, entries.end(), is_free);
+    if (it == entries.end()) {
+        it = std::find_if(entries.begin(), hint_it, is_free);
+        if (it == hint_it) {
+            return std::nullopt;
+        }
+    }
+    cache_level.iterate_index = std::distance(entries.begin(), it) + 1;
+    it->stamp = deferred ? (std::numeric_limits<u64>::max)() : Stamp();
+    ASSERT(!it->deferred);
+    it->deferred = deferred;
+    return it->Ref();
+}
+
+StagingBufferRef StageStagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage,
+                                                             bool deferred) {
+    auto const log2_size = Common::Log2Ceil<u32>(u32(size));
+    VkBufferCreateInfo buffer_ci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = 1ULL << log2_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+    if (device.IsExtTransformFeedbackSupported()) {
+        buffer_ci.usage |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+    }
+    if (device.IsBufferDeviceAddressSupported()) {
+        buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
+    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    if (device.HasDebuggingToolAttached()) {
+        ++buffer_index;
+        buffer.SetObjectNameEXT(fmt::format("Stage Staging Buffer {}", buffer_index).c_str());
+    }
+    const std::span<u8> mapped_span = buffer.Mapped();
+    const VkDeviceAddress buffer_address =
+        device.IsBufferDeviceAddressSupported()
+            ? device.GetLogical().GetBufferDeviceAddress(*buffer)
+            : VkDeviceAddress{};
+    StagingBuffer& entry = GetCache(usage)[log2_size].entries.emplace_back(StagingBuffer{
+        .buffer = std::move(buffer),
+        .device_address = buffer_address,
+        .mapped_span = mapped_span,
+        .usage = usage,
+        .log2_level = log2_size,
+        .index = unique_ids++,
+        .stamp = deferred ? (std::numeric_limits<u64>::max)() : Stamp(),
+        .deferred = deferred,
+    });
+    return entry.Ref();
+}
+
+StageStagingBufferPool::StagingBuffersCache& StageStagingBufferPool::GetCache(MemoryUsage usage) {
+    switch (usage) {
+    case MemoryUsage::DeviceLocal:
+        return device_local_cache;
+    case MemoryUsage::Upload:
+        return upload_cache;
+    case MemoryUsage::Download:
+        return download_cache;
+    default:
+        ASSERT_MSG(false, "Invalid memory usage={}", usage);
+        return upload_cache;
+    }
+}
+
+void StageStagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
+    constexpr size_t deletions_per_tick = 16;
+    auto& staging = cache[log2];
+    auto& entries = staging.entries;
+    const size_t old_size = entries.size();
+
+    const auto is_deletable = [this](const StagingBuffer& entry) {
+        return !entry.deferred && IsStampFree(entry.stamp);
+    };
+    const size_t begin_offset = staging.delete_index;
+    const size_t end_offset = (std::min)(begin_offset + deletions_per_tick, old_size);
+    const auto begin = entries.begin() + begin_offset;
+    const auto end = entries.begin() + end_offset;
+    entries.erase(std::remove_if(begin, end, is_deletable), end);
+
+    const size_t new_size = entries.size();
+    staging.delete_index += deletions_per_tick;
+    if (staging.delete_index >= new_size) {
+        staging.delete_index = 0;
+    }
+    if (staging.iterate_index > new_size) {
+        staging.iterate_index = 0;
+    }
+}
+
+std::span<const u8> StageStagingBufferPool::MappedBytes(VkBuffer buffer, VkDeviceSize offset,
+                                                        VkDeviceSize size) const {
+    if (buffer == VK_NULL_HANDLE) {
+        return {};
+    }
+    if (buffer == *stream_buffer) {
+        return Within(stream_pointer, offset, size);
+    }
+    for (const StagingBuffers& level : upload_cache) {
+        for (const StagingBuffer& entry : level.entries) {
+            if (*entry.buffer == buffer) {
+                return Within(entry.mapped_span, offset, size);
+            }
+        }
+    }
+    return {};
+}
+
+std::span<const u8> StageStagingBufferPool::MappedBytesAt(VkDeviceAddress address,
+                                                          VkDeviceSize size) const {
     if (address == 0) {
         return {};
     }

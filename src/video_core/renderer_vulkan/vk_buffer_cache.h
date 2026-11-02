@@ -39,6 +39,11 @@ public:
     explicit Buffer(BufferCacheRuntime&, VideoCommon::NullBufferParams null_params);
     explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr_, u64 size_bytes_,
                     bool sparse_compatible_);
+    /// Staged (cut c), its Vulkan objects outlive it until C is done with them (§3.6/7).
+    ~Buffer();
+
+    Buffer(Buffer&&) noexcept = default;
+    Buffer& operator=(Buffer&&) noexcept = default;
 
     [[nodiscard]] VkBufferView View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format);
 
@@ -86,6 +91,7 @@ private:
 
     const Device* device{};
     Scheduler* scheduler{};
+    BufferCacheRuntime* owner{};
     vk::Buffer buffer;
     std::vector<BufferView> views;
     VideoCommon::UsageTracker tracker;
@@ -110,6 +116,7 @@ public:
                                 GuestDescriptorQueue& guest_descriptor_queue,
                                 ComputePassDescriptorQueue& compute_pass_descriptor_queue,
                                 DescriptorPool& descriptor_pool);
+    ~BufferCacheRuntime();
 
     void TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept;
 
@@ -165,9 +172,9 @@ public:
     std::span<u8> BindMappedUniformBuffer([[maybe_unused]] size_t stage,
                                           [[maybe_unused]] u32 binding_index,
                                           u32 size) {
-        const StagingBufferRef ref = staging_pool.Request(size, MemoryUsage::Upload);
-        guest_descriptor_queue.AddBuffer(ref.buffer, ref.device_address,
-                                         static_cast<u32>(ref.offset), size);
+        const StagingBufferRef ref = RequestStaging(size, MemoryUsage::Upload);
+        descriptor_queue->AddBuffer(ref.buffer, ref.device_address,
+                                    static_cast<u32>(ref.offset), size);
         return ref.mapped_span;
     }
 
@@ -280,6 +287,10 @@ public:
     }
 
     void OnBufferDeleted(const Buffer& buffer) {
+        if (target.list != nullptr) [[unlikely]] {
+            StageDropMultiRangeOwner(buffer.Handle());
+            return;
+        }
         multi_range_buffers.DropOwner(scheduler, buffer.Handle());
     }
 
@@ -294,12 +305,12 @@ public:
 
     void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
                            VideoCore::Surface::PixelFormat format) {
-        if (guest_descriptor_queue.UsesDescriptorBuffer()) {
+        if (descriptor_queue->UsesDescriptorBuffer()) {
             const VkDeviceAddress address = buffer.DeviceAddress();
             const VkFormat vk_format = address == 0 ? VK_FORMAT_UNDEFINED : TexelBufferFormat(format);
-            guest_descriptor_queue.AddTexelBuffer(VK_NULL_HANDLE, address, offset, size, vk_format);
+            descriptor_queue->AddTexelBuffer(VK_NULL_HANDLE, address, offset, size, vk_format);
         } else {
-            guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format));
+            descriptor_queue->AddTexelBuffer(buffer.View(offset, size, format));
         }
     }
 
@@ -325,6 +336,18 @@ public:
     [[nodiscard]] bool Staged() const noexcept {
         return staged;
     }
+
+    /// What MarkUsage stamps a buffer's use with: the tick, or staged B's seq (CurrentTick).
+    [[nodiscard]] u64 UsageStamp() const noexcept {
+        if (staged) [[unlikely]] {
+            return Nx2Record::SeqTicks::Stamp(pending_seq);
+        }
+        return scheduler.CurrentTick();
+    }
+
+    /// Staged: keeps a deleted buffer's Vulkan objects until C is done with what was stamped
+    /// before (Buffer's destructor).
+    void BuryBuffer(vk::Buffer&& buffer, std::vector<vk::BufferView>&& views);
 
     /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, u64, K5; noted by C
     /// with Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime
@@ -378,12 +401,43 @@ public:
     }
 
 private:
+    /// A staging range: from B's own pool while staged, else the scheduler's.
+    [[nodiscard]] StagingBufferRef RequestStaging(size_t size, MemoryUsage usage,
+                                                  bool deferred = false) {
+        if (staged) [[unlikely]] {
+            return stage_pool->Request(size, usage, deferred);
+        }
+        return staging_pool.Request(size, usage, deferred);
+    }
+
+    /// Whether uploads from `buffer` may go to the upload command buffer: the stream buffers.
+    [[nodiscard]] bool IsStreamBuffer(VkBuffer buffer) const noexcept {
+        return buffer == staging_pool.StreamBuf() ||
+               (stage_pool != nullptr && buffer == stage_pool->StreamBuf());
+    }
+
+    /// The packet's list so far, in B's arena (null if empty); the list starts over.
+    [[nodiscard]] RecordList* TakeRecords();
+
+    /// Cut c, B inside a packet: runs `op` through the record owner hook (counted by `why`).
+    void JoinRecordOwner(StageJoin why, VideoCommon::Nx2Stages::FunctionRef op);
+
+    /// Wait for a tick or a stamp while staged.
+    void WaitStaged(u64 tick);
+
+    void StageDropMultiRangeOwner(VkBuffer owner);
+
+    /// EDEN_NX2_UBO_REUSE while staged: a slice of B's stream buffer is reused within the stream
+    /// epoch it was handed out in, its regions held until the reuse is done (§3.6/2).
+    bool BindMappedUniformBufferReuseStaged(size_t stage, u32 index, DAddr device_addr,
+                                            const u8* bytes, u32 size, bool from_scratch);
+
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
         if (handle == VK_NULL_HANDLE) {
-            guest_descriptor_queue.AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
+            descriptor_queue->AddBuffer(handle, 0, 0, VK_WHOLE_SIZE);
         } else {
-            guest_descriptor_queue.AddBuffer(handle, buffer.DeviceAddress(), offset, size);
+            descriptor_queue->AddBuffer(handle, buffer.DeviceAddress(), offset, size);
         }
     }
 
@@ -452,9 +506,23 @@ private:
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
 
     // Cut c (BeginStages to EndStages)
+    static constexpr size_t STAGE_SCRATCH_ENTRIES = 0x400; ///< A draw's buffer entries, at most
     RecordTarget target{&scheduler, nullptr};
     bool staged{};
+    /// Where binds add descriptor entries: the guest queue, or DescriptorScratch in a packet
+    UpdateDescriptorQueue* descriptor_queue{&guest_descriptor_queue};
     std::unique_ptr<UpdateDescriptorQueue> descriptor_scratch;
+    std::unique_ptr<StageStagingBufferPool> stage_pool;
+    std::unique_ptr<Nx2Record::ChunkArena> record_arena;
+    std::unique_ptr<RecordList> records; ///< The packet's list being filled
+    u64 pending_seq{}; ///< The seq B stamps with: the packet's, or the next one between packets
+    struct BufferGrave {
+        vk::Buffer buffer;
+        std::vector<vk::BufferView> views;
+    };
+    Nx2Record::SeqGraveyard<BufferGrave> buffer_graveyard;
+    Nx2Record::SeqGraveyard<vk::Buffer> lut_graveyard;
+    bool multi_range_used{}; ///< BindMultiRangeStorageBuffer made an entry once
     RecordOwnerHook record_owner_hook{};
     void* record_owner_context{};
     std::array<u64, static_cast<size_t>(StageJoin::Count)> stage_joins{};
