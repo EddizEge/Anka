@@ -361,10 +361,12 @@ private:
         WaitConsumed(write_position + words - Words, interrupt);
     }
 
+    /// Read for each record by both sides, written only at construction: a line of its own
+    /// (R1 sifir-2), apart from the producer's position written for each record.
     std::unique_ptr<u64[]> ring;
 
     // Producer side.
-    u64 write_position{};
+    alignas(64) u64 write_position{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a join, while the consumer has nothing to do.
