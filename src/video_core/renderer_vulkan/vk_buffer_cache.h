@@ -15,8 +15,10 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/surface.h"
@@ -309,6 +311,65 @@ public:
         return max_dynamic_storage_buffers;
     }
 
+    // Cut c (Kesim-2, EDEN_NX2_BACK_STAGES with 'c'): B's side of the Vulkan work, C being the
+    // only stage that records (§3.6). Unused with the stages off or cut a alone.
+
+    /// With every stage drained (Nx2Stages Start / Stop, by the integration): while staged the
+    /// runtime streams from its own staging pool, stamps what it hands the GPU with B's seq
+    /// instead of a tick (CurrentTick returns a Nx2Record::SeqTicks stamp, IsFree and Wait take
+    /// both), and keeps what it deletes until C is done with it. EndStages notes the seq still
+    /// pending, so nothing stamped stays waiting for a packet that never comes.
+    void BeginStages();
+    void EndStages();
+
+    [[nodiscard]] bool Staged() const noexcept {
+        return staged;
+    }
+
+    /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, noted by C with
+    /// Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime records
+    /// into B's record list (RecordTarget), adds the binds' descriptor entries to
+    /// DescriptorScratch and stamps with this seq.
+    u32 BeginRecords();
+
+    /// B: ends the packet's records; returns its list for DrawToC::records (null when nothing
+    /// was recorded). After it the runtime records straight to the scheduler and the guest
+    /// descriptor queue again (only joins use it then) and stamps with the next seq.
+    RecordList* EndRecords();
+
+    [[nodiscard]] RecordTarget& Target() noexcept {
+        return target;
+    }
+
+    /// B's descriptor entries of its buffer binds, tick-less: B restarts it for each draw
+    /// (UpdateDescriptorQueue::Restart, before the binds) and C copies them per graphics stage
+    /// into the guest queue (AddEntries) next to its own (T6).
+    [[nodiscard]] UpdateDescriptorQueue& DescriptorScratch() noexcept {
+        return *descriptor_scratch;
+    }
+
+    /// Why B's runtime needed the recording stage (stage_joins, by reason).
+    enum class StageJoin : u8 { Wait, Finish, MultiRange, Count };
+
+    /// Cut c, B inside a packet: work only the recording stage may do (a Wait or Finish on work
+    /// C has not submitted, a multi-range bind or retirement: vk_multi_range_buffer uses the
+    /// scheduler). The integration (T9) binds it to JoinFromB: `records` (B's list so far, may
+    /// be null) is replayed by C first, then `op` runs on this thread with C parked; the runtime
+    /// records straight to the scheduler inside `op` and goes on with a new list of the same seq
+    /// after. It is called inside buffer cache operations, i.e. with BufferCache::mutex held:
+    /// see S13 in nx2_stages.h for what the binding must keep.
+    using RecordOwnerHook = void (*)(void* context, RecordList* records,
+                                     VideoCommon::Nx2Stages::FunctionRef op);
+    void SetRecordOwnerHook(RecordOwnerHook hook, void* context) noexcept {
+        record_owner_hook = hook;
+        record_owner_context = context;
+    }
+
+    /// Times B's runtime needed the recording stage, by reason (for the log).
+    [[nodiscard]] u64 StageJoins(StageJoin why) const noexcept {
+        return stage_joins[static_cast<size_t>(why)];
+    }
+
 private:
     void BindBuffer(const Buffer& buffer, u32 offset, u32 size) {
         const VkBuffer handle = buffer.Handle();
@@ -382,6 +443,14 @@ private:
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
+
+    // Cut c (BeginStages to EndStages)
+    RecordTarget target{&scheduler, nullptr};
+    bool staged{};
+    std::unique_ptr<UpdateDescriptorQueue> descriptor_scratch;
+    RecordOwnerHook record_owner_hook{};
+    void* record_owner_context{};
+    std::array<u64, static_cast<size_t>(StageJoin::Count)> stage_joins{};
 };
 
 struct BufferCacheParams {

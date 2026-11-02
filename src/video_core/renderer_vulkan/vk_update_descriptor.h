@@ -56,6 +56,11 @@ public:
     void Acquire(Scheduler& scheduler, size_t required_entries = 0,
                  bool use_descriptor_buffer_ = false);
 
+    /// Cut c, B's scratch queue (BufferCacheRuntime::DescriptorScratch): starts over at the
+    /// beginning, with no tick (C copies the entries into the guest queue with AddEntries before
+    /// B adds more). `use_descriptor_buffer_` as the pipeline's Acquire would get it.
+    void Restart(bool use_descriptor_buffer_);
+
     const DescriptorUpdateEntry* UpdateData() const noexcept {
         return upload_start;
     }
