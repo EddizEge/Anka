@@ -123,16 +123,24 @@ void EventThunk(const u64* payload, u32 words) {
 void PostEvent(Event event, bool is_indexed, u32 count) {
     Nx2Profile::Scope scope{Nx2Profile::Zone::PacketBuild};
     auto& primary = g_system->GPU().Maxwell3D();
+    const u32 light_changes = primary.light.changes;
     const u32 side_words = SideStateWords(primary);
     if (1 + 2 + side_words > MaxBodyWords) [[unlikely]] {
         // Too long for a record (K9): applied to the replica and drawn with the stages parked.
-        std::vector<u64> side(side_words);
-        WriteSideState(primary, side.data());
+        // SideStateWords starts A's light changes over for the draw; until the join record
+        // (with the deltas pending) is compared at =2 they count as before (R1 dikis-5), so it
+        // runs again inside.
+        primary.light.changes = light_changes;
         JoinFromA(JoinReason::Other, [&] {
-            if (auto* const replica = ReplicaOf(primary, Stage::B)) {
-                ApplySideState(*replica, side.data(), side_words);
-            } else {
-                ReportUnstaged("drew without a replica for B", -1);
+            const u32 words = SideStateWords(primary);
+            if (words != 0) {
+                std::vector<u64> side(words);
+                WriteSideState(primary, side.data());
+                if (auto* const replica = ReplicaOf(primary, Stage::B)) {
+                    ApplySideState(*replica, side.data(), words);
+                } else {
+                    ReportUnstaged("drew without a replica for B", -1);
+                }
             }
             RunEvent(*g_real, event, is_indexed, count);
         });
