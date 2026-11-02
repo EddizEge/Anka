@@ -28,6 +28,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
 #include "video_core/nx2_stage_proxy.h"
+#include "video_core/nx2_stage_split.h"
 #include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -649,12 +650,13 @@ void CheckStage(Stage stage, const char* where) {
     ReportStack("stage check", where);
 }
 
+bool MayTakeBufferLock() {
+    return BufferLockAllowed(Active() && g_pipeline.Options().cut_c, OnStage(Stage::C), t_park_op,
+                             Forwarding());
+}
+
 void CheckBufferLock(const char* where) {
-    if (!g_check || !Active() || !g_pipeline.Options().cut_c) {
-        return;
-    }
-    // C only inside a ParkB op; A only inside its join; B and threads that are no stage at will.
-    if (OnStage(Stage::C) ? t_park_op : !Forwarding()) {
+    if (!g_check || MayTakeBufferLock()) {
         return;
     }
     Nx2Profile::Add(Counter::StageViolations, 1);

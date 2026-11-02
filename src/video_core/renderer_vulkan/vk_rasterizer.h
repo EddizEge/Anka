@@ -340,6 +340,10 @@ private:
     void FlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
     [[nodiscard]] bool MustFlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
     [[nodiscard]] bool HoldsGpuWrittenDataB(DAddr begin, size_t span);
+    /// Where this thread may not take the buffer cache mutex (C in a record:
+    /// Nx2Stages::MayTakeBufferLock): whether the buffer cache holds GPU-written data at
+    /// [addr, addr + size), without waiting for it. None: B holds it.
+    [[nodiscard]] std::optional<bool> BufferGpuModifiedNoWait(DAddr addr, u64 size);
     void ClearB(u32 layer_count);
     void DrawTextureB();
     void WaitForIdleB();

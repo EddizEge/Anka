@@ -52,6 +52,20 @@ namespace VideoCommon::Nx2Stages {
     return split_draws && !on_stage_c;
 }
 
+/// K3 with cut c (`staged`: the stages run with it): whether a thread may take the buffer cache
+/// mutex now. C only inside a ParkB `op` (B parked): in a record of C's it could wait for B, which
+/// may wait for C holding it (JoinFromBLocked). A only inside its join (not `forwarding`); B and
+/// threads that are no stage at will.
+[[nodiscard]] constexpr bool BufferLockAllowed(bool staged, bool on_c, bool in_park_op,
+                                               bool forwarding) noexcept {
+    return !staged || (on_c ? in_park_op : !forwarding);
+}
+
+/// `which` without the buffer cache (a flush where BufferLockAllowed says no).
+[[nodiscard]] constexpr CacheType WithoutBufferCache(CacheType which) noexcept {
+    return which & CacheType(~static_cast<u32>(CacheType::BufferCache));
+}
+
 /// The fence calls that reach B's rasterizer outside a join: the puller's deferred ones come
 /// without the proxy (T9c, R2 F3).
 enum class FenceCall : u8 { Signal, Sync, SyncPoint, Reference, Release };

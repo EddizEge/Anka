@@ -45,6 +45,24 @@ TEST_CASE("Nx2StageSplit: a report in a join notes the WaitForIdle flag", "[vide
     REQUIRE(!QueryNotesWfi(false, true));
 }
 
+TEST_CASE("Nx2StageSplit: C takes the buffer cache mutex only in a ParkB op", "[video_core]") {
+    // T7d review k2-c-flushregion-bufferlock: a texture upload's ReadBlock flushes the buffer
+    // cache from a record of C's.
+    REQUIRE(!BufferLockAllowed(true, true, false, false));
+    REQUIRE(BufferLockAllowed(true, true, true, false));
+    // B and threads that are no stage.
+    REQUIRE(BufferLockAllowed(true, false, false, false));
+    // A outside its join forwards; inside it, the stages parked.
+    REQUIRE(!BufferLockAllowed(true, false, false, true));
+    // Without cut c (or the stages off) every thread as before.
+    REQUIRE(BufferLockAllowed(false, true, false, false));
+    REQUIRE(BufferLockAllowed(false, false, false, true));
+    // Its flush there: the other caches still.
+    REQUIRE(WithoutBufferCache(CacheType::All) == CacheType::NoBufferCache);
+    REQUIRE(WithoutBufferCache(CacheType::NoTextureCache) ==
+            (CacheType::QueryCache | CacheType::ShaderCache));
+}
+
 TEST_CASE("Nx2StageSplit: the puller's fences run in a join from B", "[video_core]") {
     // T9c (R2 F3): SignalFence, SyncOperation, SignalSyncPoint and SignalReference always.
     for (const bool force : {false, true}) {

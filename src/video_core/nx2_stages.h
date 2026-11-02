@@ -295,6 +295,11 @@ void CheckStage(Stage stage, const char* where);
 /// rasterizer, the query cache's SyncValues, ...): reports and counts (StageViolations) taking
 /// it on C outside a ParkB `op` and on A outside a join.
 void CheckBufferLock(const char* where);
+/// K3: whether this thread may take the buffer cache mutex now (BufferLockAllowed,
+/// nx2_stage_split.h): always without cut c; with it C only inside a ParkB `op`, A only inside its
+/// join. Where it may not, a caller that needs the buffer cache does without it (the Vulkan
+/// rasterizer's FlushRegion on C: T7d review).
+bool MayTakeBufferLock();
 /// EDEN_NX2_STAGE_CHECK: reports (with the stack, as CheckStage) and counts (StageViolations) a
 /// hazard its caller found: a download inside B's packet (a Finish through JoinFromBLocked:
 /// right, but the CPU threads wait on the mutex for it), a record list released out of order...

@@ -2061,6 +2061,19 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
     if (addr == 0 || size == 0) {
         return;
     }
+    if (split_draws && True(which & VideoCommon::CacheType::BufferCache) &&
+        !VideoCommon::Nx2Stages::MayTakeBufferLock()) [[unlikely]] {
+        // T7d review (k2-c-flushregion-bufferlock): C in a record (the texture cache's accelerated
+        // uploads read guest memory with ReadBlock, which flushes here) never waits for the
+        // buffer cache mutex: B may wait for C holding it (JoinFromBLocked, K3). Nor does it
+        // download from B's buffer cache, which is ahead of C's point: that could clear what B
+        // marked GPU modified for packets C has not run. GPU-written buffer data there is
+        // reported (STAGE_CHECK), not flushed.
+        if (BufferGpuModifiedNoWait(addr, size).value_or(false)) {
+            VideoCommon::Nx2Stages::ReportStageHazard("buffer flush on C in a record (skipped)");
+        }
+        which = VideoCommon::Nx2Stages::WithoutBufferCache(which);
+    }
     if (True(which & VideoCommon::CacheType::TextureCache)) {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.DownloadMemory(addr, size);
@@ -2079,6 +2092,14 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
     if (SplitOnB()) [[unlikely]] {
         return MustFlushRegionB(addr, size, which);
     }
+    if (split_draws && True(which & VideoCommon::CacheType::BufferCache) &&
+        !VideoCommon::Nx2Stages::MayTakeBufferLock()) [[unlikely]] {
+        // As FlushRegion (T7d review): no wait for the buffer cache mutex; B holding it, so.
+        if (BufferGpuModifiedNoWait(addr, size).value_or(true)) {
+            return true;
+        }
+        which = VideoCommon::Nx2Stages::WithoutBufferCache(which);
+    }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         CheckBufferLockOffB("RasterizerVulkan::MustFlushRegion");
         std::scoped_lock lock{buffer_cache.mutex};
@@ -2094,6 +2115,14 @@ bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
         return texture_cache.IsRegionGpuModified(addr, size);
     }
     return false;
+}
+
+std::optional<bool> RasterizerVulkan::BufferGpuModifiedNoWait(DAddr addr, u64 size) {
+    std::unique_lock lock{buffer_cache.mutex, std::try_to_lock};
+    if (!lock.owns_lock()) {
+        return std::nullopt;
+    }
+    return buffer_cache.IsRegionGpuModified(addr, size);
 }
 
 bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
