@@ -405,7 +405,7 @@ private:
     void RunStageInvalidations(const u64* ranges, u32 count);
     void RecordStageDraw(const StageDrawParams& params);
     /// C, once a packet's records were replayed (from `replay_tick` on): its geometry binds into
-    /// the mirror.
+    /// the mirror; a mirrored packet's (DrawToC::geometry_mirrored, C7) recorded first.
     void ApplyGeometryC(const StageDrawReader& in, u64 replay_tick);
     /// C, right before the draw: what the command buffer lost since binds again (kayit-4).
     void BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head);

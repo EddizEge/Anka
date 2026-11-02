@@ -3864,6 +3864,22 @@ void ForceVertexBinds(Tegra::Engines::Maxwell3D& mb) {
     }
 }
 
+// EDEN_NX2_GEOMETRY_MIRROR=0 (cut c, C7): B records a draw packet's vertex and index binds into
+// its list too, as before. Else they reach C in the packet's geometry slots alone and C records
+// them after the list (ApplyGeometryC): B neither records nor copies them, a packet that recorded
+// nothing else has no list, and C replays none.
+bool GeometryMirrorBinds() {
+    // Read at the first call, without a guarded static's check on every call (each draw packet).
+    static std::atomic<s8> enabled{-1};
+    s8 value = enabled.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* env = std::getenv("EDEN_NX2_GEOMETRY_MIRROR");
+        value = static_cast<s8>(env == nullptr || env[0] != '0');
+        enabled.store(value, std::memory_order_relaxed);
+    }
+    return value != 0;
+}
+
 // The streams of `streams` whose dirty flag is set.
 u32 VertexDirtyMask(const Tegra::Engines::Maxwell3D::DirtyState::Flags& flags, u32 streams) {
     u32 mask = 0;
@@ -4640,6 +4656,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         // again where its command buffer lost them, BindGeometryC). The runtime's own slots,
         // valid until its next BeginRecords: SendStageDraw copies them to ring 3.
         out.SetGeometry(buffer_cache_runtime.PacketGeometry());
+        head.geometry_mirrored = buffer_cache_runtime.GeometryMirrored();
         head.vertex_live = buffer_cache.EnabledVertexBuffersMask();
         // Packed by command (a direct draw's 72 bytes in 24).
         std::array<u64, Stages::MaxDrawArgWords> packed;
@@ -4696,7 +4713,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         {
             Profile::Scope scope{Profile::Zone::LightDraw};
             Nx2Record::CacheLock lock{buffer_cache.mutex};
-            seq = buffer_cache_runtime.BeginRecords();
+            seq = buffer_cache_runtime.BeginRecords(GeometryMirrorBinds());
             ForceGeometryB(mb);
             if (try_plain) {
                 // ConfigureImpl's geometry buffers (TryLightDraw); an upload needs the full
@@ -4776,7 +4793,8 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         }
         // The full setup follows; what was bound and uploaded so far stays valid (C replays it
         // first) and any_buffer_uploaded stays for its barrier. Its binds go without the geometry
-        // mirror (a records packet): the full setup sends every vertex stream.
+        // mirror (a records packet; mirrored, C7, they are not in it at all): the full setup sends
+        // every vertex stream, and each indexed or quad draw its index buffer.
         geometry_reset_b = true;
         SendStageRecords(seq, records);
     }
@@ -4858,7 +4876,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
     out.Begin();
     {
         Nx2Record::CacheLock lock{buffer_cache.mutex};
-        seq = buffer_cache_runtime.BeginRecords();
+        seq = buffer_cache_runtime.BeginRecords(GeometryMirrorBinds());
         record_indirect_barrier();
         ForceGeometryB(mb);
         GraphicsPipeline::BufferHalf half;
@@ -5494,8 +5512,14 @@ void RasterizerVulkan::ApplyGeometryC(const StageDrawReader& in, u64 replay_tick
     // replayed them in a join before (a submission may have come after) or a submission came
     // while they were replayed (not expected: a packet's Finish, STAGE_CHECK's hazard): bound
     // again then.
+    // A packet B mirrored (C7) has its vertex and index binds in its geometry slots alone: C
+    // records them here, after the list, in this command buffer.
     const u64 tick = scheduler.CurrentTick();
-    const bool early = std::exchange(geometry_replayed_c, false) || tick != replay_tick;
+    bool early = std::exchange(geometry_replayed_c, false) || tick != replay_tick;
+    if (in.Head().geometry_mirrored) {
+        RecordMirroredGeometry(scheduler, device, in.Geometry());
+        early = false;
+    }
     const u32 bound =
         geometry_mirror_c.Apply(in.Geometry(), in.Head().vertex_live, tick, early);
     auto& flags = maxwell3d->dirty.flags;
@@ -5515,24 +5539,9 @@ void RasterizerVulkan::BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head
     const u32 live = head.vertex_live & (bindings >= 32 ? ~0u : (1u << bindings) - 1);
     const u32 dirty = VertexDirtyMask(flags, live);
     const u32 rebind = geometry_mirror_c.Rebind(live, dirty);
-    const bool extended = device.IsExtExtendedDynamicStateSupported();
     for (u32 mask = rebind; mask != 0; mask &= mask - 1) {
         const u32 index = static_cast<u32>(std::countr_zero(mask));
-        const Stages::GeometrySlot& slot = geometry_mirror_c.Vertex(index);
-        VkBuffer buffer;
-        std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
-        if (extended) {
-            scheduler.Record([index, buffer, offset = VkDeviceSize{slot.offset},
-                              size = VkDeviceSize{slot.size},
-                              stride = VkDeviceSize{slot.stride}](vk::CommandBuffer cmdbuf) {
-                cmdbuf.BindVertexBuffers2EXT(index, 1, &buffer, &offset, &size, &stride);
-            });
-        } else {
-            scheduler.Record(
-                [index, buffer, offset = VkDeviceSize{slot.offset}](vk::CommandBuffer cmdbuf) {
-                    cmdbuf.BindVertexBuffer(index, buffer, offset);
-                });
-        }
+        RecordMirroredGeometry(scheduler, device, {&geometry_mirror_c.Vertex(index), 1});
         flags[VideoCommon::Dirty::VertexBuffer0 + index] = false;
     }
     if (const u32 missing = geometry_mirror_c.Missing(live, dirty); missing != 0) [[unlikely]] {
@@ -5547,18 +5556,7 @@ void RasterizerVulkan::BindGeometryC(const VideoCommon::Nx2Stages::DrawToC& head
     }
     const bool rebind_index = geometry_mirror_c.RebindIndex(scheduler.CurrentTick());
     if (rebind_index) {
-        const Stages::GeometrySlot& slot = geometry_mirror_c.Index();
-        VkBuffer buffer;
-        std::memcpy(&buffer, &slot.buffer, sizeof(buffer));
-        const VkIndexType type = slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT32
-                                     ? VK_INDEX_TYPE_UINT32
-                                 : slot.index_format == Nx2Record::GEOMETRY_INDEX_UINT8
-                                     ? VK_INDEX_TYPE_UINT8_EXT
-                                     : VK_INDEX_TYPE_UINT16;
-        scheduler.Record(
-            [buffer, offset = VkDeviceSize{slot.offset}, type](vk::CommandBuffer cmdbuf) {
-                cmdbuf.BindIndexBuffer(buffer, offset, type);
-            });
+        RecordMirroredGeometry(scheduler, device, {&geometry_mirror_c.Index(), 1});
     }
     if (rebind != 0 || rebind_index) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::GeometryReplays, 1);

@@ -51,6 +51,20 @@ struct GeometrySlot {
     u64 size;
 };
 
+/// C (C7): the binds of a packet's geometry slots B noted but did not record
+/// (DrawToC::geometry_mirrored), in B's order: `vertex` for a vertex stream (0-31), `index` for the
+/// index buffer (32). Transform feedback slots are not passed: B records those binds.
+template <typename Vertex, typename Index>
+void ForEachMirroredBind(std::span<const GeometrySlot> slots, Vertex&& vertex, Index&& index) {
+    for (const GeometrySlot& slot : slots) {
+        if (slot.slot < 32) {
+            vertex(slot);
+        } else if (slot.slot == 32) {
+            index(slot);
+        }
+    }
+}
+
 /// The graphics stages (Maxwell3D::Regs::MaxShaderStage).
 inline constexpr u32 DrawStages = 5;
 /// u64 words of one descriptor entry (Vulkan::DescriptorUpdateEntry, asserted where it is known:
@@ -74,7 +88,8 @@ struct DrawToC {
     std::array<u8, DrawStages> buffer_entries; ///< Per graphics stage, B's descriptor entries
     DrawKind kind;
     bool is_indexed;
-    u8 reserved;
+    bool geometry_mirrored; ///< B recorded none of the packet's vertex and index binds (its
+                            ///< geometry slots alone have them): C records them (C7)
 };
 static_assert(std::is_trivially_copyable_v<DrawToC>);
 static_assert(std::is_trivially_copyable_v<GeometrySlot>);

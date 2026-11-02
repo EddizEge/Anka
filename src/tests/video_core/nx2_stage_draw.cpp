@@ -252,3 +252,44 @@ TEST_CASE("Nx2StageDraw: the packet's own geometry is written without a copy", "
     writer.Begin();
     REQUIRE(writer.Words() == DrawHeadWords);
 }
+
+TEST_CASE("Nx2StageDraw: a mirrored packet's binds in B's order, transform feedback apart",
+          "[video_core]") {
+    // C7: C records the vertex streams and the index buffer from the slots, as B noted them (a
+    // stream bound twice binds twice, the later last); transform feedback slots (33-36) are in
+    // B's list.
+    std::array<GeometrySlot, 6> slots{};
+    const std::array<u8, 6> numbers{3, 32, 33, 0, 3, 31};
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i].slot = numbers[i];
+        slots[i].buffer = 0x100 + i;
+    }
+    std::vector<u64> order;
+    u32 vertex_binds = 0;
+    u32 index_binds = 0;
+    ForEachMirroredBind(
+        slots,
+        [&](const GeometrySlot& slot) {
+            ++vertex_binds;
+            order.push_back(slot.buffer);
+        },
+        [&](const GeometrySlot& slot) {
+            ++index_binds;
+            order.push_back(slot.buffer);
+        });
+    REQUIRE(vertex_binds == 4);
+    REQUIRE(index_binds == 1);
+    REQUIRE(order == std::vector<u64>{0x100, 0x101, 0x103, 0x104, 0x105});
+
+    // The head's flag goes through the ring; Begin clears it.
+    StageDrawWriter writer;
+    writer.Begin();
+    writer.Head().geometry_mirrored = true;
+    writer.SetGeometry(std::span<const GeometrySlot>{slots.data(), 2});
+    std::vector<u64> words = Write(writer);
+    StageDrawReader reader{words.data(), static_cast<u32>(words.size())};
+    REQUIRE(reader.Head().geometry_mirrored);
+    REQUIRE(reader.Geometry().size() == 2);
+    writer.Begin();
+    REQUIRE(!writer.Head().geometry_mirrored);
+}
