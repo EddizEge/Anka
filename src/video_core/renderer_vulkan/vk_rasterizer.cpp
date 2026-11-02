@@ -269,6 +269,13 @@ bool LightDrawShape(const Tegra::Engines::Maxwell3D::DrawManager::State& draw_st
            (!is_indexed || draw_state.index_buffer.format != Maxwell::IndexFormat::UnsignedByte);
 }
 
+// Back stages, cut c: the fence calls B runs in a join (nx2_stage_split.h), with this fence
+// manager's async check.
+using VideoCommon::Nx2Stages::FenceCall;
+[[nodiscard]] constexpr bool FenceJoins(FenceCall call, bool force) {
+    return VideoCommon::Nx2Stages::FenceJoinsB(call, force, FenceManagerParams::HAS_ASYNC_CHECK);
+}
+
 // Stage diagnostics (EDEN_NX2_GPU_PROFILE, " | stage diagnostics:" in the report): what the
 // back's work would make the stages of EDEN_NX2_BACK_STAGES cross for. Used only while profiling;
 // per thread, like the counters (the thread that runs the rasterizer).
@@ -2240,6 +2247,12 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
+    if (SplitOnB()) [[unlikely]] {
+        // The proxy's and the GPU thread's deferred invalidations: the texture half in ring 3's
+        // order, as OnCachedWrite's (T9c).
+        InvalidateRegionB(addr, size, VideoCommon::Nx2Stages::CpuWriteCaches);
+        return;
+    }
     NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
@@ -2257,6 +2270,13 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::OnCachedWrite(DAddr addr, u64 size) {
+    if (SplitOnB()) [[unlikely]] {
+        // GPU::InvalidateGPUCache on B outside a join (a submission's, the puller's, the proxy's):
+        // the texture half C's, the buffer half's copies in a packet of B's (T9c, R2c review: the
+        // old body records into C's scheduler beside C).
+        InvalidateRegionB(addr, size, VideoCommon::Nx2Stages::CpuWriteCaches, true);
+        return;
+    }
     NoteLightWork();
     if (addr == 0 || size == 0) {
         return;
@@ -2315,29 +2335,55 @@ void RasterizerVulkan::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
 }
 
 void RasterizerVulkan::SignalFence(std::function<void()>&& func) {
+    // The puller's deferred fences come here on B without the proxy (T9c, R2 F3): FenceJoinsB.
+    if (SplitOnB() && FenceJoins(FenceCall::Signal, true)) [[unlikely]] {
+        JoinB([&] { SignalFence(std::move(func)); });
+        return;
+    }
     NoteLightWork();
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::FencesSignaled, 1);
     fence_manager.SignalFence(std::move(func));
 }
 
 void RasterizerVulkan::SyncOperation(std::function<void()>&& func) {
+    if (SplitOnB() && FenceJoins(FenceCall::Sync, true)) [[unlikely]] {
+        JoinB([&] { SyncOperation(std::move(func)); });
+        return;
+    }
     NoteLightWork();
     fence_manager.SyncOperation(std::move(func));
 }
 
 void RasterizerVulkan::SignalSyncPoint(u32 value) {
+    if (SplitOnB() && FenceJoins(FenceCall::SyncPoint, true)) [[unlikely]] {
+        JoinB([&] { SignalSyncPoint(value); });
+        return;
+    }
     NoteLightWork();
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::FencesSignaled, 1);
     fence_manager.SignalSyncPoint(value);
 }
 
 void RasterizerVulkan::SignalReference() {
+    if (SplitOnB() && FenceJoins(FenceCall::Reference, true)) [[unlikely]] {
+        JoinB([&] { SignalReference(); });
+        return;
+    }
     NoteLightWork();
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::FencesSignaled, 1);
     fence_manager.SignalReference();
 }
 
 void RasterizerVulkan::ReleaseFences(bool force) {
+    if (SplitOnB()) [[unlikely]] {
+        if (FenceJoins(FenceCall::Release, force)) {
+            JoinB([&] { ReleaseFences(force); });
+            return;
+        }
+        // OnCommandListEnd's at each command list: WaitPendingFences(false) returns at once.
+        NoteLightWork();
+        return;
+    }
     NoteLightWork();
     fence_manager.WaitPendingFences(force);
 }
@@ -4997,9 +5043,10 @@ void RasterizerVulkan::InnerInvalidationB(
     }
 }
 
-void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which) {
-    // InvalidateRegion's halves: the buffer cache and the shaders here, the texture and query
-    // caches C's (before anything B sends after).
+void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which,
+                                         bool cached_write) {
+    // InvalidateRegion's halves (SplitCaches): the buffer cache and the shaders here, the texture
+    // and query caches C's (before anything B sends after).
     using VideoCommon::CacheType;
     NoteLightWork();
     if (addr == 0 || size == 0) {
@@ -5007,17 +5054,24 @@ void RasterizerVulkan::InvalidateRegionB(DAddr addr, u64 size, VideoCommon::Cach
     }
     // The memory manager's WriteBlock invalidates each range before it writes it.
     GuardQueryWritesB(addr, size, True(which & CacheType::QueryCache));
-    const u64 c_bits = (True(which & CacheType::TextureCache) ? StageRangeTexture : 0) |
-                       (True(which & CacheType::QueryCache) ? StageRangeQuery : 0);
+    const VideoCommon::Nx2Stages::CacheHalves halves = VideoCommon::Nx2Stages::SplitCaches(which);
+    const u64 c_bits = (True(halves.c & CacheType::TextureCache) ? StageRangeTexture : 0) |
+                       (True(halves.c & CacheType::QueryCache) ? StageRangeQuery : 0);
     if (c_bits != 0) {
         stage_c_ranges.push_back(addr);
         stage_c_ranges.push_back(size | c_bits);
     }
-    if (True(which & CacheType::BufferCache)) {
-        StageBufferWork([&] { buffer_cache.WriteMemory(addr, size); });
+    if (True(halves.b & CacheType::BufferCache)) {
+        StageBufferWork([&] {
+            if (cached_write) {
+                buffer_cache.CachedWriteMemory(addr, size);
+            } else {
+                buffer_cache.WriteMemory(addr, size);
+            }
+        });
     }
     FlushStageCWork();
-    if (True(which & CacheType::ShaderCache)) {
+    if (True(halves.b & CacheType::ShaderCache)) {
         pipeline_cache.InvalidateRegion(addr, size);
     }
 }

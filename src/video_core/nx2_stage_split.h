@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include "common/settings.h"
+#include "video_core/cache_types.h"
 #include "video_core/nx2_stage_draw.h"
 #include "video_core/query_cache/types.h"
 
@@ -49,6 +50,35 @@ namespace VideoCommon::Nx2Stages {
 /// it must not write B's flag.
 [[nodiscard]] constexpr bool QueryNotesWfi(bool split_draws, bool on_stage_c) noexcept {
     return split_draws && !on_stage_c;
+}
+
+/// The fence calls that reach B's rasterizer outside a join: the puller's deferred ones come
+/// without the proxy (T9c, R2 F3).
+enum class FenceCall : u8 { Signal, Sync, SyncPoint, Reference, Release };
+
+/// Whether B runs a fence call in a join of its own (C parked having run everything B sent
+/// before, B the record owner). The fence manager records C's caches' and the query cache's async
+/// flushes and the scheduler's flush, and CommitCacheFlushes takes the buffer cache mutex. A
+/// release without `force` checks only fences that passed, which an async check
+/// (FenceManagerParams::HAS_ASYNC_CHECK) leaves to the fence thread: nothing to join for.
+[[nodiscard]] constexpr bool FenceJoinsB(FenceCall call, bool force, bool async_check) noexcept {
+    return call != FenceCall::Release || force || !async_check;
+}
+
+/// The caches a write the CPU made invalidates (OnCachedWrite, OnCacheInvalidation): every one but
+/// the query cache, as their old bodies.
+inline constexpr CacheType CpuWriteCaches = CacheType::NoQueryCache;
+
+/// An invalidation's halves with cut c (InvalidateRegionB): the caches C invalidates, in ring 3's
+/// order before anything B sends after, and those B does (the buffer cache's copies in a packet
+/// of B's, the shaders).
+struct CacheHalves {
+    CacheType c;
+    CacheType b;
+};
+[[nodiscard]] constexpr CacheHalves SplitCaches(CacheType which) noexcept {
+    constexpr CacheType on_c = CacheType::TextureCache | CacheType::QueryCache;
+    return {.c = which & on_c, .b = which & CacheType(~static_cast<u32>(on_c))};
 }
 
 /// B: address ranges [begin, end) of work it sent C that C may not have run yet, each with the

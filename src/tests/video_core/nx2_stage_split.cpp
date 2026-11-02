@@ -8,6 +8,7 @@
 #include "video_core/nx2_stage_split.h"
 
 using namespace VideoCommon::Nx2Stages;
+using VideoCommon::CacheType;
 using VideoCommon::QueryPropertiesFlags;
 using VideoCommon::QueryType;
 
@@ -42,6 +43,43 @@ TEST_CASE("Nx2StageSplit: a report in a join notes the WaitForIdle flag", "[vide
     // Without cut c there is no flag.
     REQUIRE(!QueryNotesWfi(false, false));
     REQUIRE(!QueryNotesWfi(false, true));
+}
+
+TEST_CASE("Nx2StageSplit: the puller's fences run in a join from B", "[video_core]") {
+    // T9c (R2 F3): SignalFence, SyncOperation, SignalSyncPoint and SignalReference always.
+    for (const bool force : {false, true}) {
+        for (const bool async_check : {false, true}) {
+            REQUIRE(FenceJoinsB(FenceCall::Signal, force, async_check));
+            REQUIRE(FenceJoinsB(FenceCall::Sync, force, async_check));
+            REQUIRE(FenceJoinsB(FenceCall::SyncPoint, force, async_check));
+            REQUIRE(FenceJoinsB(FenceCall::Reference, force, async_check));
+        }
+    }
+    // ReleaseFences: a forced one waits for the fences (SignalFence and its wait).
+    REQUIRE(FenceJoinsB(FenceCall::Release, true, true));
+    REQUIRE(FenceJoinsB(FenceCall::Release, true, false));
+    // OnCommandListEnd's at each command list: nothing to do with the async check (Vulkan).
+    REQUIRE(!FenceJoinsB(FenceCall::Release, false, true));
+    // Without it the release checks the fences itself (the fence manager's).
+    REQUIRE(FenceJoinsB(FenceCall::Release, false, false));
+}
+
+TEST_CASE("Nx2StageSplit: a cached write's texture half goes to C, its buffer half to B",
+          "[video_core]") {
+    // T9c (R2c review): OnCachedWrite / OnCacheInvalidation on B outside a join.
+    REQUIRE(True(CpuWriteCaches & CacheType::TextureCache));
+    REQUIRE(True(CpuWriteCaches & CacheType::BufferCache));
+    REQUIRE(True(CpuWriteCaches & CacheType::ShaderCache));
+    REQUIRE(False(CpuWriteCaches & CacheType::QueryCache));
+    const CacheHalves cpu = SplitCaches(CpuWriteCaches);
+    REQUIRE(cpu.c == CacheType::TextureCache);
+    REQUIRE(cpu.b == (CacheType::BufferCache | CacheType::ShaderCache));
+    // The memory manager's invalidations (InvalidateRegionB): the query cache C's too.
+    const CacheHalves all = SplitCaches(CacheType::All);
+    REQUIRE(all.c == (CacheType::TextureCache | CacheType::QueryCache));
+    REQUIRE(all.b == (CacheType::BufferCache | CacheType::ShaderCache));
+    REQUIRE(SplitCaches(CacheType::BufferCache).c == CacheType::None);
+    REQUIRE(SplitCaches(CacheType::QueryCache).b == CacheType::None);
 }
 
 TEST_CASE("Nx2StageSplit: a write over a report C has not run waits for it", "[video_core]") {

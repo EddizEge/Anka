@@ -332,8 +332,11 @@ private:
     void InlineToMemoryB(GPUVAddr address, size_t copy_size, std::span<const u8> memory);
     void InnerInvalidationB(std::span<const std::pair<DAddr, std::size_t>> sequences);
     /// B: the memory manager's guest writes, reads and dirty checks (WriteBlock, ReadBlock,
-    /// IsMemoryDirty on B's replicas' memory managers).
-    void InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
+    /// IsMemoryDirty on B's replicas' memory managers). InvalidateRegionB also takes the CPU's
+    /// writes (OnCacheInvalidation; OnCachedWrite: `cached_write`, the buffer cache copying just
+    /// those bytes in).
+    void InvalidateRegionB(DAddr addr, u64 size, VideoCommon::CacheType which,
+                           bool cached_write = false);
     void FlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
     [[nodiscard]] bool MustFlushRegionB(DAddr addr, u64 size, VideoCommon::CacheType which);
     [[nodiscard]] bool HoldsGpuWrittenDataB(DAddr begin, size_t span);
