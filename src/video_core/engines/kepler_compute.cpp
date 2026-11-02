@@ -658,6 +658,7 @@ std::optional<Tegra::RenderTargetFormat> ScannedBlitFormat(const Texture::TICEnt
 struct UpscaleOptions {
     bool scan{true};
     bool learn{true};
+    bool skip_header{true}; ///< EDEN_NX2_UPSCALE_HEADER=0: bank 0's size words may be handles
     std::optional<Nx2UpscalePick::Location> input_at;
     std::optional<Nx2UpscalePick::Location> output_at;
 };
@@ -669,6 +670,8 @@ const UpscaleOptions& GetUpscaleOptions() {
         o.scan = scan == nullptr || scan[0] != '0';
         const char* learn = std::getenv("EDEN_NX2_UPSCALE_LEARN");
         o.learn = learn == nullptr || learn[0] != '0';
+        const char* header = std::getenv("EDEN_NX2_UPSCALE_HEADER");
+        o.skip_header = header == nullptr || header[0] != '0';
         o.input_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_IN"));
         o.output_at = Nx2UpscalePick::ParseLocation(std::getenv("EDEN_NX2_UPSCALE_OUT"));
         return o;
@@ -838,11 +841,12 @@ std::vector<u32> KeplerCompute::ReadNativeBank(u32 slot, u32 max_bytes) {
 // Bananza's upscalers (nx2_upscale_pick.h): the input and the output are the images of the sizes
 // in constant bank 0 that words of the bound banks name; the input is blitted (bilinear) to each
 // output. The words found are kept per program and read again first. EDEN_NX2_UPSCALE_SCAN=0
-// leaves the outputs unwritten as before; EDEN_NX2_UPSCALE_IN / EDEN_NX2_UPSCALE_OUT=<bank>:<offset>
-// (hex, from EDEN_NX2_UPSCALE_DIAG) take only that word. Bank 0's size words are never taken as
-// handles, and the first full scan whose only input-sized image a bank 0 word names teaches that
-// word to the other programs (EDEN_NX2_UPSCALE_LEARN=0: not). Every 10 s with blits, one line of
-// how many each program made.
+// leaves the outputs unwritten as before; EDEN_NX2_UPSCALE_IN /
+// EDEN_NX2_UPSCALE_OUT=<bank>:<offset> (hex, from EDEN_NX2_UPSCALE_DIAG) take only that word. Bank
+// 0's size words are not taken as handles (EDEN_NX2_UPSCALE_HEADER=0: they are, as before). The
+// first full scan whose only input-sized image a bank 0 word names teaches that word to the other
+// programs (EDEN_NX2_UPSCALE_LEARN=0: not); programs that remembered an input elsewhere scan again.
+// Every 10 s with blits, one line of how many each program made, over the time up to the last call.
 bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     namespace Up = Nx2UpscalePick;
     const UpscaleOptions& options = GetUpscaleOptions();
@@ -864,13 +868,16 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     static std::optional<Up::Location> learned_input;
     const u64 program = regs.code_loc.Address();
     Memo& memo = memos[program];
-    // The 10 s summary (written at the first dispatch after it is due).
+    // The 10 s summary (written at the first dispatch after it is due, over the time up to the
+    // call before: with no dispatch for a while, at 100% resolution, that time is not counted).
     {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point summary_since = Clock::now();
+        static Clock::time_point last_call = summary_since;
         static u32 window_calls{};
         ++window_calls;
-        if (const auto now = Clock::now(); now - summary_since >= std::chrono::seconds{10}) {
+        const auto now = Clock::now();
+        if (now - summary_since >= std::chrono::seconds{10}) {
             u32 blits = 0;
             std::string programs;
             for (auto& [address, m] : memos) {
@@ -884,12 +891,13 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
             if (blits != 0) {
                 LOG_INFO(HW_GPU,
                          "Tensor upscale stand-in, last {:.0f} s: {} blits in {} dispatches ({})",
-                         std::chrono::duration<double>(now - summary_since).count(), blits,
+                         std::chrono::duration<double>(last_call - summary_since).count(), blits,
                          window_calls - 1, programs);
             }
             summary_since = now;
             window_calls = 1;
         }
+        last_call = now;
     }
     const auto bank0 = ReadNativeBank(0, 0x100);
     const auto sizes = Up::SizesFromBank0(bank0, launch_description.block_dim_x.Value(), qmd[12],
@@ -942,7 +950,8 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     };
     const auto choose = [&] {
         return Up::Choose(*sizes, candidates, UpscaleFormats, options.input_at, options.output_at,
-                          options.learn && !options.input_at ? learned_input : std::nullopt);
+                          options.learn && !options.input_at ? learned_input : std::nullopt,
+                          options.skip_header);
     };
     bool full_scan = false;
     Up::Pick chosen;
@@ -1008,14 +1017,21 @@ bool KeplerCompute::UpscaleBySizes(const NativeQmdScheduler::Descriptor& qmd) {
     memo.failed = 0;
     memo.skipped = 0;
     const Up::Candidate& input = candidates[*chosen.input];
-    if (full_scan && options.learn && !options.input_at && !learned_input) {
-        if (const auto where = Up::Learnable(chosen, candidates)) {
-            learned_input = where;
-            LOG_INFO(HW_GPU,
-                     "Tensor upscale stand-in: input location learned: bank {} +{:#x} (program "
-                     "{:#x} {}x{})",
-                     where->first, where->second, program, sizes->in_w, sizes->in_h);
+    if (const auto where = Up::Teach(chosen, candidates, full_scan, options.learn,
+                                     options.input_at.has_value(), learned_input.has_value())) {
+        learned_input = where;
+        // Picks remembered before (by format order) see the location only in a scan.
+        u32 rescans = 0;
+        for (auto& [address, m] : memos) {
+            if (Up::RescanAfterLearning(m.words, *where)) {
+                m.words.clear();
+                ++rescans;
+            }
         }
+        LOG_INFO(HW_GPU,
+                 "Tensor upscale stand-in: input location learned: bank {} +{:#x} (program {:#x} "
+                 "{}x{}); {} other program(s) scan again",
+                 where->first, where->second, program, sizes->in_w, sizes->in_h, rescans);
     }
     if (full_scan && chosen.input_matches > 1 && !memo.told_ambiguous) {
         memo.told_ambiguous = true;

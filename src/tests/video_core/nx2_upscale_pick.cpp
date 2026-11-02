@@ -118,6 +118,14 @@ TEST_CASE("Nx2UpscalePick: bank 0's size words are not handles", "[video_core]")
     REQUIRE(pinned.input == 0u);
     REQUIRE(pinned.output_count == 1u);
     REQUIRE(pinned.outputs[0] == 3u);
+    // EDEN_NX2_UPSCALE_HEADER=0: the header words are candidates as before (+0x28 comes first).
+    const Pick old =
+        Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, std::nullopt, false);
+    REQUIRE(old.input == 0u);
+    REQUIRE(old.input_matches == 2u);
+    REQUIRE(old.output_count == 2u);
+    // Learnable never takes a header word, even then.
+    REQUIRE(!Learnable(old, candidates));
 }
 
 TEST_CASE("Nx2UpscalePick: the preferred input location", "[video_core]") {
@@ -139,12 +147,16 @@ TEST_CASE("Nx2UpscalePick: the preferred input location", "[video_core]") {
     REQUIRE(preferred.input == 1u);
     REQUIRE(preferred.input_matches == 2u);
     REQUIRE(preferred.output_count == 1u);
-    // It overrides the format order too.
+    // A preferred input with no output of its format: the format order (its pair is usable).
     candidates[0].format = RGBA16F;
     candidates[2].format = RGBA16F;
     REQUIRE(Choose(sizes, candidates, PREFERENCE).input == 0u);
-    REQUIRE(Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60})
-                .input == 1u);
+    const Pick no_output =
+        Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60});
+    REQUIRE(no_output.input == 0u);
+    REQUIRE(no_output.output_count == 1u);
+    REQUIRE(no_output.outputs[0] == 2u);
+    REQUIRE(Usable(no_output));
     candidates[0].format = R11G11B10F;
     candidates[2].format = R11G11B10F;
     // A preferred word naming an image the blit can't use: the format order.
@@ -179,10 +191,64 @@ TEST_CASE("Nx2UpscalePick: a pinned input wins over the preferred one", "[video_
     REQUIRE(pick.input_matches == 1u);
 }
 
-TEST_CASE("Nx2UpscalePick: nothing learned from the remembered words alone", "[video_core]") {
+TEST_CASE("Nx2UpscalePick: the preferred input wins over the format order", "[video_core]") {
+    // Both inputs have an output of their format: the preferred one is taken.
+    const Sizes sizes{1440, 810, 2880, 1620};
+    const std::array<Candidate, 4> candidates{{
+        {.slot = 3,
+         .offset = 0x10,
+         .index = 1,
+         .address = 0x1000,
+         .width = 1440,
+         .height = 810,
+         .format = RGBA16F,
+         .usable = true},
+        {.slot = 0,
+         .offset = 0x60,
+         .index = 2,
+         .address = 0x2000,
+         .width = 1440,
+         .height = 810,
+         .format = R11G11B10F,
+         .usable = true},
+        {.slot = 3,
+         .offset = 0x20,
+         .index = 3,
+         .address = 0x3000,
+         .width = 2880,
+         .height = 1620,
+         .format = R11G11B10F,
+         .usable = true},
+        {.slot = 3,
+         .offset = 0x30,
+         .index = 4,
+         .address = 0x4000,
+         .width = 2880,
+         .height = 1620,
+         .format = RGBA16F,
+         .usable = true},
+    }};
+    const Pick by_format = Choose(sizes, candidates, PREFERENCE);
+    REQUIRE(by_format.input == 0u);
+    REQUIRE(by_format.output_count == 1u);
+    REQUIRE(by_format.outputs[0] == 3u);
+    const Pick preferred =
+        Choose(sizes, candidates, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60});
+    REQUIRE(preferred.input == 1u);
+    REQUIRE(preferred.output_count == 1u);
+    REQUIRE(preferred.outputs[0] == 2u);
+    // Without any output: no pair either way.
+    const std::array<Candidate, 2> inputs{candidates[0], candidates[1]};
+    const Pick none =
+        Choose(sizes, inputs, PREFERENCE, std::nullopt, std::nullopt, Location{0, 0x60});
+    REQUIRE(none.input == 0u);
+    REQUIRE(none.output_count == 0u);
+    REQUIRE(!Usable(none));
+}
+
+TEST_CASE("Nx2UpscalePick: an input outside bank 0 is not learnable", "[video_core]") {
     // A full scan found two inputs and took bank 3 +0x10 by format; the next dispatch reads only
     // the remembered words (that one and the output): one input, but not one to teach (bank 3).
-    // The caller teaches from full scans only, so the location learned is a full scan's.
     const Sizes sizes{1440, 810, 2880, 1620};
     const std::array<Candidate, 2> remembered{{
         {.slot = 3, .offset = 0x10, .index = 1, .address = 0x1000, .width = 1440, .height = 810,
@@ -194,4 +260,51 @@ TEST_CASE("Nx2UpscalePick: nothing learned from the remembered words alone", "[v
     REQUIRE(pick.input == 0u);
     REQUIRE(pick.input_matches == 1u);
     REQUIRE(!Learnable(pick, remembered));
+}
+
+TEST_CASE("Nx2UpscalePick: nothing learned from the remembered words alone", "[video_core]") {
+    // A full scan found two inputs and took bank 0 +0x60 by format order: not learnable then
+    // (two inputs). The next dispatch reads only the remembered words: one input at bank 0 +0x60,
+    // which Learnable alone would teach. Teach takes full scans only.
+    const Sizes sizes{1440, 810, 2880, 1620};
+    const std::array<Candidate, 2> remembered{{
+        {.slot = 0,
+         .offset = 0x60,
+         .index = 2,
+         .address = 0x2000,
+         .width = 1440,
+         .height = 810,
+         .format = R11G11B10F,
+         .usable = true},
+        {.slot = 3,
+         .offset = 0x20,
+         .index = 3,
+         .address = 0x3000,
+         .width = 2880,
+         .height = 1620,
+         .format = R11G11B10F,
+         .usable = true},
+    }};
+    const Pick pick = Choose(sizes, remembered, PREFERENCE);
+    REQUIRE(pick.input_matches == 1u);
+    REQUIRE(Learnable(pick, remembered) == Location{0, 0x60});
+    REQUIRE(!Teach(pick, remembered, false, true, false, false));
+    REQUIRE(Teach(pick, remembered, true, true, false, false) == Location{0, 0x60});
+    // EDEN_NX2_UPSCALE_LEARN=0, EDEN_NX2_UPSCALE_IN, or a location already learned: nothing.
+    REQUIRE(!Teach(pick, remembered, true, false, false, false));
+    REQUIRE(!Teach(pick, remembered, true, true, true, false));
+    REQUIRE(!Teach(pick, remembered, true, true, false, true));
+}
+
+TEST_CASE("Nx2UpscalePick: programs that remembered another input scan again", "[video_core]") {
+    const Location learned{0, 0x60};
+    // Input first, then the outputs.
+    const std::array<Location, 2> elsewhere{Location{0, 0x38}, Location{0, 0x70}};
+    const std::array<Location, 2> there{Location{0, 0x60}, Location{0, 0x38}};
+    const std::array<Location, 2> other_bank{Location{3, 0x60}, Location{0, 0x38}};
+    REQUIRE(RescanAfterLearning(elsewhere, learned));
+    REQUIRE(RescanAfterLearning(other_bank, learned));
+    REQUIRE(!RescanAfterLearning(there, learned));
+    // Nothing remembered: it scans anyway.
+    REQUIRE(!RescanAfterLearning({}, learned));
 }

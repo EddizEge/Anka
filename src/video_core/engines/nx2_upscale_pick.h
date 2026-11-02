@@ -80,22 +80,17 @@ struct Pick {
 
 using Location = std::pair<u32, u32>; ///< constant bank, byte offset
 
-/// The input: the input-sized image whose format comes first in `preference`, or the one at
-/// `prefer_input` (the location other programs' only input was found at) when that word names
-/// one. The outputs: every output-sized image of the same format at its own address (the result
-/// and, if the program keeps one, its history: writing both is harmless when the program itself
-/// does not run); see Pick::Ambiguous for when there are too many of them. Bank 0's header words
-/// are skipped unless `input_at` / `output_at` pin a word.
-inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
-                   std::span<const u32> preference, std::optional<Location> input_at = {},
-                   std::optional<Location> output_at = {},
-                   std::optional<Location> prefer_input = {}) {
+/// Choose with or without the preferred input location (one pass).
+inline Pick ChooseOnce(const Sizes& sizes, std::span<const Candidate> candidates,
+                       std::span<const u32> preference, std::optional<Location> input_at,
+                       std::optional<Location> output_at, std::optional<Location> prefer_input,
+                       bool skip_header) {
     Pick pick;
     const auto at = [](const Candidate& c, const std::optional<Location>& where) {
         return !where || (c.slot == where->first && c.offset == where->second);
     };
-    const auto header = [](const Candidate& c, const std::optional<Location>& pinned) {
-        return !pinned && c.slot == 0 && c.offset < Bank0HeaderBytes;
+    const auto header = [skip_header](const Candidate& c, const std::optional<Location>& pinned) {
+        return skip_header && !pinned && c.slot == 0 && c.offset < Bank0HeaderBytes;
     };
     const auto input_ok = [&](const Candidate& c) {
         return c.usable && c.width == sizes.in_w && c.height == sizes.in_h && at(c, input_at) &&
@@ -153,9 +148,34 @@ inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
     return pick;
 }
 
+/// Whether a pick can be blitted: an input and outputs, not too many of them.
+inline bool Usable(const Pick& pick) {
+    return pick.input && pick.output_count != 0 && !pick.Ambiguous();
+}
+
+/// The input: the input-sized image whose format comes first in `preference`, or the one at
+/// `prefer_input` (the location other programs' only input was found at) when that word names
+/// one and the pick with it is usable (else the format order: the preferred image may have no
+/// output of its format). The outputs: every output-sized image of the same format at its own
+/// address (the result and, if the program keeps one, its history: writing both is harmless
+/// when the program itself does not run); see Pick::Ambiguous for when there are too many of
+/// them. Bank 0's header words are skipped (`skip_header`, EDEN_NX2_UPSCALE_HEADER=0: not) unless
+/// `input_at` / `output_at` pin a word.
+inline Pick Choose(const Sizes& sizes, std::span<const Candidate> candidates,
+                   std::span<const u32> preference, std::optional<Location> input_at = {},
+                   std::optional<Location> output_at = {},
+                   std::optional<Location> prefer_input = {}, bool skip_header = true) {
+    const Pick pick =
+        ChooseOnce(sizes, candidates, preference, input_at, output_at, prefer_input, skip_header);
+    if (!prefer_input || Usable(pick)) {
+        return pick;
+    }
+    return ChooseOnce(sizes, candidates, preference, input_at, output_at, std::nullopt,
+                      skip_header);
+}
+
 /// The input location a full scan may teach the other programs (EDEN_NX2_UPSCALE_LEARN): its
 /// only input-sized image, named by a word of bank 0 past the header, with an unambiguous output.
-/// Not from a scan of the remembered words alone: those hold just the word picked before.
 inline std::optional<Location> Learnable(const Pick& pick, std::span<const Candidate> candidates) {
     if (!pick.input || pick.input_matches != 1 || pick.output_count == 0 || pick.Ambiguous()) {
         return std::nullopt;
@@ -165,6 +185,24 @@ inline std::optional<Location> Learnable(const Pick& pick, std::span<const Candi
         return std::nullopt;
     }
     return Location{c.slot, c.offset};
+}
+
+/// What a dispatch teaches (Learnable), if it may: only from a full scan (a scan of the
+/// remembered words alone holds just the word picked before, its one input says nothing), with
+/// learning on, no pinned input (EDEN_NX2_UPSCALE_IN) and nothing learned yet.
+inline std::optional<Location> Teach(const Pick& pick, std::span<const Candidate> candidates,
+                                     bool full_scan, bool learn, bool input_pinned, bool learned) {
+    if (!full_scan || !learn || input_pinned || learned) {
+        return std::nullopt;
+    }
+    return Learnable(pick, candidates);
+}
+
+/// Once a location is learned, a program whose remembered words (input first) take its input
+/// from elsewhere scans again: its pick was made before, by format order, and the preferred
+/// location only works in a scan (its remembered words do not hold it).
+inline bool RescanAfterLearning(std::span<const Location> words, Location learned) {
+    return !words.empty() && words.front() != learned;
 }
 
 /// "<bank>:<offset>" (offset in hex), e.g. "3:1a0".
