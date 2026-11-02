@@ -453,9 +453,13 @@ void ParkB(FunctionRef op) {
     });
 }
 
-bool StageTickWork(FunctionRef run) {
+bool StageTickWork(bool idle, FunctionRef run) {
     if (!Active() || !g_pipeline.Options().cut_c) {
         return false;
+    }
+    if (idle) {
+        // T9b review protokol-3: no ParkB for an empty queue (TICK_SKIP=0 ticks every draw).
+        return true;
     }
     if (OnStage(Stage::C)) {
         if (t_park_op) {
