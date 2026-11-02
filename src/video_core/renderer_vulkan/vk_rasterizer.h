@@ -565,14 +565,9 @@ private:
         std::vector<std::pair<DAddr, u64>> ranges;
     };
     StageTargets stage_targets;
-    /// B (omur-1): the pool ranges [begin, end) of work C may not have run yet, each with the
+    /// B (omur-1): the pool ranges (GPU addresses) of work C may not have run yet, each with the
     /// last seq that reads it; dropped once C ran that seq (Nx2GpuPages::RanSeq) and at B's joins.
-    struct StagePool {
-        u64 seq;
-        GPUVAddr begin;
-        GPUVAddr end;
-    };
-    std::vector<StagePool> stage_pools;
+    VideoCommon::Nx2Stages::InFlightRanges stage_pools;
     /// B (T7c review finding 3): the guest memory query reports B sent C write ([address,
     /// address + 16)): C writes a payload release at once, so a write of B's own there waits.
     VideoCommon::Nx2Stages::InFlightRanges stage_query_writes;

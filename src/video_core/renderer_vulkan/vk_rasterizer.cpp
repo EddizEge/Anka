@@ -3793,7 +3793,7 @@ void RasterizerVulkan::JoinB(Func&& func) {
         b_in_join = was_in_join;
     });
     // C ran everything B sent before.
-    stage_pools.clear();
+    stage_pools.Clear();
     stage_query_writes.Clear();
 }
 
@@ -3860,11 +3860,23 @@ void RasterizerVulkan::BeginStagesHook(void* context) {
     rasterizer->light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
     rasterizer->stage_targets.valid = false;
     rasterizer->stage_query_since_wfi = true;
+    // Nothing in flight from a run before.
+    rasterizer->stage_pools.Clear();
+    rasterizer->stage_query_writes.Clear();
+    rasterizer->stage_c_ranges.clear();
 }
 
 void RasterizerVulkan::EndStagesHook(void* context) {
-    // Stop, after B and C stopped: the anchor's seq is noted, then the runtime's pending one.
+    // Stop, after B and C stopped: C's half of invalidations B had not sent yet runs here (nothing
+    // runs behind), the anchor's seq is noted, then the runtime's pending one.
     auto* const rasterizer = static_cast<RasterizerVulkan*>(context);
+    if (!rasterizer->stage_c_ranges.empty()) {
+        rasterizer->RunStageInvalidations(rasterizer->stage_c_ranges.data(),
+                                          static_cast<u32>(rasterizer->stage_c_ranges.size() / 2));
+        rasterizer->stage_c_ranges.clear();
+    }
+    rasterizer->stage_pools.Clear();
+    rasterizer->stage_query_writes.Clear();
     rasterizer->ReleaseAnchorC();
     std::scoped_lock lock{rasterizer->buffer_cache.mutex};
     rasterizer->buffer_cache_runtime.EndStages();
@@ -3969,18 +3981,12 @@ u64 RasterizerVulkan::NextStageSeq() const noexcept {
 }
 
 void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) {
+    // The same two pools draw after draw: InFlightRanges looks at its last entries first.
+    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
     const auto note = [&](GPUVAddr pool, u32 limit) {
-        if (pool == 0) {
-            return;
+        if (pool != 0) {
+            stage_pools.Note(pool, pool + (u64{limit} + 1) * 32, seq, ran);
         }
-        const GPUVAddr end = pool + (u64{limit} + 1) * 32;
-        for (StagePool& known : stage_pools) {
-            if (known.begin == pool && known.end == end) {
-                known.seq = (std::max)(known.seq, seq);
-                return;
-            }
-        }
-        stage_pools.push_back({.seq = seq, .begin = pool, .end = end});
     };
     const auto& regs = mb.regs;
     note(regs.tex_header.Address(), regs.tex_header.limit);
@@ -3988,11 +3994,8 @@ void RasterizerVulkan::NotePoolsB(const Tegra::Engines::Maxwell3D& mb, u64 seq) 
 }
 
 bool RasterizerVulkan::WritesPoolsB(GPUVAddr address, u64 size) {
-    const u64 ran = VideoCommon::Nx2Stages::GpuPages().RanSeq();
-    std::erase_if(stage_pools, [ran](const StagePool& pool) { return pool.seq <= ran; });
-    return std::ranges::any_of(stage_pools, [&](const StagePool& pool) {
-        return address < pool.end && pool.begin < address + size;
-    });
+    return stage_pools.Overlaps(address, address + size,
+                                VideoCommon::Nx2Stages::GpuPages().RanSeq());
 }
 
 void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
