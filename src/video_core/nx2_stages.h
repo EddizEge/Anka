@@ -73,7 +73,8 @@ inline bool InJoin() {
     return Detail::t_in_join;
 }
 /// What the proxy forwards from: A outside a join. From any other thread (B or C, the front
-/// after a Drain, A inside a join) it calls the real rasterizer.
+/// after a Drain, A inside a join) it calls the real rasterizer. Code choosing between a join, a
+/// record and the real call tests Forwarding(), never OnStage(Stage::A) alone (K4).
 inline bool Forwarding() {
     return OnStage(Stage::A) && !InJoin();
 }
@@ -89,7 +90,8 @@ using Ring1Thunk = void (*)(const u64* payload);
 /// Producer (A for ToB, B for ToC): room for a Call record running `thunk` with `payload_words`
 /// words; returns where the payload goes. From A, the deltas A's capture holds go in the same
 /// record, before it (S5/1). The consumer sees it from Commit on (published as GpuSplit does).
-/// Only while Active().
+/// Only while Active(). A inside a join writes no record (K4): Reserve, Post, Forward,
+/// PostCbData, PostTarget and PostMark assert !InJoin().
 u64* Reserve(Ring ring, Thunk thunk, u32 payload_words);
 void Commit(Ring ring);
 /// Makes what was committed visible to the consumer now (the end of a batch, before a wait).
@@ -164,6 +166,10 @@ private:
 /// ack wait spins briefly, then sleeps (an atomic wait); with STAGE_CHECK one past 50 ms is
 /// logged. =2 lockstep: for a Join record the producer waits for the park ack, never for the
 /// record's end (the consumer ends it only once A releases; S8).
+/// Nested and elsewhere (K4): from A inside a join (InJoin(), e.g. engine_upload's block linear
+/// path in a ring level join of KeplerMemory), from any other thread and with the stages off or
+/// at =3, `op` runs at once: no record, no wait, not counted. Inside a join A sends nothing (see
+/// Reserve); RegCapture::Note only collects there, its words go with the first record after.
 void JoinFromA(JoinReason reason, FunctionRef op);
 // K2: joins between B and C (K1 calls neither: BC owns every cache). T1 writes them now, with
 // their unit tests; T9 calls them. The rules (S13, K3):

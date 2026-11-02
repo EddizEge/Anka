@@ -54,6 +54,9 @@ public:
     /// The constant buffer data registers (const_buffer.buffer[0..15]) are left out but at =2
     /// (S5/4: no stage reads them). A write to another engine than Source() first sends
     /// Nx2Stages::PostTarget(Ring::ToB, &engine): what is pending goes there, for the old one.
+    /// Inside a join (Nx2Stages::InJoin()) it only collects, no record can go (K4): a write to
+    /// another engine there is an error (no Maxwell3D method runs in a join but
+    /// ProcessQueryCondition's, which writes execute_on alone).
     void Note(Tegra::Engines::Maxwell3D& engine, u32 method, u32 value, bool dirty, bool changed) {}
 
     /// Delta words pending (each record from A takes them, Nx2Stages::Reserve).
