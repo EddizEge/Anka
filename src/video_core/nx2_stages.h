@@ -216,7 +216,9 @@ void JoinFromA(JoinReason reason, FunctionRef op);
 //   join's `op` runs on the joiner and may take it there: A in JoinFromA (B and C parked, holding
 //   none), B in JoinFromB, B again in JoinFromBLocked (the same thread; recursive). Threads that
 //   are no stage (the guest CPU's, the fence thread) take it as before and wait for a
-//   JoinFromBLocked to end.
+//   JoinFromBLocked to end; while they wait for it they hold no other cache lock (C may need
+//   the texture or query cache's to reach the join's target; one std::scoped_lock of several
+//   mutexes waits holding none of them, taking one inside another's scope does not).
 // - Every other cache lock (texture, query, the scheduler's): no stage holds one at a park point,
 //   when it asks (JoinFromB, JoinFromBLocked, ParkB) or while it writes or waits on ring 3. So an
 //   `op` may take any lock: the parked stage holds none.
