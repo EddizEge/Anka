@@ -19,6 +19,7 @@ add_executable(tests
     core/core_timing.cpp
     core/internal_network/network.cpp
     core/nx2_ipc_trace.cpp
+    core/nx2_present_rate.cpp
     core/nx2_vi2_reply.cpp
     video_core/memory_tracker.cpp
     video_core/ampere_returns.cpp

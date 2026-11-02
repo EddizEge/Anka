@@ -66,6 +66,7 @@
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
+#include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/nx2_vi2_reply.h"
 #include "core/hle/service/sm/sm.h"
@@ -1057,7 +1058,7 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24]);
         const auto composited = std::chrono::steady_clock::now();
-        PaceToVblank(PresentInterval(w));
+        PaceToVblank(PresentInterval(w), PresentRate(w));
         if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
             if (VideoCommon::Nx2ModePace::Hold(PresentInterval(w), GuestSleeperOrNull()) &&
                 VblankGridMode() == 0) {
@@ -1102,18 +1103,22 @@ private:
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
                 // EDEN_NX2_PACE_GUEST_SLEEP: of the pacing, the guest kernel sleeps (the core free)
-                // and how late they woke.
-                std::string guest;
+                // and how late they woke; EDEN_NX2_PRESENT_RATE: presents paced at another rate.
+                std::string extra;
                 if (VideoCommon::Nx2ModePace::GuestSleepOn()) {
                     auto& g = VideoCommon::Nx2ModePace::g_guest_sleep;
                     const u64 sleeps = g.sleeps.exchange(0, std::memory_order_relaxed);
                     const u64 slept = g.slept_ns.exchange(0, std::memory_order_relaxed);
                     const u64 late = g.late_ns.exchange(0, std::memory_order_relaxed);
                     const u64 late_max = g.late_max_ns.exchange(0, std::memory_order_relaxed);
-                    guest = fmt::format(" ({} us of it on the guest core: {} sleeps, {} us late on "
+                    extra = fmt::format(" ({} us of it on the guest core: {} sleeps, {} us late on "
                                         "average, max {})",
                                         slept / 1000 / 600, sleeps,
                                         sleeps != 0 ? late / 1000 / sleeps : 0, late_max / 1000);
+                }
+                if (PresentRateOn()) {
+                    extra += fmt::format(", {} paced at the word's rate (last {} Hz)",
+                                         m_stats.rate_presents, m_rate != 0 ? m_rate : 60);
                 }
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
@@ -1121,7 +1126,7 @@ private:
                          "pacing {} us{}",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
-                         m_stats.pace_us / 600, guest);
+                         m_stats.pace_us / 600, extra);
                 m_stats = {.last_present = entered};
             }
         }
@@ -1140,10 +1145,13 @@ private:
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
         u32 presents{};
+        u32 rate_presents{}; // EDEN_NX2_PRESENT_RATE: paced at a rate other than 60 Hz
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
+    u32 m_rate{};       // EDEN_NX2_PRESENT_RATE: the last present's rate, 0: 60 Hz
+    u32 m_rate_lines{}; // its rate change lines so far (at most 50)
 
     // The console flips one frame per 60 Hz vblank and keeps the rest queued, so a game can't
     // present faster than that. Every slot is reported free here: hold each present until the
@@ -1196,11 +1204,22 @@ private:
         return VideoCommon::Nx2ModePace::GuestSleepOn() ? &m_guest_sleeper : nullptr;
     }
 
-    void PaceToVblank(u32 vblanks) {
+    // `rate`: PresentRate's, 0 for 60 Hz vblanks.
+    void PaceToVblank(u32 vblanks, u32 rate) {
         if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
             return;
         }
-        const long long period = 100'000'000'000LL / 60 / Settings::SpeedLimit();
+        if (PresentRateOn()) [[unlikely]] {
+            m_stats.rate_presents += rate != 0 ? 1 : 0;
+            if (rate != m_rate && m_rate_lines < 50) {
+                ++m_rate_lines;
+                LOG_INFO(Service, "nx2:vi2 present #{}: paced {} vblanks at {} Hz{}", m_presents,
+                         vblanks, rate != 0 ? rate : 60,
+                         m_rate_lines == 50 ? " (the last such line)" : "");
+            }
+            m_rate = rate;
+        }
+        const long long period = Nx2PresentRate::VblankNs(rate, Settings::SpeedLimit());
         // The grid reads CoreTiming's clock, the wall clock only with multicore (single core: the
         // guest's ticks, which a sleep here does not advance): otherwise the pacing below.
         if (VblankGridMode() != 0 && Settings::values.use_multi_core.GetValue()) {
@@ -1210,7 +1229,8 @@ private:
         const auto interval = std::chrono::nanoseconds{period * vblanks};
         const auto now = std::chrono::steady_clock::now();
         if (now > m_next_vblank + interval) {
-            // Running slower than 60 fps (60 / vblanks): show at once and don't bank the lost time.
+            // Running slower than 60 fps (60 / vblanks; the rate's with EDEN_NX2_PRESENT_RATE): show
+            // at once and don't bank the lost time.
             m_next_vblank = now;
         } else if (now < m_next_vblank) {
             VideoCommon::Nx2ModePace::SleepUntil(m_next_vblank, GuestSleeperOrNull());
@@ -1264,6 +1284,46 @@ private:
             return s;
         }();
         return source;
+    }
+
+    // EDEN_NX2_PRESENT_RATE=1 (off by default): pace by the refresh rate in the low half of the
+    // swap interval word too (nx2_present_rate.h). Needs EDEN_NX2_PRESENT_INTERVAL_WORD with the
+    // interval in the high half (12:16:4); off with EDEN_NX2_VBLANK_GRID (a 60 Hz grid, the vsync
+    // events' too) and EDEN_NX2_MODE_PACE (its holds and thresholds are 60 Hz vblanks).
+    static bool PresentRateOn() {
+        static const bool on = [] {
+            const char* text = std::getenv("EDEN_NX2_PRESENT_RATE");
+            if (text == nullptr || text[0] == '0') {
+                return false;
+            }
+            const IntervalSource& source = PresentIntervalSource();
+            if (source.word == 0 || source.shift < 16) {
+                LOG_WARNING(Service, "EDEN_NX2_PRESENT_RATE needs EDEN_NX2_PRESENT_INTERVAL_WORD "
+                                     "with the interval in the high half (12:16:4): off");
+                return false;
+            }
+            if (VblankGridMode() != 0) {
+                LOG_WARNING(Service, "EDEN_NX2_PRESENT_RATE with EDEN_NX2_VBLANK_GRID (a 60 Hz "
+                                     "grid): off");
+                return false;
+            }
+            if (VideoCommon::Nx2ModePace::Enabled()) {
+                LOG_WARNING(Service, "EDEN_NX2_PRESENT_RATE with EDEN_NX2_MODE_PACE (its holds are "
+                                     "60 Hz vblanks): off");
+                return false;
+            }
+            LOG_INFO(Service, "nx2:vi2 present rate (EDEN_NX2_PRESENT_RATE): word {}'s low 16 "
+                              "bits, a rate of 30-240 Hz other than 60 paces the interval's "
+                              "vblanks at that rate",
+                     source.word);
+            return true;
+        }();
+        return on;
+    }
+
+    // The refresh rate EDEN_NX2_PRESENT_RATE paces at, 0: 60 Hz.
+    static u32 PresentRate(const u32* w) {
+        return PresentRateOn() ? Nx2PresentRate::Rate(w[PresentIntervalSource().word]) : 0;
     }
 
     static u32 PresentInterval(const u32* w) {
