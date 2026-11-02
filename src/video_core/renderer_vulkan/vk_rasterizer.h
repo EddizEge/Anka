@@ -534,9 +534,12 @@ private:
     };
     StageDynamicPipeline stage_dynamic;
     /// B: the device ranges of the bound render targets and depth (T8's PreSet for each packet),
-    /// found again when the registers or the memory manager change, and each frame.
+    /// found again when the registers, the memory manager (GetID) or its page table
+    /// (MappingEpoch) change; TickFrame and Start drop them too.
     struct StageTargets {
         Tegra::MemoryManager* gpu_memory{};
+        size_t memory_id{};
+        u64 mapping_epoch{};
         std::array<std::pair<GPUVAddr, u64>, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets + 1>
             key{};
         bool valid{};

@@ -3927,7 +3927,11 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
                                               layers, 8)};
     }
     StageTargets& targets = stage_targets;
-    if (!targets.valid || targets.gpu_memory != gpu_memory || targets.key != key) {
+    // Read before the walk: a mapping changed meanwhile walks again at the next packet.
+    const u64 mapping_epoch = gpu_memory->MappingEpoch();
+    if (!targets.valid || targets.gpu_memory != gpu_memory ||
+        targets.memory_id != gpu_memory->GetID() || targets.mapping_epoch != mapping_epoch ||
+        targets.key != key) {
         // Device pages found page by page, contiguous ones as one range (PreSetGpu's walk, kept
         // for the packets after while the registers stay).
         targets.ranges.clear();
@@ -3953,6 +3957,8 @@ void RasterizerVulkan::PreSetTargets(Tegra::Engines::Maxwell3D& mb, u64 seq) {
         }
         targets.key = key;
         targets.gpu_memory = gpu_memory;
+        targets.memory_id = gpu_memory->GetID();
+        targets.mapping_epoch = mapping_epoch;
         targets.valid = true;
     }
     for (const auto& [begin, size] : targets.ranges) {
