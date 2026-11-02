@@ -138,7 +138,10 @@ if (MSVC AND NOT CXX_CLANG)
         )
     endif()
 
-    if (ARCHITECTURE_x86_64)
+    # /QIntel-jcc-erratum pads branches against an Intel Skylake-era microcode erratum; on other
+    # CPUs (AMD Zen) it only grows the code. ON keeps the default build as before.
+    option(YUZU_MSVC_JCC_ERRATUM "Build with /QIntel-jcc-erratum (MSVC, x86_64)" ON)
+    if (ARCHITECTURE_x86_64 AND YUZU_MSVC_JCC_ERRATUM)
         add_compile_options(/QIntel-jcc-erratum)
     endif()
 
