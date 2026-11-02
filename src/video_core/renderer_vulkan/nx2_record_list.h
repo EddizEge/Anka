@@ -6,8 +6,10 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -26,7 +28,8 @@ namespace Vulkan::Nx2Record {
 
 /// The tick handover (§3.6/2). C notes, in seq order, the scheduler tick each of B's seqs went
 /// into; B asks whether what it stamped with a seq is done: C recorded it and the GPU passed that
-/// tick. Seqs are 64-bit here, they never wrap; DrawToC carries their low 32 bits (Widen).
+/// tick. Seqs are u64 everywhere (DrawToC::seq, K5): they never wrap, "C is done with `seq`" is a
+/// plain DoneSeq() >= seq.
 class SeqTicks {
 public:
     static constexpr u64 WINDOW = u64{1} << 14;
@@ -42,11 +45,6 @@ public:
     }
     [[nodiscard]] static constexpr u64 SeqOf(u64 stamp) noexcept {
         return stamp & ~STAMP_BIT;
-    }
-    /// The 64-bit seq whose low 32 bits are `seq`, within 2^31 of `around`.
-    [[nodiscard]] static constexpr u64 Widen(u32 seq, u64 around) noexcept {
-        const s32 delta = static_cast<s32>(seq - static_cast<u32>(around));
-        return around + static_cast<u64>(static_cast<s64>(delta));
     }
 
     /// C: `seq` and every seq before it not noted yet went into `tick`. In seq order; noting the
@@ -220,5 +218,187 @@ public:
 private:
     std::deque<std::pair<u64, T>> objects; ///< In seq order
 };
+
+/// K3 (nx2_stages.h): a stage holds no cache lock when it calls JoinFromB or ParkB, or while it
+/// writes or waits on ring 3. The buffer runtime needs the recording stage from inside the buffer
+/// cache (Wait, Finish, multi-range: BufferCacheRuntime::JoinRecordOwner), where its caller holds
+/// the buffer cache mutex, and cannot release a lock it did not take. So B takes the cache locks
+/// it holds around its work through CacheLock, which lists them per thread, and the runtime drops
+/// every listed one around its record owner hook (Unlocked) and takes them again after: the hook
+/// writes ring 3 and calls JoinFromB holding none. A cache lock B takes another way stays held
+/// (Count tells how many are listed). Only for the stages; nothing takes one with them off.
+class HeldLocks {
+public:
+    static constexpr size_t MAX_HELD = 4;
+
+    struct Entry {
+        void* mutex;
+        void (*lock)(void* mutex);
+        bool (*try_lock)(void* mutex);
+        void (*unlock)(void* mutex);
+    };
+
+    /// The cache locks this thread took through CacheLock and holds now.
+    [[nodiscard]] static size_t Count() noexcept;
+
+    /// Releases every listed lock of this thread, the last taken first (a recursive one taken
+    /// twice is listed twice), and takes them all again when it goes, without assuming an order
+    /// between them (as std::lock: one blocking, the others tried). In between this thread holds
+    /// none of them and the list is empty: what runs meanwhile may take them again through
+    /// CacheLock, as long as it lets go before this goes.
+    class Unlocked {
+    public:
+        Unlocked() noexcept;
+        ~Unlocked();
+        Unlocked(const Unlocked&) = delete;
+        Unlocked& operator=(const Unlocked&) = delete;
+
+        /// How many it released.
+        [[nodiscard]] size_t Released() const noexcept {
+            return count;
+        }
+
+    private:
+        std::array<Entry, MAX_HELD> entries{};
+        size_t count{};
+    };
+
+private:
+    template <typename... Mutexes>
+    friend class CacheLock;
+
+    struct List {
+        std::array<Entry, MAX_HELD> entries{};
+        size_t count{};
+    };
+
+    static List& ThisThread() noexcept;
+    static void Push(const Entry& entry) noexcept;
+    static void Pop(void* mutex) noexcept;
+    static void Relock(Entry* entries, size_t count);
+};
+
+/// B (K3): takes `mutexes` (std::lock's way when there are several) and lists them for
+/// HeldLocks::Unlocked; lets go of them when it goes. As std::scoped_lock otherwise.
+template <typename... Mutexes>
+class CacheLock {
+    static_assert(sizeof...(Mutexes) >= 1 && sizeof...(Mutexes) <= HeldLocks::MAX_HELD);
+
+public:
+    explicit CacheLock(Mutexes&... mutexes) : held{EntryOf(mutexes)...} {
+        if constexpr (sizeof...(Mutexes) == 1) {
+            (mutexes.lock(), ...);
+        } else {
+            std::lock(mutexes...);
+        }
+        for (const HeldLocks::Entry& entry : held) {
+            HeldLocks::Push(entry);
+        }
+    }
+
+    ~CacheLock() {
+        for (auto it = held.rbegin(); it != held.rend(); ++it) {
+            HeldLocks::Pop(it->mutex);
+            it->unlock(it->mutex);
+        }
+    }
+
+    CacheLock(const CacheLock&) = delete;
+    CacheLock& operator=(const CacheLock&) = delete;
+
+private:
+    template <typename Mutex>
+    static HeldLocks::Entry EntryOf(Mutex& mutex) noexcept {
+        return HeldLocks::Entry{
+            .mutex = &mutex,
+            .lock = [](void* lockable) { static_cast<Mutex*>(lockable)->lock(); },
+            .try_lock = [](void* lockable) { return static_cast<Mutex*>(lockable)->try_lock(); },
+            .unlock = [](void* lockable) { static_cast<Mutex*>(lockable)->unlock(); },
+        };
+    }
+
+    std::array<HeldLocks::Entry, sizeof...(Mutexes)> held;
+};
+
+inline HeldLocks::List& HeldLocks::ThisThread() noexcept {
+    static thread_local List list;
+    return list;
+}
+
+inline size_t HeldLocks::Count() noexcept {
+    return ThisThread().count;
+}
+
+inline void HeldLocks::Push(const Entry& entry) noexcept {
+    List& list = ThisThread();
+    if (list.count == MAX_HELD) [[unlikely]] {
+        std::abort();
+    }
+    list.entries[list.count++] = entry;
+}
+
+inline void HeldLocks::Pop(void* mutex) noexcept {
+    // Guards go in reverse order; the last listed entry of `mutex` is the guard's own.
+    List& list = ThisThread();
+    for (size_t index = list.count; index-- > 0;) {
+        if (list.entries[index].mutex == mutex) {
+            for (size_t next = index + 1; next < list.count; ++next) {
+                list.entries[next - 1] = list.entries[next];
+            }
+            --list.count;
+            return;
+        }
+    }
+    std::abort();
+}
+
+inline void HeldLocks::Relock(Entry* entries, size_t count) {
+    // std::lock's way: block on one, try the others; on a miss let all go and block on the one
+    // that missed first next time.
+    size_t first = 0;
+    for (;;) {
+        entries[first].lock(entries[first].mutex);
+        size_t missed = count;
+        for (size_t step = 1; step < count; ++step) {
+            const size_t index = (first + step) % count;
+            if (!entries[index].try_lock(entries[index].mutex)) {
+                missed = index;
+                for (size_t back = step; back-- > 0;) {
+                    const size_t taken = (first + back) % count;
+                    entries[taken].unlock(entries[taken].mutex);
+                }
+                break;
+            }
+        }
+        if (missed == count) {
+            return;
+        }
+        first = missed;
+    }
+}
+
+inline HeldLocks::Unlocked::Unlocked() noexcept {
+    List& list = ThisThread();
+    count = list.count;
+    entries = list.entries;
+    list.count = 0;
+    for (size_t index = count; index-- > 0;) {
+        entries[index].unlock(entries[index].mutex);
+    }
+}
+
+inline HeldLocks::Unlocked::~Unlocked() {
+    List& list = ThisThread();
+    if (list.count != 0) [[unlikely]] {
+        // What ran meanwhile kept a CacheLock past this.
+        std::abort();
+    }
+    if (count != 0) {
+        Relock(entries.data(), count);
+    }
+    list.entries = entries;
+    list.count = count;
+}
+
 
 } // namespace Vulkan::Nx2Record

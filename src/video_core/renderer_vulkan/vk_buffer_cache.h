@@ -326,15 +326,16 @@ public:
         return staged;
     }
 
-    /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, noted by C with
-    /// Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime records
-    /// into B's record list (RecordTarget), adds the binds' descriptor entries to
+    /// B, staged: a packet for C starts; returns its seq (DrawToC::seq, u64, K5; noted by C
+    /// with Scheduler::NoteSeqTick once the packet is recorded). Until EndRecords the runtime
+    /// records into B's record list (RecordTarget), adds the binds' descriptor entries to
     /// DescriptorScratch and stamps with this seq.
-    u32 BeginRecords();
+    u64 BeginRecords();
 
     /// B: ends the packet's records; returns its list for DrawToC::records (null when nothing
     /// was recorded). After it the runtime records straight to the scheduler and the guest
-    /// descriptor queue again (only joins use it then) and stamps with the next seq.
+    /// descriptor queue again (only joins use it then) and stamps with the next seq. B writes
+    /// the packet to ring 3 after letting go of its cache locks (K3).
     RecordList* EndRecords();
 
     [[nodiscard]] RecordTarget& Target() noexcept {
@@ -356,8 +357,14 @@ public:
     /// scheduler). The integration (T9) binds it to JoinFromB: `records` (B's list so far, may
     /// be null) is replayed by C first, then `op` runs on this thread with C parked; the runtime
     /// records straight to the scheduler inside `op` and goes on with a new list of the same seq
-    /// after. It is called inside buffer cache operations, i.e. with BufferCache::mutex held:
-    /// see S13 in nx2_stages.h for what the binding must keep.
+    /// after. It runs inside buffer cache operations, whose callers hold BufferCache::mutex; the
+    /// runtime calls it with every cache lock B took through Nx2Record::CacheLock let go
+    /// (Nx2Record::HeldLocks::Unlocked) and takes them again after, so the hook writes ring 3 and
+    /// calls JoinFromB holding none (S13, K3). So B takes its cache locks (the buffer cache's,
+    /// and any other it holds around buffer cache work) through CacheLock only. Meanwhile other
+    /// threads may take the buffer cache mutex (CPU write traps marking pages, UnmapGPUMemory,
+    /// the fencing thread) and the operation in progress goes on after with what it held: only
+    /// B makes and deletes buffers, what the others may change there T9 checks (T3 report).
     using RecordOwnerHook = void (*)(void* context, RecordList* records,
                                      VideoCommon::Nx2Stages::FunctionRef op);
     void SetRecordOwnerHook(RecordOwnerHook hook, void* context) noexcept {
