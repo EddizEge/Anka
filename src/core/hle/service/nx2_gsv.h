@@ -2464,11 +2464,13 @@ private:
             m_vsync->vrr = clock;
         }
         // The bottom rate: no present for 1/min s. Fires at most that long after the previous
-        // scan, whatever started it.
+        // scan, whatever started it. CoreTiming adds the returned delay to the event's time, or
+        // to the end of a pause: measured from now, the next firing is never past the deadline
+        // (an early one finds nothing due and waits for the rest).
         m_vsync_timer = Core::Timing::CreateEvent(
             "nx2:vi2 vrr vsync",
             [vsync_state = m_vsync, &system = system](
-                s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                 std::scoped_lock lk{vsync_state->mutex};
                 auto& vrr = vsync_state->vrr;
                 const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
@@ -2477,9 +2479,11 @@ private:
                     vrr.Scanned(now);
                     ++vsync_state->vrr_bottom;
                 }
-                return std::chrono::nanoseconds{vrr.NextDeadlineFrom(time)};
+                return std::chrono::nanoseconds{vrr.NextDeadlineFrom(now)};
             });
-        // A present too soon after the previous scan: its scan at the top rate.
+        // A present's scan, at once or at the top rate. On this (host) thread like every other
+        // vblank: the vi2 service thread is a guest thread, which must not signal (scheduler
+        // locks, a suspend point) while it holds the vsync mutex the timers wait on.
         m_vrr_present_timer = Core::Timing::CreateEvent(
             "nx2:vi2 vrr present",
             [vsync_state = m_vsync, &system = system](
@@ -2491,7 +2495,7 @@ private:
                 vsync_state->vrr_pending = false;
                 VblankLocked(*vsync_state, system);
                 vsync_state->vrr.Scanned(system.CoreTiming().GetGlobalTimeNs().count());
-                ++vsync_state->vrr_delayed;
+                ++(vsync_state->vrr_pending_held ? vsync_state->vrr_delayed : vsync_state->vrr_presented);
                 return std::nullopt;
             });
         m_vsync_origin_ns = -1; // no fixed vblank grid
@@ -2499,7 +2503,8 @@ private:
                                                  std::chrono::nanoseconds{clock.max_ns}, m_vsync_timer);
     }
 
-    // EDEN_NX2_VRR_VSYNC: the shown present starts a scan, now or at the top rate.
+    // EDEN_NX2_VRR_VSYNC: the shown present starts a scan, now or at the top rate (on the
+    // timing thread either way).
     void PresentVrrVsync() {
         const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
         s64 due{};
@@ -2509,15 +2514,11 @@ private:
                 return; // the scan already waiting shows this present too
             }
             due = m_vsync->vrr.PresentDue(now);
-            if (due <= now) {
-                VblankLocked(*m_vsync, system);
-                m_vsync->vrr.Scanned(now);
-                ++m_vsync->vrr_presented;
-                return;
-            }
             m_vsync->vrr_pending = true;
+            m_vsync->vrr_pending_held = due > now;
         }
-        system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{due}, m_vrr_present_timer, true);
+        system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{(std::max)(due, now)},
+                                          m_vrr_present_timer, true);
     }
 
     // 31(u32 kind) and 32(u32 display): events signalled on every vblank. Title 1's main thread
@@ -2604,7 +2605,8 @@ private:
         u32 diag_get_notifications{};
         // EDEN_NX2_VRR_VSYNC
         Nx2Vi2Events::VrrVsyncClock vrr{};
-        bool vrr_pending{}; // a present's scan waits for the top rate
+        bool vrr_pending{};      // a present's scan waits for the timing thread
+        bool vrr_pending_held{}; // and for the top rate
         u32 vrr_presented{}, vrr_delayed{}, vrr_bottom{}; // scans since the last 600 presents
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();

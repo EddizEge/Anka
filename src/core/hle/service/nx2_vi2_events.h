@@ -283,8 +283,8 @@ struct VrrVsyncClock {
     bool DeadlineDue(s64 now) const {
         return last < 0 || now - last >= max_ns;
     }
-    // The bottom rate timer, firing at `when` (its scheduled time): the time to its next firing,
-    // max_ns after the previous scan (at least 1 us, so it never fires twice at one time).
+    // The bottom rate timer, firing at `when` (now): the time to its next firing, max_ns after
+    // the previous scan (at least 1 us, so it never fires twice at one time).
     s64 NextDeadlineFrom(s64 when) const {
         const s64 next = last < 0 ? when + max_ns : last + max_ns;
         return (std::max<s64>)(next - when, 1'000);
