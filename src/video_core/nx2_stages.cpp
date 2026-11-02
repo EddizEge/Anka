@@ -64,7 +64,13 @@ bool g_check{};
 std::atomic<u8> g_owner{StageIdB};
 u8 g_default_owner{StageIdB};
 /// The default owner runs records (CheckRecordOwner: the front may use the scheduler otherwise).
-std::atomic<bool> g_record_busy{};
+/// A line of its own: C stores it around each of its batches, B reads g_owner and the hooks
+/// around it for each record and packet (k2hiz: the line moved between them).
+struct alignas(64) RecordBusy {
+    std::atomic<bool> value{};
+};
+RecordBusy g_record_busy_line;
+std::atomic<bool>& g_record_busy = g_record_busy_line.value;
 /// The record side's begin and end of the stages (SetStageHooks).
 void (*g_hook_begin)(void*){};
 void (*g_hook_end)(void*){};

@@ -584,8 +584,10 @@ private:
         bool followable{};  ///< No render target or view to repeat (LightFollowable's C part)
         std::vector<u64> payload; ///< Its packet: head, descriptor entries, handles
     };
-    LightAnchorC light_anchor_c;
-    VideoCommon::Nx2Stages::StageDrawWriter stage_writer; ///< B
+    /// C's per draw members apart from B's (each written for every draw by one of them): lines of
+    /// their own (k2hiz: B's anchor and C's shared one).
+    alignas(64) LightAnchorC light_anchor_c;
+    alignas(64) VideoCommon::Nx2Stages::StageDrawWriter stage_writer; ///< B
     /// B: C's half of B's invalidations not sent yet, two words each: the device address, the
     /// size with what in the top bits (vk_rasterizer.cpp: StageRangeTexture, StageRangeQuery).
     std::vector<u64> stage_c_ranges;
@@ -596,7 +598,7 @@ private:
         bool active{};
         GraphicsPipeline* pipeline{};
     };
-    StageDynamicPipeline stage_dynamic;
+    alignas(64) StageDynamicPipeline stage_dynamic; ///< C (B in its joins)
     /// B: the device ranges of the bound render targets and depth (T8's PreSet for each packet),
     /// found again when the registers, the memory manager (GetID) or its page table
     /// (MappingEpoch) change; TickFrame and Start drop them too.
@@ -611,7 +613,7 @@ private:
         bool current{};
         std::vector<std::pair<DAddr, u64>> ranges;
     };
-    StageTargets stage_targets;
+    alignas(64) StageTargets stage_targets;
     /// B (omur-1): the pool ranges (GPU addresses) of work C may not have run yet, each with the
     /// last seq that reads it; dropped once C ran that seq (Nx2GpuPages::RanSeq) and at B's joins.
     VideoCommon::Nx2Stages::InFlightRanges stage_pools;
@@ -630,7 +632,7 @@ private:
     const Tegra::Engines::Maxwell3D* geometry_engine_b{};
     const Tegra::MemoryManager* geometry_memory_b{};
     /// C: the geometry mirror (nx2_stage_split.h).
-    VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
+    alignas(64) VideoCommon::Nx2Stages::GeometryMirror geometry_mirror_c;
     /// C: B's record owner hook replayed B's list in a join since C's last draw packet: that
     /// packet's binds may be in an older command buffer. Written by B with C parked.
     bool geometry_replayed_c{};
