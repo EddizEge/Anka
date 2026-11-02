@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -118,6 +119,87 @@ TEST_CASE("Nx2StageCosts: skipping held marks leaves the tracker as tracking eac
         REQUIRE(SameUse(every, memoed));
         // Most marks repeat (the point of the memo).
         REQUIRE(skipped > 400 * 12 / 2);
+    }
+}
+
+TEST_CASE("Nx2StageCosts: a reset USAGE_RESET_SKIP skips keeps no held mark", "[video_core]") {
+    // perf/tam: b-hiz's EDEN_NX2_USAGE_RESET_SKIP (default on) leaves a tracker nothing was
+    // tracked in since its last reset, generation and all. A memo notes a generation only after
+    // its Track, so the reset after it clears and starts a new one: no memo holds what a skipped
+    // reset kept. With the switch at 0 every reset starts a new generation (the plain rule).
+    const char* env = std::getenv("EDEN_NX2_USAGE_RESET_SKIP");
+    const bool skip = env == nullptr || env[0] != '0';
+    UsageTracker tracker{1 << 16};
+    UsageMarkMemo memo;
+    tracker.Track(0, 4096);
+    memo.Note(2, tracker.Generation(), 0, 4096);
+    const u64 noted = tracker.Generation();
+    tracker.Reset();
+    const u64 cleared = tracker.Generation();
+    REQUIRE(cleared != noted);
+    REQUIRE(!memo.Holds(2, tracker.Generation(), 0, 4096));
+    REQUIRE(!tracker.IsUsed(0, 4096));
+    tracker.Reset(); // Nothing tracked since
+    REQUIRE((tracker.Generation() == cleared) == skip);
+    REQUIRE(!memo.Holds(2, tracker.Generation(), 0, 4096));
+    tracker.Track(0, 4096);
+    REQUIRE(!memo.Holds(2, tracker.Generation(), 0, 4096));
+    memo.Note(2, tracker.Generation(), 0, 4096);
+    tracker.Reset();
+    REQUIRE(!memo.Holds(2, tracker.Generation(), 0, 4096));
+}
+
+TEST_CASE("Nx2StageCosts: held marks across skipped resets leave the tracker as tracking each",
+          "[video_core]") {
+    // As "skipping held marks" with b-hiz's reset skip in play: packets that mark only some
+    // streams or none, and resets back to back (a free buffer TickFrame resets again with
+    // nothing tracked since), so many of the resets are skipped.
+    for (u64 seed = 1; seed <= 6; ++seed) {
+        Lcg rng{seed * 7919};
+        UsageTracker every{1 << 20};
+        UsageTracker memoed{1 << 20};
+        std::array<UsageMarkMemo, 12> memos{};
+        std::array<std::pair<u64, u64>, 12> ranges{};
+        for (u32 stream = 0; stream < ranges.size(); ++stream) {
+            ranges[stream] = {u64{stream} * 40000 + 64 * (rng.Next() % 8), 1000 + rng.Next() % 60000};
+        }
+        u32 skipped = 0;
+        u32 resets = 0;
+        for (u32 packet = 0; packet < 600; ++packet) {
+            const u32 roll = rng.Next() % 100;
+            if (roll < 15) {
+                every.Reset();
+                memoed.Reset();
+                ++resets;
+                REQUIRE(SameUse(every, memoed));
+                continue;
+            }
+            if (roll < 30) {
+                const u32 stream = rng.Next() % ranges.size();
+                ranges[stream] = {64 * (rng.Next() % 16000), 64 + rng.Next() % 100000};
+            }
+            // Which streams this packet marks: all, some, or none.
+            const u32 marks = roll < 50 ? 0 : roll < 75 ? rng.Next() : ~u32{0};
+            for (u32 stream = 0; stream < ranges.size(); ++stream) {
+                if (((marks >> stream) & 1) == 0) {
+                    continue;
+                }
+                const auto [offset, size] = ranges[stream];
+                every.Track(offset, size);
+                if (memos[stream].Holds(0, memoed.Generation(), offset, size)) {
+                    ++skipped;
+                    continue;
+                }
+                memoed.Track(offset, size);
+                memos[stream].Note(0, memoed.Generation(), offset, size);
+            }
+            if (packet % 8 == 0) {
+                REQUIRE(SameUse(every, memoed));
+            }
+        }
+        REQUIRE(SameUse(every, memoed));
+        REQUIRE(resets > 50);
+        REQUIRE(skipped > 0);
     }
 }
 
