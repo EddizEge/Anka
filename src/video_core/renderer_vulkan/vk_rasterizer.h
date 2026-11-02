@@ -481,6 +481,9 @@ private:
     // Back stages, cut c (T7).
     bool split_draws{}; ///< Set once (constructor): EDEN_NX2_BACK_STAGES with cut c
     bool b_in_join{};   ///< B runs a join of its own (JoinB, the record owner hook)
+    /// B: a Query / ResetCounter went to C since the last WaitForIdle made in a join (F3): the
+    /// next one may sync query writes (SyncValues takes the buffer cache) and joins.
+    bool stage_query_since_wfi{true};
     /// B's copy of light_epoch (S12): moved by B's events and other threads' notes, not by C's.
     std::atomic<u64> light_epoch_b{};
     /// B's light anchor: LightAnchor's fields B sees.

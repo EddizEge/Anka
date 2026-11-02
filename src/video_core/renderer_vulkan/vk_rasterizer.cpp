@@ -1949,6 +1949,13 @@ void RasterizerVulkan::DispatchCompute() {
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
+    if (SplitOnB()) [[unlikely]] {
+        // The query cache is C's (F3: the next WaitForIdle joins).
+        NoteLightWork();
+        stage_query_since_wfi = true;
+        StageToC([this, type] { ResetCounter(type); });
+        return;
+    }
     NoteLightWork();
     switch (type) {
     case VideoCommon::QueryType::ZPassPixelCount64:
@@ -1965,6 +1972,15 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    if (SplitOnB()) [[unlikely]] {
+        // The query cache is C's (F3: the next WaitForIdle joins).
+        NoteLightWork();
+        stage_query_since_wfi = true;
+        StageToC([this, gpu_addr, type, flags, payload, subreport] {
+            Query(gpu_addr, type, flags, payload, subreport);
+        });
+        return;
+    }
     NoteLightWork();
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
@@ -3743,9 +3759,11 @@ void RasterizerVulkan::BeginStagesHook(void* context) {
     std::scoped_lock lock{rasterizer->buffer_cache.mutex};
     rasterizer->buffer_cache_runtime.SetRecordOwnerHook(&StageRecordOwnerHook, rasterizer);
     rasterizer->buffer_cache_runtime.BeginStages();
-    // B's next draw is set up in full and finds the targets' device ranges again.
+    // B's next draw is set up in full and finds the targets' device ranges again; the first
+    // WaitForIdle joins (query writes may be pending from before).
     rasterizer->light_epoch_b.fetch_add(1, std::memory_order_seq_cst);
     rasterizer->stage_targets.valid = false;
+    rasterizer->stage_query_since_wfi = true;
 }
 
 void RasterizerVulkan::EndStagesHook(void* context) {
@@ -4782,8 +4800,15 @@ void RasterizerVulkan::DrawTextureB() {
 }
 
 void RasterizerVulkan::WaitForIdleB() {
-    // B: the ordering signal (the Vulkan fence manager: the buffer cache's flushes to gather);
-    // C: the query cache and the wait recorded.
+    if (stage_query_since_wfi) {
+        // F3: the query cache's NotifyWFI may sync query writes now (SyncValues: the buffer
+        // cache's), so the old body runs in a join, C parked.
+        stage_query_since_wfi = false;
+        JoinB([this] { WaitForIdle(); });
+        return;
+    }
+    // No query since: B the ordering signal (the Vulkan fence manager: the buffer cache's flushes
+    // to gather); C the query cache (nothing to sync) and the wait recorded.
     NoteLightWork();
     fence_manager.SignalOrdering();
     StageToC([this] { WaitForIdleRecord(); });
