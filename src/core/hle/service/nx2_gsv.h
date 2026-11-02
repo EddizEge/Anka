@@ -66,8 +66,13 @@
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
+#include "core/arm/debug.h"
+#include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/nx2_event_diag.h"
+#include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
+#include "core/hle/service/nx2_vi2_events.h"
 #include "core/hle/service/nx2_vi2_reply.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/server_manager.h"
@@ -998,6 +1003,8 @@ public:
         });
         if (GetReplies() != nullptr) {
             RegisterReplies();
+        } else {
+            static_cast<void>(ReplyOwnCommands()); // its "needs the table" warning
         }
     }
 
@@ -1006,10 +1013,16 @@ public:
         // its lock first (it holds the state, not this session), then close the events.
         {
             std::scoped_lock lk{m_vsync->mutex};
+            for (const auto& tracked : m_vsync->events) {
+                Kernel::Nx2EventDiag::Untrack(tracked.calls_slot);
+            }
             m_vsync->events.clear();
         }
         if (m_vsync_timer) {
             system.CoreTiming().UnscheduleEvent(m_vsync_timer);
+        }
+        if (m_vrr_present_timer) {
+            system.CoreTiming().UnscheduleEvent(m_vrr_present_timer);
         }
         for (auto* event : m_events) {
             m_context.CloseEvent(event);
@@ -1021,10 +1034,91 @@ public:
         if (PresentDiagEnabled() && ctx.IsTipc()) {
             DiagRequest(ctx);
         }
+        if (Vi2DiagEnabled() && ctx.IsTipc()) {
+            return HandleWithVi2Diag(session, ctx);
+        }
         return ServiceFrameworkBase::HandleSyncRequest(session, ctx);
     }
 
 private:
+    // EDEN_NX2_VI2_DIAG=1 (off by default): what the game does with vi2's events and setup
+    // replies. Logs (a) each command's first call with its request and reply words, marked NEW
+    // (with a backtrace unless EDEN_NX2_IPC_TRACE traces it anyway) when Bananza was never seen
+    // sending it; (b) the handle each 11/31/32 reply carries and the event behind it; (c) the
+    // notification flow: Notify, 21's handed-over bits; (d) every 10 s, per event: signals, clears
+    // by the guest (signalled at one vblank, no longer at the next: a thread consumed it), the
+    // threads seen waiting on it at a vblank, and each guest thread's calls on it
+    // (Kernel::Nx2EventDiag: polls with a zero timeout, waits, resets, clears, how many found it
+    // signalled).
+    static bool Vi2DiagEnabled() {
+        static const bool enabled = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_DIAG");
+            const bool on = text != nullptr && text[0] != '\0' && text[0] != '0';
+            if (on) {
+                LOG_INFO(Service, "nx2:vi2 diag (EDEN_NX2_VI2_DIAG): first calls of vi2 commands, "
+                                  "event handles, notifications; every 10 s each event's signals, "
+                                  "clears by the guest and waiters");
+            }
+            return on;
+        }();
+        return enabled;
+    }
+
+    // True the first time any vi2 session sees the command.
+    static bool Vi2DiagFirstCall(u32 command) {
+        static std::mutex mutex;
+        static std::set<u32> seen;
+        std::scoped_lock lk{mutex};
+        return seen.insert(command).second;
+    }
+
+    Result HandleWithVi2Diag(Kernel::KServerSession& session, HLERequestContext& ctx) {
+        const u32 command = ctx.GetCommand();
+        const auto request = Nx2IpcTrace::RequestDataWords(
+            std::span<const u32>{ctx.CommandBuffer(), IPC::COMMAND_BUFFER_LENGTH}, true, 0, false);
+        const auto handler = handlers_tipc.find(command);
+        const char* name = handler != handlers_tipc.end() ? handler->second.name : "auto stub";
+        const bool first = Vi2DiagFirstCall(command);
+        const bool known = Nx2Vi2Events::IsKnownCommand(command);
+        if (first && !known && !Nx2IpcTrace::WillTrace(service_name, command)) {
+            Nx2IpcTrace::TraceNow(system, service_name, name, ctx);
+        }
+        m_diag_event = nullptr;
+        const Result result = ServiceFrameworkBase::HandleSyncRequest(session, ctx);
+        const auto* reply = ctx.CommandBuffer();
+        if (first) {
+            LOG_INFO(Service, "nx2:vi2 diag: {}first call of {} \"{}\" (present #{}): request {} -> reply {}",
+                     known ? "" : "NEW: ", command, name, m_presents,
+                     Nx2Vi2Reply::FormatWords(request),
+                     Nx2Vi2Reply::FormatWords(Nx2Vi2Events::TipcWords(
+                         std::span<const u32>{reply, IPC::COMMAND_BUFFER_LENGTH})));
+        }
+        // 11/31/32: one copied handle at word 3.
+        if (m_diag_event != nullptr && (reply[1] & 0x80000000U) != 0 && ((reply[2] >> 1) & 0xFU) != 0) {
+            std::string event_name;
+            {
+                std::scoped_lock lk{m_vsync->mutex};
+                for (auto& tracked : m_vsync->events) {
+                    if (tracked.event == m_diag_event) {
+                        tracked.handle = reply[3];
+                        event_name = tracked.name;
+                    }
+                }
+            }
+            LOG_INFO(Service, "nx2:vi2 diag: {} {} -> {}, handle {:#x}", command,
+                     Nx2Vi2Reply::FormatWords(request), event_name, reply[3]);
+        }
+        m_diag_event = nullptr;
+        return result;
+    }
+
+    // The event the request being handled created or returned (EDEN_NX2_VI2_DIAG).
+    Kernel::KEvent* m_diag_event{};
+
+    // Up to 32 lines each.
+    u32 m_diag_notify_lines{};
+    u32 m_diag_handover_lines{};
+
     // 229(u64 client token, u32 slot, u32 image, ...fences): result, u64 mask of buffer slots the
     // client may acquire next, four zero words. Nothing is shown yet; every slot is handed back
     // at once (changes.patch's default mask is 0x7fff).
@@ -1032,6 +1126,12 @@ private:
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
+        if (m_once_waiting) {
+            SignalOnceEvents();
+        }
+        if (NotifyOpenMode() == 2 && m_presents == 1) {
+            NotifyOpen("at the first present");
+        }
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -1069,6 +1169,9 @@ private:
             }
         }
         const auto paced = std::chrono::steady_clock::now();
+        if (m_vrr_present_timer) {
+            PresentVrrVsync();
+        }
         if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
         }
@@ -1125,6 +1228,15 @@ private:
                 if (PresentRateOn()) {
                     extra += fmt::format(", {} paced at the word's rate (last {} Hz)",
                                          m_stats.rate_presents, m_rate != 0 ? m_rate : 60);
+                }
+                if (m_vrr_present_timer) {
+                    std::scoped_lock lk{m_vsync->mutex};
+                    extra += fmt::format(", VRR vsync scans: {} at a present, {} held to the top "
+                                         "rate, {} at the bottom rate",
+                                         m_vsync->vrr_presented, m_vsync->vrr_delayed, m_vsync->vrr_bottom);
+                    m_vsync->vrr_presented = 0;
+                    m_vsync->vrr_delayed = 0;
+                    m_vsync->vrr_bottom = 0;
                 }
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
@@ -1928,12 +2040,17 @@ private:
         return replies.get();
     }
 
+    // Commands below this without a handler answer from the table even when it lists them only
+    // later (TIPC command numbers go up to 0xffef; vi2's seen so far up to 351).
+    static constexpr u32 MaxTableCommand = 4096;
+
     // Answers from the table: Bananza's per-frame queries (104, 105: empty success before), its
     // setup queries (107, 261, 265, 267, 271, 351: auto-stubbed before) and any other command in
     // the table when the session opens that has no handler of its own.
     void RegisterReplies() {
         auto& replies = *GetReplies();
         std::set<u32> commands{104, 105, 107, 261, 265, 267, 271, 351};
+        commands.insert(ReplyOwnCommands().begin(), ReplyOwnCommands().end());
         {
             std::scoped_lock lk{replies.mutex};
             for (const auto& entry : replies.source.GetTable()) {
@@ -1945,6 +2062,13 @@ private:
         for (const u32 command : commands) {
             const auto it = handlers_tipc.find(command);
             if (it != handlers_tipc.end()) {
+                if (ReplyOwnCommands().contains(command)) {
+                    m_own_replaced.emplace(command, it->second);
+                    handlers_tipc.erase(it);
+                    functions.push_back({command, &INx2Vi2Session::ReplyOwnFromTable,
+                                         "ReplyOwnFromTable (EDEN_NX2_VI2_REPLY_OWN)"});
+                    continue;
+                }
                 if (command != 104 && command != 105) {
                     LOG_WARNING(Service, "nx2:vi2 reply table: {} has a handler of its own, not replaced", command);
                     own.insert(command);
@@ -1953,6 +2077,15 @@ private:
                 handlers_tipc.erase(it);
             }
             functions.push_back({command, &INx2Vi2Session::ReplyFromTable, "ReplyFromTable (EDEN_NX2_VI2_REPLY)"});
+        }
+        // Every other command without a handler too, so a command the game has not sent before
+        // answers from the table once a line for it is added while it runs: the auto stub's empty
+        // success otherwise, as before. EDEN_NX2_VI2_DIAG marks its first call NEW.
+        for (u32 command = 0; command < MaxTableCommand; ++command) {
+            if (!commands.contains(command) && !handlers_tipc.contains(command)) {
+                functions.push_back({command, &INx2Vi2Session::ReplyFromTable,
+                                     "ReplyFromTable (EDEN_NX2_VI2_REPLY, no handler)"});
+            }
         }
         RegisterHandlersTipc(functions.data(), functions.size());
         std::scoped_lock lk{replies.mutex};
@@ -1987,6 +2120,74 @@ private:
         }
     }
 
+    // EDEN_NX2_VI2_REPLY_OWN=<commands> (off by default; needs EDEN_NX2_VI2_REPLY_FILE or
+    // EDEN_NX2_VI2_REPLY): these commands keep their own handler but answer from the table when it
+    // lists them, for the setup replies Bananza's display gets from guesses (1 and 3 return 1, 101
+    // no data): "1,3,101". The handler still runs first (101 keeps its notification index), then
+    // the table's words replace its reply; not listed, its reply as before. Never 11, 21, 31, 32
+    // and 229: their replies carry handles, a buffer or a present.
+    static const std::set<u32>& ReplyOwnCommands() {
+        static const std::set<u32> commands = []() -> std::set<u32> {
+            const char* text = std::getenv("EDEN_NX2_VI2_REPLY_OWN");
+            if (text == nullptr || text[0] == '\0') {
+                return {};
+            }
+            if (GetReplies() == nullptr) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN needs EDEN_NX2_VI2_REPLY_FILE or "
+                                     "EDEN_NX2_VI2_REPLY: off");
+                return {};
+            }
+            auto parsed = Nx2Vi2Events::ParseCommandList(text);
+            if (!parsed.error.empty()) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN=\"{}\": {}: off", text, parsed.error);
+                return {};
+            }
+            if (!parsed.refused.empty()) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN: {} left out (their replies carry "
+                                     "handles, a buffer or a present)",
+                            fmt::join(parsed.refused, ", "));
+            }
+            if (!parsed.commands.empty()) {
+                LOG_INFO(Service, "nx2:vi2 reply own (EDEN_NX2_VI2_REPLY_OWN): {} answer from the "
+                                  "table when it lists them, after their own handler",
+                         fmt::join(parsed.commands, ", "));
+            }
+            return std::move(parsed.commands);
+        }();
+        return commands;
+    }
+
+    // The handlers EDEN_NX2_VI2_REPLY_OWN wrapped, by command.
+    std::map<u32, decltype(handlers_tipc)::mapped_type> m_own_replaced;
+
+    void ReplyOwnFromTable(HLERequestContext& ctx) {
+        auto& replies = *GetReplies();
+        const u32 command = ctx.GetCommand();
+        std::optional<std::vector<u32>> words;
+        {
+            std::scoped_lock lk{replies.mutex};
+            LogReplyUpdate(replies, replies.source.Poll(std::chrono::steady_clock::now()));
+            if (const auto* reply = replies.source.Find(command)) {
+                words = *reply;
+            }
+            if (replies.source.FirstCallSinceChange(command)) {
+                LOG_INFO(Service, "nx2:vi2 reply v{}: {} -> {} (EDEN_NX2_VI2_REPLY_OWN)",
+                         replies.source.Version(), command,
+                         words ? Nx2Vi2Reply::FormatWords(*words) + " instead of its own reply"
+                               : std::string{"its own reply (not in the table)"});
+            }
+        }
+        const auto own = m_own_replaced.find(command);
+        if (own != m_own_replaced.end()) {
+            handler_invoker(this, own->second.handler_callback, ctx);
+        }
+        if (words) {
+            TipcReplyWords(ctx, *words);
+        } else if (own == m_own_replaced.end()) {
+            SucceedQuietly(ctx);
+        }
+    }
+
     // Must be < 8; nn::vi::detail::LayerHistory creates 7 timestamp recorders per layer.
     void GetTimestampRecorderCount(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:vi2 TIPC 5, returning 7");
@@ -1998,11 +2199,24 @@ private:
     // signalled event per call left that thread blocked forever after 202.
     void GetNotificationEvent(HLERequestContext& ctx) {
         if (!m_notification_event) {
-            m_notification_event = m_context.CreateEvent(fmt::format("nx2:vi2:Notify{}", m_events.size()));
+            const std::string name = fmt::format("nx2:vi2:Notify{}", m_events.size());
+            m_notification_event = m_context.CreateEvent(std::string{name});
             m_events.push_back(m_notification_event);
+            if (Vi2DiagEnabled()) {
+                std::scoped_lock lk{m_vsync->mutex};
+                auto& tracked = m_vsync->events.emplace_back();
+                tracked.event = m_notification_event;
+                tracked.on_vsync = false;
+                tracked.name = fmt::format("{} (11)", name);
+                tracked.calls_slot = Kernel::Nx2EventDiag::Track(&m_notification_event->GetReadableEvent());
+            }
+        }
+        if (Vi2DiagEnabled()) {
+            m_diag_event = m_notification_event;
         }
         if (AnyNotification()) {
             m_notification_event->Signal(system.Kernel());
+            DiagSignalled(m_notification_event);
         }
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
@@ -2012,13 +2226,20 @@ private:
     // 21(W: 32 u32 notification counts): hand them over and clear.
     void GetNotifications(HLERequestContext& ctx) {
         const auto size = std::min<std::size_t>(ctx.GetWriteBufferSize(), sizeof(m_notifications));
+        if (Vi2DiagEnabled()) {
+            DiagHandOver(size);
+        }
         if (size != 0) {
             ctx.WriteBuffer(m_notifications.data(), size);
         }
         if (size >= sizeof(m_notifications)) {
             m_notifications.fill(0);
             if (m_notification_event) {
-                m_notification_event->Clear(system.Kernel());
+                if (Vi2DiagEnabled()) {
+                    DiagClearHandedOver();
+                } else {
+                    m_notification_event->Clear(system.Kernel());
+                }
             }
         }
         IPC::ResponseBuilder rb{ctx, 2};
@@ -2029,13 +2250,60 @@ private:
     void OpenDisplay(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         m_display_notification = w[4];
+        m_display_opened = true;
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
+        if (NotifyOpenMode() == 1) {
+            NotifyOpen("after 101");
+        }
+    }
+
+    // EDEN_NX2_VI2_NOTIFY_OPEN (off by default): set the display's notification (101's index, 1
+    // in Bananza) once, as a display that has news would: =1 right after 101, =2 at the first
+    // present. Only 102 and 202 set notifications otherwise; the SDK may read this one as its
+    // display going away (a teardown, a black screen).
+    static int NotifyOpenMode() {
+        static const int mode = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_NOTIFY_OPEN");
+            if (text == nullptr || text[0] == '\0' || std::string_view{text} == "0") {
+                return 0;
+            }
+            if (std::string_view{text} != "1" && std::string_view{text} != "2") {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_NOTIFY_OPEN=\"{}\": not 1 (after 101) or 2 (at the "
+                                     "first present): off",
+                            text);
+                return 0;
+            }
+            LOG_INFO(Service, "nx2:vi2 notify open (EDEN_NX2_VI2_NOTIFY_OPEN={}): the display's "
+                              "notification is set once, {}",
+                     text, text[0] == '1' ? "right after 101" : "at the first present");
+            return text[0] - '0';
+        }();
+        return mode;
+    }
+
+    bool m_notified_open{};
+    bool m_display_opened{}; // 101 came on this session
+
+    void NotifyOpen(std::string_view when) {
+        if (m_notified_open) {
+            return;
+        }
+        m_notified_open = true;
+        if (!m_display_opened || m_display_notification >= m_notifications.size() * 32) {
+            LOG_WARNING(Service, "nx2:vi2 notify open {}: {}, nothing set (EDEN_NX2_VI2_NOTIFY_OPEN)", when,
+                        m_display_opened ? fmt::format("display notification {} out of range", m_display_notification)
+                                         : std::string{"no 101 on this session"});
+            return;
+        }
+        LOG_INFO(Service, "nx2:vi2 notify open: display notification {} set {} (EDEN_NX2_VI2_NOTIFY_OPEN)",
+                 m_display_notification, when);
+        Notify(m_display_notification, "EDEN_NX2_VI2_NOTIFY_OPEN");
     }
 
     // 102(u64 display): the display retired, wake whoever waits for that notification.
     void CloseDisplay(HLERequestContext& ctx) {
-        Notify(m_display_notification);
+        Notify(m_display_notification, "102 CloseDisplay");
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -2059,7 +2327,7 @@ private:
         const auto client = m_clients.find(token);
         if (client != m_clients.end()) {
             LOG_INFO(Service, "nx2:vi2 client {:#x} retired, notification {}", token, client->second);
-            Notify(client->second);
+            Notify(client->second, "202 UnregisterClientState");
             m_clients.erase(client);
         }
         IPC::ResponseBuilder rb{ctx, 2};
@@ -2070,14 +2338,87 @@ private:
         return std::ranges::any_of(m_notifications, [](u32 bits) { return bits != 0; });
     }
 
-    void Notify(u32 index) {
+    // `why`: for EDEN_NX2_VI2_DIAG's line.
+    void Notify(u32 index, std::string_view why) {
         if (index >= m_notifications.size() * 32) {
             return;
         }
         m_notifications[index / 32] |= 1U << (index % 32);
         if (m_notification_event) {
             m_notification_event->Signal(system.Kernel());
+            DiagSignalled(m_notification_event);
         }
+        if (Vi2DiagEnabled() && m_diag_notify_lines < 32) {
+            ++m_diag_notify_lines;
+            LOG_INFO(Service, "nx2:vi2 diag: notify {} ({}, present #{}): bitmap word {} = {:#x}, {}", index,
+                     why, m_presents, index / 32, m_notifications[index / 32],
+                     m_notification_event ? "event signalled" : "no notification event yet (11)");
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: `event` was signalled outside a vblank.
+    void DiagSignalled(Kernel::KEvent* event) {
+        if (!Vi2DiagEnabled()) {
+            return;
+        }
+        std::scoped_lock lk{m_vsync->mutex};
+        for (auto& tracked : m_vsync->events) {
+            if (tracked.event == event) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: 21 clears the notification event. Still signalled: handed over; already
+    // clear: the guest cleared it first. The vblanks leave it alone meanwhile; the kernel calls
+    // run without the vsync mutex (this is a guest thread, see StartVrrVsync).
+    void DiagClearHandedOver() {
+        Kernel::KEvent* const event = m_notification_event;
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            for (auto& tracked : m_vsync->events) {
+                if (tracked.event == event) {
+                    tracked.handing_over = true;
+                }
+            }
+        }
+        bool still_signalled{};
+        {
+            Kernel::KScopedSchedulerLock lk{system.Kernel()};
+            still_signalled = event->GetReadableEvent().IsSignaled(system.Kernel());
+        }
+        event->Clear(system.Kernel());
+        std::scoped_lock lk{m_vsync->mutex};
+        for (auto& tracked : m_vsync->events) {
+            if (tracked.event == event) {
+                tracked.handing_over = false;
+                if (tracked.was_signalled) {
+                    ++(still_signalled ? tracked.handed_over : tracked.cleared);
+                }
+                tracked.was_signalled = false;
+            }
+        }
+    }
+
+    // EDEN_NX2_VI2_DIAG: a 21 call, its bits when there are any.
+    void DiagHandOver(std::size_t size) {
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            ++m_vsync->diag_get_notifications;
+        }
+        if (!AnyNotification() || m_diag_handover_lines >= 32) {
+            return;
+        }
+        ++m_diag_handover_lines;
+        std::string bits;
+        for (u32 index = 0; index < m_notifications.size() * 32; ++index) {
+            if ((m_notifications[index / 32] >> (index % 32)) & 1) {
+                bits += fmt::format("{}{}", bits.empty() ? "" : ",", index);
+            }
+        }
+        LOG_INFO(Service, "nx2:vi2 diag: 21 hands over notification bits {} ({} of {} bytes, present #{})",
+                 bits, size, sizeof(m_notifications), m_presents);
     }
 
     std::map<u64, u32> m_clients; // token -> retire notification index
@@ -2085,27 +2426,202 @@ private:
     u32 m_display_notification{};
     Kernel::KEvent* m_notification_event{};
 
+    // EDEN_NX2_VI2_KIND_EVENTS=<modes> (off by default): what signals 31's events of kinds 1-3
+    // (Bananza asks for kinds 1-3 just before its first present, each followed by a 26x setup
+    // call with the same kind; kind 0 at boot). "1": once each, at the first present after the 31
+    // call (the setup calls are done by then); "0": never; "1:once,2:never,3:vsync": per kind.
+    // Off: all of them on every vblank, as kind 0 and 32's event stay.
+    static const Nx2Vi2Events::KindModes& KindEventModes() {
+        static const Nx2Vi2Events::KindModes modes = [] {
+            const char* text = std::getenv("EDEN_NX2_VI2_KIND_EVENTS");
+            if (text == nullptr || text[0] == '\0') {
+                return Nx2Vi2Events::KindModes{};
+            }
+            const auto parsed = Nx2Vi2Events::ParseKindEvents(text);
+            if (!parsed.modes) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_KIND_EVENTS=\"{}\": {}: off", text, parsed.error);
+                return Nx2Vi2Events::KindModes{};
+            }
+            LOG_INFO(Service, "nx2:vi2 kind events (EDEN_NX2_VI2_KIND_EVENTS): 31's kinds {} (once: "
+                              "at the first present after the 31 call)",
+                     Nx2Vi2Events::DescribeKinds(*parsed.modes));
+            return *parsed.modes;
+        }();
+        return modes;
+    }
+
+    // EDEN_NX2_VI2_KIND_EVENTS: a "once" event waits for the next present (VsyncState::Event).
+    bool m_once_waiting{};
+
+    // A thread waiting on a "once" event before the first present would wait for ever: a vblank
+    // signals it if no present came this long after the 31 call.
+    static constexpr s64 OnceFallbackNs = 1'000'000'000;
+
+    void SignalOnceEvents() {
+        m_once_waiting = false;
+        std::vector<std::pair<Kernel::KEvent*, u32>> due;
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            for (auto& tracked : m_vsync->events) {
+                if (tracked.once_pending) {
+                    tracked.once_pending = false;
+                    --m_vsync->once_pending;
+                    due.emplace_back(tracked.event, tracked.kind);
+                }
+            }
+        }
+        // Signalled without the vsync mutex: this is a guest thread (see StartVrrVsync).
+        for (const auto& [event, kind] : due) {
+            event->Signal(system.Kernel());
+            DiagSignalled(event);
+            LOG_INFO(Service, "nx2:vi2 present #{}: signalled 31's kind {} event once "
+                              "(EDEN_NX2_VI2_KIND_EVENTS)",
+                     m_presents, kind);
+        }
+    }
+
+    // EDEN_NX2_VRR_VSYNC=1 (off by default; "<max Hz>:<min Hz>", 1 = 120:40): the vsync events
+    // follow the presents like a VRR panel's scans instead of a fixed clock. A present starts a
+    // scan (the vblank the game starts its next frame on) at once, but no sooner than 1/max s
+    // after the previous scan; without a present the panel scans again 1/min s after the
+    // previous one. CoreTiming's clock, the speed limit not applied. EDEN_NX2_VSYNC_HZ is
+    // ignored; off with EDEN_NX2_VBLANK_GRID (a 60 Hz grid laid on the vsync events).
+    static const std::optional<Nx2Vi2Events::VrrVsyncRates>& VrrVsyncRates() {
+        static const std::optional<Nx2Vi2Events::VrrVsyncRates> rates =
+            []() -> std::optional<Nx2Vi2Events::VrrVsyncRates> {
+            const char* text = std::getenv("EDEN_NX2_VRR_VSYNC");
+            if (text == nullptr || text[0] == '\0' || std::string_view{text} == "0") {
+                return std::nullopt;
+            }
+            const auto parsed = Nx2Vi2Events::ParseVrrVsync(text);
+            if (!parsed.rates) {
+                LOG_WARNING(Service, "EDEN_NX2_VRR_VSYNC=\"{}\": {}: off", text, parsed.error);
+                return std::nullopt;
+            }
+            if (VblankGridMode() != 0) {
+                LOG_WARNING(Service, "EDEN_NX2_VRR_VSYNC with EDEN_NX2_VBLANK_GRID (a 60 Hz grid): off");
+                return std::nullopt;
+            }
+            if (std::getenv("EDEN_NX2_VSYNC_HZ") != nullptr) {
+                LOG_WARNING(Service, "EDEN_NX2_VSYNC_HZ ignored: EDEN_NX2_VRR_VSYNC is on");
+            }
+            LOG_INFO(Service, "nx2:vi2 VRR vsync (EDEN_NX2_VRR_VSYNC): the vsync events follow the "
+                              "presents, at most {} Hz, at least {} Hz",
+                     parsed.rates->max_hz, parsed.rates->min_hz);
+            return parsed.rates;
+        }();
+        return rates;
+    }
+
+    // The present scans that waited for the top rate (EDEN_NX2_VRR_VSYNC).
+    std::shared_ptr<Core::Timing::EventType> m_vrr_present_timer;
+
+    void StartVrrVsync(const Nx2Vi2Events::VrrVsyncRates& rates) {
+        const auto clock = Nx2Vi2Events::VrrVsyncClock::FromRates(rates);
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            m_vsync->vrr = clock;
+        }
+        // The bottom rate: no present for 1/min s. Fires at most that long after the previous
+        // scan, whatever started it. CoreTiming adds the returned delay to the event's time, or
+        // to the end of a pause: measured from now, the next firing is never past the deadline
+        // (an early one finds nothing due and waits for the rest).
+        m_vsync_timer = Core::Timing::CreateEvent(
+            "nx2:vi2 vrr vsync",
+            [vsync_state = m_vsync, &system = system](
+                s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                std::scoped_lock lk{vsync_state->mutex};
+                auto& vrr = vsync_state->vrr;
+                const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+                if (vrr.DeadlineDue(now)) {
+                    VblankLocked(*vsync_state, system);
+                    vrr.Scanned(now);
+                    ++vsync_state->vrr_bottom;
+                }
+                return std::chrono::nanoseconds{vrr.NextDeadlineFrom(now)};
+            });
+        // A present's scan, at once or at the top rate. On this (host) thread like every other
+        // vblank: the vi2 service thread is a guest thread, which must not signal (scheduler
+        // locks, a suspend point) while it holds the vsync mutex the timers wait on.
+        m_vrr_present_timer = Core::Timing::CreateEvent(
+            "nx2:vi2 vrr present",
+            [vsync_state = m_vsync, &system = system](
+                s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                std::scoped_lock lk{vsync_state->mutex};
+                if (!vsync_state->vrr_pending) {
+                    return std::nullopt;
+                }
+                vsync_state->vrr_pending = false;
+                VblankLocked(*vsync_state, system);
+                vsync_state->vrr.Scanned(system.CoreTiming().GetGlobalTimeNs().count());
+                ++(vsync_state->vrr_pending_held ? vsync_state->vrr_delayed : vsync_state->vrr_presented);
+                return std::nullopt;
+            });
+        m_vsync_origin_ns = -1; // no fixed vblank grid
+        system.CoreTiming().ScheduleLoopingEvent(std::chrono::nanoseconds{clock.max_ns},
+                                                 std::chrono::nanoseconds{clock.max_ns}, m_vsync_timer);
+    }
+
+    // EDEN_NX2_VRR_VSYNC: the shown present starts a scan, now or at the top rate (on the
+    // timing thread either way).
+    void PresentVrrVsync() {
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        s64 due{};
+        {
+            std::scoped_lock lk{m_vsync->mutex};
+            if (m_vsync->vrr_pending) {
+                return; // the scan already waiting shows this present too
+            }
+            due = m_vsync->vrr.PresentDue(now);
+            m_vsync->vrr_pending = true;
+            m_vsync->vrr_pending_held = due > now;
+        }
+        system.CoreTiming().ScheduleEvent(std::chrono::nanoseconds{(std::max)(due, now)},
+                                          m_vrr_present_timer, true);
+    }
+
     // 31(u32 kind) and 32(u32 display): events signalled on every vblank. Title 1's main thread
     // waits on the 32 event until it has fired twice before it submits any GPU work, and hung
     // there while it never fired.
     void GetVsyncEvent(HLERequestContext& ctx) {
         LOG_INFO(Service, "nx2:vi2 {} vsync event, [2]={:#x}", ctx.GetCommand(), ctx.CommandBuffer()[2]);
-        auto* event = m_context.CreateEvent(fmt::format("nx2:vi2:Vsync{}", m_events.size()));
+        const std::string name = fmt::format("nx2:vi2:Vsync{}", m_events.size());
+        auto* event = m_context.CreateEvent(std::string{name});
         m_events.push_back(event);
+        const u32 kind = ctx.CommandBuffer()[2];
+        const auto mode = ctx.GetCommand() == 31 ? KindEventModes().Of(kind) : Nx2Vi2Events::KindMode::Vsync;
+        if (mode != Nx2Vi2Events::KindMode::Vsync) {
+            LOG_INFO(Service, "nx2:vi2 31 kind {}: {} (EDEN_NX2_VI2_KIND_EVENTS)", kind,
+                     Nx2Vi2Events::ModeName(mode));
+        }
         {
             std::scoped_lock lk{m_vsync->mutex};
-            m_vsync->events.push_back(event);
+            auto& tracked = m_vsync->events.emplace_back();
+            tracked.event = event;
+            tracked.on_vsync = mode == Nx2Vi2Events::KindMode::Vsync;
+            if (mode == Nx2Vi2Events::KindMode::Once) {
+                tracked.kind = kind;
+                tracked.once_pending = true;
+                tracked.once_deadline = system.CoreTiming().GetGlobalTimeNs().count() + OnceFallbackNs;
+                ++m_vsync->once_pending;
+                m_once_waiting = true;
+            }
+            if (Vi2DiagEnabled()) {
+                tracked.name = fmt::format("{} ({} [2]={:#x})", name, ctx.GetCommand(), ctx.CommandBuffer()[2]);
+                tracked.calls_slot = Kernel::Nx2EventDiag::Track(&event->GetReadableEvent());
+                m_diag_event = event;
+            }
+        }
+        if (!m_vsync_timer && VrrVsyncRates()) {
+            StartVrrVsync(*VrrVsyncRates());
         }
         if (!m_vsync_timer) {
             m_vsync_timer = Core::Timing::CreateEvent(
                 "nx2:vi2 vsync",
-                [vsync_state = m_vsync, &kernel = system.Kernel()](
+                [vsync_state = m_vsync, &system = system](
                     s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                     std::scoped_lock lk{vsync_state->mutex};
-                    vsync_state->ticks.fetch_add(1, std::memory_order_relaxed);
-                    for (auto* vsync : vsync_state->events) {
-                        vsync->Signal(kernel);
-                    }
+                    VblankLocked(*vsync_state, system);
                     return std::nullopt;
                 });
             // EDEN_NX2_VSYNC_HZ=<rate> (experiment): the game starts frames on this event, so a
@@ -2130,11 +2646,162 @@ private:
     std::vector<Kernel::KEvent*> m_events;
     // Shared with the vsync timer callback, which can outlive the session by one call.
     struct VsyncState {
+        struct Event {
+            Kernel::KEvent* event{};
+            bool on_vsync{true}; // signalled on every vblank
+            // EDEN_NX2_VI2_DIAG, since the last summary but the waiter names
+            std::string name;
+            u32 handle{};
+            bool was_signalled{}; // after the previous vblank
+            bool handing_over{};  // 21 is clearing it
+            int calls_slot{-1};   // Kernel::Nx2EventDiag: the guest's polls, waits and resets
+            // EDEN_NX2_VI2_KIND_EVENTS "once": 31's kind, waiting for the next present (or the
+            // first vblank after once_deadline, CoreTiming ns)
+            u32 kind{};
+            bool once_pending{};
+            s64 once_deadline{};
+            u32 signalled{};
+            u32 cleared{};       // by the guest: signalled at one vblank, not at the next
+            u32 handed_over{};   // 21 (GetNotifications) cleared it
+            u32 waited{};        // vblanks with a thread waiting on it
+            std::map<u64, std::string> waiters; // thread id -> name, every one seen
+        };
         std::mutex mutex;
-        std::vector<Kernel::KEvent*> events;
+        std::vector<Event> events;
         std::atomic<u32> ticks{}; // vblanks signalled (EDEN_NX2_PRESENT_DIAG)
+        u32 once_pending{};       // events with once_pending set
+        // EDEN_NX2_VI2_DIAG summary
+        s64 diag_since{-1}; // CoreTiming ns
+        u32 diag_ticks{};
+        u64 diag_presents{};
+        u32 diag_get_notifications{};
+        // EDEN_NX2_VRR_VSYNC
+        Nx2Vi2Events::VrrVsyncClock vrr{};
+        bool vrr_pending{};      // a present's scan waits for the timing thread
+        bool vrr_pending_held{}; // and for the top rate
+        u32 vrr_presented{}, vrr_delayed{}, vrr_bottom{}; // scans since the last 600 presents
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
+
+    // A vblank: signal the events on it. Under state.mutex.
+    static void VblankLocked(VsyncState& state, Core::System& system) {
+        state.ticks.fetch_add(1, std::memory_order_relaxed);
+        if (Vi2DiagEnabled()) {
+            DiagBeforeVblank(state, system.Kernel());
+        }
+        for (auto& tracked : state.events) {
+            if (tracked.on_vsync) {
+                tracked.event->Signal(system.Kernel());
+            }
+        }
+        if (state.once_pending != 0) {
+            OnceFallbackLocked(state, system);
+        }
+        if (Vi2DiagEnabled()) {
+            DiagAfterVblank(state, system);
+        }
+    }
+
+    // At a vblank, under state.mutex: the "once" events no present signalled in time.
+    static void OnceFallbackLocked(VsyncState& state, Core::System& system) {
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        for (auto& tracked : state.events) {
+            if (!tracked.once_pending || now < tracked.once_deadline) {
+                continue;
+            }
+            tracked.once_pending = false;
+            --state.once_pending;
+            tracked.event->Signal(system.Kernel());
+            if (Vi2DiagEnabled()) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+            LOG_INFO(Service, "nx2:vi2 31's kind {} event signalled once at a vblank: no present "
+                              "within {} ms of the 31 call (EDEN_NX2_VI2_KIND_EVENTS)",
+                     tracked.kind, OnceFallbackNs / 1'000'000);
+        }
+    }
+
+    static std::string_view DiagThreadName(Kernel::KThread* thread, std::string& storage) {
+        if (thread->IsDummyThread() || thread->GetOwnerProcess() == nullptr) {
+            return "host thread";
+        }
+        storage = Core::GetThreadName(thread).value_or("?");
+        return storage;
+    }
+
+    // Each event's state since the previous vblank: cleared by the guest, waited on (by whom).
+    static void DiagBeforeVblank(VsyncState& state, Kernel::KernelCore& kernel) {
+        for (auto& tracked : state.events) {
+            auto& readable = tracked.event->GetReadableEvent();
+            const auto waiters = readable.GetWaitingThreadsForDebugging(kernel);
+            bool signalled{};
+            {
+                Kernel::KScopedSchedulerLock lk{kernel};
+                signalled = readable.IsSignaled(kernel);
+            }
+            if (!tracked.handing_over) {
+                if (tracked.was_signalled && !signalled) {
+                    ++tracked.cleared;
+                }
+                tracked.was_signalled = signalled;
+            }
+            if (!waiters.empty()) {
+                ++tracked.waited;
+            }
+            for (auto* thread : waiters) {
+                if (!tracked.waiters.contains(thread->GetThreadId())) {
+                    std::string storage;
+                    tracked.waiters.emplace(thread->GetThreadId(), std::string{DiagThreadName(thread, storage)});
+                }
+            }
+        }
+    }
+
+    static void DiagAfterVblank(VsyncState& state, Core::System& system) {
+        for (auto& tracked : state.events) {
+            if (tracked.on_vsync) {
+                tracked.was_signalled = true;
+                ++tracked.signalled;
+            }
+        }
+        ++state.diag_ticks;
+        const s64 now = system.CoreTiming().GetGlobalTimeNs().count();
+        const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+        if (state.diag_since < 0) {
+            state.diag_since = now;
+            state.diag_presents = presents;
+            return;
+        }
+        if (now - state.diag_since < 10'000'000'000LL) {
+            return;
+        }
+        std::string text;
+        for (auto& tracked : state.events) {
+            std::string waiters;
+            for (const auto& [id, thread_name] : tracked.waiters) {
+                waiters += fmt::format("{}{} {:#x}", waiters.empty() ? "" : ", ", thread_name, id);
+            }
+            text += fmt::format("; {} handle {:#x} {}: signalled {}, cleared by the guest {}{}, "
+                                "waited on at {} vblanks{}, guest calls: {}",
+                                tracked.name, tracked.handle, tracked.on_vsync ? "on vblanks" : "not on vblanks",
+                                tracked.signalled, tracked.cleared,
+                                tracked.handed_over != 0 ? fmt::format(", handed over by 21 {}", tracked.handed_over) : "",
+                                tracked.waited, waiters.empty() ? "" : fmt::format(" (ever: {})", waiters),
+                                Kernel::Nx2EventDiag::Take(tracked.calls_slot));
+            tracked.signalled = 0;
+            tracked.cleared = 0;
+            tracked.handed_over = 0;
+            tracked.waited = 0;
+        }
+        LOG_INFO(Service, "nx2:vi2 diag events, last {:.1f} s ({} vblanks, {} presents, 21 called {} times){}",
+                 (now - state.diag_since) / 1e9, state.diag_ticks, presents - state.diag_presents,
+                 state.diag_get_notifications, text);
+        state.diag_since = now;
+        state.diag_ticks = 0;
+        state.diag_presents = presents;
+        state.diag_get_notifications = 0;
+    }
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;
     u64 m_presents{};
     u64 m_shown_layout{}; // image and crop size last logged

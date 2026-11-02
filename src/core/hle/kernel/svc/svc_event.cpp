@@ -9,6 +9,7 @@
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
+#include "core/hle/kernel/nx2_event_diag.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -40,6 +41,15 @@ Result SignalEvent(Core::System& system, Handle event_handle) {
     R_RETURN(event->Signal(system.Kernel()));
 }
 
+// EDEN_NX2_VI2_DIAG: clears of the vi2 events.
+static void RecordNx2Clear(Core::System& system, const KReadableEvent* readable) {
+    if (Nx2EventDiag::Any()) {
+        if (const int slot = Nx2EventDiag::Find(readable); slot >= 0) {
+            Nx2EventDiag::Record(slot, GetCurrentThread(system.Kernel()), Nx2EventDiag::Op::Clear, true);
+        }
+    }
+}
+
 Result ClearEvent(Core::System& system, Handle event_handle) {
     LOG_TRACE(Kernel_SVC, "called, event_handle={:#08x}", event_handle);
 
@@ -51,6 +61,7 @@ Result ClearEvent(Core::System& system, Handle event_handle) {
         KScopedAutoObject event = handle_table.GetObject<KEvent>(system.Kernel(), event_handle);
         if (event.IsNotNull()) {
             event->Clear(system.Kernel());
+            RecordNx2Clear(system, &event->GetReadableEvent());
             R_SUCCEED();
         }
     }
@@ -60,6 +71,7 @@ Result ClearEvent(Core::System& system, Handle event_handle) {
         KScopedAutoObject readable_event = handle_table.GetObject<KReadableEvent>(system.Kernel(), event_handle);
         if (readable_event.IsNotNull()) {
             readable_event->Clear(system.Kernel());
+            RecordNx2Clear(system, readable_event.GetPointerUnsafe());
             R_SUCCEED();
         }
     }

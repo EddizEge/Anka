@@ -77,6 +77,7 @@ struct State {
     std::atomic<u32> traced{};
     std::atomic<u32> skipped{}; // matching requests that found the mutex busy, since the last trace
     std::atomic<bool> limit_logged{};
+    std::atomic<u32> forced{}; // TraceNow backtraces so far
 };
 
 State& GetState() {
@@ -366,13 +367,14 @@ std::shared_ptr<const Cache> Update(Kernel::KProcess& process, const std::shared
     return cache;
 }
 
-void Trace(Core::System& system, State& state, u32 number, const std::shared_ptr<const Cache>& cache,
-           std::string_view service, const char* handler, HLERequestContext& ctx,
-           const std::vector<u32>& words) {
+// `label`: "nx2 ipc trace" (OnRequest) or "nx2 ipc trace now" (TraceNow), counted to `limit`.
+void Trace(Core::System& system, State& state, std::string_view label, u32 number, u32 limit,
+           const std::shared_ptr<const Cache>& cache, std::string_view service, const char* handler,
+           HLERequestContext& ctx, const std::vector<u32>& words) {
     Kernel::KThread& thread = ctx.GetThread();
     Kernel::KProcess* const process = thread.GetOwnerProcess();
-    std::string text = fmt::format("nx2 ipc trace {}/{}: {} {} [{}] \"{}\", {} data words:", number,
-                                   MaxTraced, service, ctx.GetCommand(),
+    std::string text = fmt::format("{} {}/{}: {} {} [{}] \"{}\", {} data words:", label, number,
+                                   limit, service, ctx.GetCommand(),
                                    ctx.IsTipc() ? "tipc" : "cmif", handler == nullptr ? "unregistered" : handler,
                                    words.size());
     for (const u32 w : words) {
@@ -461,7 +463,44 @@ void OnRequest(Core::System& system, std::string_view service, const char* handl
             number = state.traced.fetch_add(1, std::memory_order_relaxed) + 1;
             cache = state.cache;
         }
-        Trace(system, state, number, cache, service, handler, ctx, words);
+        Trace(system, state, "nx2 ipc trace", number, MaxTraced, cache, service, handler, ctx, words);
+    } catch (const std::exception& e) {
+        LOG_WARNING(Service, "nx2 ipc trace of {} {} failed: {}", service, ctx.GetCommand(), e.what());
+    } catch (...) {
+        LOG_WARNING(Service, "nx2 ipc trace of {} {} failed", service, ctx.GetCommand());
+    }
+}
+
+bool WillTrace(std::string_view service, u32 command) {
+    const auto& filter = GetFilter();
+    return filter && filter->Matches(service, command) &&
+           GetState().traced.load(std::memory_order_relaxed) < MaxTraced;
+}
+
+void TraceNow(Core::System& system, std::string_view service, const char* handler,
+              HLERequestContext& ctx) {
+    State& state = GetState();
+    try {
+        const auto* buffer = ctx.CommandBuffer();
+        const auto words = RequestDataWords(std::span<const u32>{buffer, IPC::COMMAND_BUFFER_LENGTH},
+                                            ctx.IsTipc(), ctx.GetDataPayloadOffset(),
+                                            ctx.HasDomainMessageHeader());
+        std::shared_ptr<const Cache> cache;
+        {
+            // As in OnRequest, never wait for the mutex: no backtrace when it is busy.
+            std::unique_lock lk{state.mutex, std::try_to_lock};
+            if (!lk.owns_lock()) {
+                LOG_INFO(Service, "nx2 ipc trace now: {} {}: the trace state was busy, no backtrace",
+                         service, ctx.GetCommand());
+                return;
+            }
+            cache = state.cache;
+        }
+        const u32 number = state.forced.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (number > MaxForced) {
+            return;
+        }
+        Trace(system, state, "nx2 ipc trace now", number, MaxForced, cache, service, handler, ctx, words);
     } catch (const std::exception& e) {
         LOG_WARNING(Service, "nx2 ipc trace of {} {} failed: {}", service, ctx.GetCommand(), e.what());
     } catch (...) {

@@ -344,6 +344,7 @@ add_library(core STATIC
     hle/kernel/kernel.h
     hle/kernel/memory_types.h
     hle/kernel/message_buffer.h
+    hle/kernel/nx2_event_diag.h
     hle/kernel/physical_core.cpp
     hle/kernel/physical_core.h
     hle/kernel/slab_helpers.h
@@ -1041,6 +1042,7 @@ add_library(core STATIC
     hle/service/nx2_ipc_trace.cpp
     hle/service/nx2_ipc_trace.h
     hle/service/nx2_present_rate.h
+    hle/service/nx2_vi2_events.h
     hle/service/services.cpp
     hle/service/services.h
     hle/service/set/factory_settings_server.cpp
