@@ -1521,6 +1521,129 @@ u32 GraphicsPipeline::FirstPayloadDifference(const DescriptorUpdateEntry* a,
     return entry;
 }
 
+void GraphicsPipeline::TakeSetupSnapshot(SetupSnapshot& out, std::span<const u32> handles) const {
+    const DescriptorUpdateEntry* const payload = guest_descriptor_queue.UpdateData();
+    out.payload.assign(payload, payload + num_descriptor_entries);
+    out.tics.clear();
+    out.tscs.clear();
+    if (!handles.empty()) {
+        // The packet's: config_stage's order, a texture's sampler index after its view's.
+        ASSERT(handles.size() == num_image_elements + num_textures);
+        const u32* it = handles.data();
+        const auto add_views = [&](u32 count) {
+            for (u32 i = 0; i < count; ++i) {
+                out.tics.push_back(*it++);
+            }
+        };
+        for (const Shader::Info& info : stage_infos) {
+            add_views(Shader::NumDescriptors(info.texture_buffer_descriptors));
+            add_views(Shader::NumDescriptors(info.image_buffer_descriptors));
+            for (u32 i = 0; i < Shader::NumDescriptors(info.texture_descriptors); ++i) {
+                out.tics.push_back(*it++);
+                out.tscs.push_back(*it++);
+            }
+            add_views(Shader::NumDescriptors(info.image_descriptors));
+        }
+    } else if (LightUniformMode() != 0) {
+        out.tics = used_tics;
+        out.tscs = used_tscs;
+    }
+    out.values_valid = descriptor_values_valid;
+    if (descriptor_values_valid) {
+        out.values = descriptor_values;
+    } else {
+        out.values.clear();
+    }
+    out.draw_state = LightUniformMode() == 2;
+    out.rescaling = last_rescaling;
+    out.render_area = last_render_area;
+    out.uses_render_area = last_uses_render_area;
+    out.views_repeat = views_repeat;
+}
+
+std::string GraphicsPipeline::CompareSetups(const SetupSnapshot& split, const SetupSnapshot& full,
+                                            const MappedBytesFunc& bytes) const {
+    // As CheckLightVerify compares a light setup with a full one: a uniform buffer streamed
+    // again lies elsewhere (here always: B streams from its own pool), the same when it holds
+    // the same bytes. Storage buffers, images and samplers must be the same handles.
+    std::string mismatch;
+    const auto note = [&](const std::string& text) {
+        if (!mismatch.empty()) {
+            mismatch += "; ";
+        }
+        mismatch += text;
+    };
+    if (split.payload.size() != full.payload.size()) {
+        note(fmt::format("payload of {} entries, {} in full", split.payload.size(),
+                         full.payload.size()));
+    } else {
+        const u32 entries = static_cast<u32>(split.payload.size());
+        for (u32 entry = 0;; ++entry) {
+            bool uniform;
+            entry = FirstPayloadDifference(split.payload.data(), full.payload.data(), entry,
+                                           uniform);
+            if (entry >= entries) {
+                break;
+            }
+            if (uniform && bytes) {
+                VkDeviceSize split_range{};
+                VkDeviceSize full_range{};
+                const std::span<const u8> split_bytes = bytes(split.payload[entry], split_range);
+                const std::span<const u8> full_bytes = bytes(full.payload[entry], full_range);
+                if (split_range == full_range && !split_bytes.empty() &&
+                    split_bytes.size() == full_bytes.size() &&
+                    std::memcmp(split_bytes.data(), full_bytes.data(), split_bytes.size()) == 0) {
+                    continue;
+                }
+            }
+            std::array<u64, 3> split_words{};
+            std::array<u64, 3> full_words{};
+            std::memcpy(split_words.data(), &split.payload[entry], sizeof(split_words));
+            std::memcpy(full_words.data(), &full.payload[entry], sizeof(full_words));
+            note(fmt::format("descriptor {} of {}{}: split {:016x} {:016x} {:016x} full {:016x} "
+                             "{:016x} {:016x}",
+                             entry, entries, uniform ? " (uniform)" : "", split_words[0],
+                             split_words[1], split_words[2], full_words[0], full_words[1],
+                             full_words[2]));
+            break;
+        }
+    }
+    const auto compare_indices = [&](const std::vector<u32>& lhs, const std::vector<u32>& rhs,
+                                     const char* what) {
+        if (lhs.empty() || rhs.empty()) {
+            return; // Not kept (the old setup keeps them with EDEN_NX2_LIGHT_UNIFORM on)
+        }
+        if (lhs.size() != rhs.size()) {
+            note(fmt::format("{} {} {}, {} in full", lhs.size(), what, "indices", rhs.size()));
+            return;
+        }
+        const auto [lhs_it, rhs_it] = std::mismatch(lhs.begin(), lhs.end(), rhs.begin());
+        if (lhs_it != lhs.end()) {
+            note(fmt::format("{} {}: split {:#x} full {:#x}", what, lhs_it - lhs.begin(), *lhs_it,
+                             *rhs_it));
+        }
+    };
+    compare_indices(split.tics, full.tics, "view");
+    compare_indices(split.tscs, full.tscs, "sampler");
+    if (split.values_valid && full.values_valid) {
+        compare_indices(split.values, full.values, "descriptor word");
+    }
+    if (split.draw_state && full.draw_state) {
+        if (split.rescaling != full.rescaling) {
+            note("rescaling push constants");
+        }
+        if (split.uses_render_area != full.uses_render_area ||
+            (split.uses_render_area && split.render_area != full.render_area)) {
+            note("render area push constants");
+        }
+    }
+    if (split.views_repeat != full.views_repeat) {
+        note(fmt::format("views need repeat: split {} full {}", split.views_repeat,
+                         full.views_repeat));
+    }
+    return mismatch;
+}
+
 void GraphicsPipeline::PushStageImageDescriptors(size_t stage, RescalingPushConstant& rescaling,
                                                  const VideoCommon::SamplerId*& samplers,
                                                  const VideoCommon::ImageViewInOut*& views) {
