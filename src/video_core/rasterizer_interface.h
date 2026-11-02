@@ -175,6 +175,9 @@ public:
     /// Notify the host renderer to wait for previous primitive and compute operations.
     virtual void WaitForIdle() = 0;
 
+    /// The Ampere puller's MEM_OP_D MEMBAR, with EDEN_NX2_MEMBAR (video_core/nx2.h).
+    virtual void Nx2Membar() {}
+
     /// Notify the host renderer to wait for reads and writes to render targets and flush caches.
     virtual void FragmentBarrier() = 0;
 

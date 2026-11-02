@@ -423,9 +423,21 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
         OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); });
         break;
     }
-    case BufferMethods::MemOpC:
+    case BufferMethods::MemOpC: {
+        LOG_TRACE(HW_GPU, "Memory Operation C: argument={:#x}", method_call.argument);
+        break;
+    }
     case BufferMethods::MemOpD: {
-        LOG_TRACE(HW_GPU, "Memory Operation C,D");
+        LOG_TRACE(HW_GPU, "Memory Operation D: argument={:#x}", method_call.argument);
+        // MEM_OP_D runs the operation MEM_OP_A-C set up; operation 5 (bits 27-31) is MEMBAR
+        // (57ffa55a8). EDEN_NX2_MEMBAR: records a real barrier.
+        constexpr u32 OperationShift = 27;
+        constexpr u32 OperationMask = 0x1f;
+        constexpr u32 MembarOperation = 5;
+        if (g_nx2_ampere && Nx2MembarEnabled() &&
+            ((method_call.argument >> OperationShift) & OperationMask) == MembarOperation) {
+            OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->Nx2Membar(); });
+        }
         break;
     }
     case BufferMethods::SemaphoreAcquire: {

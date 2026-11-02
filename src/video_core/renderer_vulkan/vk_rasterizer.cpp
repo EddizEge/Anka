@@ -2107,10 +2107,66 @@ void RasterizerVulkan::WaitForIdle() {
 
     query_cache.NotifyWFI();
 
+    if (Tegra::Nx2MembarEnabled()) [[unlikely]] {
+        Nx2Barrier(flags, false);
+        return;
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetEvent(event, flags);
         cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
+    });
+    fence_manager.SignalOrdering();
+}
+
+// EDEN_NX2_MEMBAR (video_core/nx2.h; 57ffa55a8, there on AMD's Windows driver only): the puller's
+// MEMBAR, WaitForIdle's stages and query notice.
+void RasterizerVulkan::Nx2Membar() {
+    NoteLightWork();
+    VkPipelineStageFlags flags =
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (device.IsExtTransformFeedbackSupported()) {
+        flags |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+    }
+    query_cache.NotifyWFI();
+    Nx2Barrier(flags, true);
+}
+
+// The event wait with `flags` as both source and destination and a memory barrier (writes made
+// available to all reads and writes). Counted, a line every 10 s (GPU back thread, or the GPU
+// thread without the split: one thread).
+void RasterizerVulkan::Nx2Barrier(VkPipelineStageFlags flags, bool membar) {
+    static bool logged = false;
+    static u64 membars = 0;
+    static u64 idles = 0;
+    static auto since = std::chrono::steady_clock::now();
+    if (!logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "nx2 membar (EDEN_NX2_MEMBAR): MEM_OP_D MEMBAR and WaitForIdle "
+                                "record a memory barrier to all their stages");
+    }
+    ++(membar ? membars : idles);
+    if (const auto now = std::chrono::steady_clock::now(); now - since >= std::chrono::seconds{10}) {
+        LOG_INFO(Render_Vulkan, "nx2 membar last {:.1f} s: {} MEMBARs, {} WaitForIdle",
+                 std::chrono::duration<double>(now - since).count(), membars, idles);
+        membars = 0;
+        idles = 0;
+        since = now;
+    }
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier memory_barrier{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        };
+        cmdbuf.SetEvent(event, flags);
+        cmdbuf.WaitEvents(event, flags, flags, memory_barrier, {}, {});
     });
     fence_manager.SignalOrdering();
 }

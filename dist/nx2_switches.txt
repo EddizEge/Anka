@@ -32,3 +32,5 @@
 #EDEN_NX2_VI2_REPLY=104:1,0,0
 # pace by the swap interval word's refresh rate too (needs EDEN_NX2_PRESENT_INTERVAL_WORD=12:16:4)
 #EDEN_NX2_PRESENT_RATE=1
+# MEM_OP_D MEMBAR and WaitForIdle record a real memory barrier (H1 experiment)
+#EDEN_NX2_MEMBAR=1

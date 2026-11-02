@@ -136,6 +136,7 @@ public:
     void FlushAndInvalidateRegion(
         DAddr addr, u64 size, VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void WaitForIdle() override;
+    void Nx2Membar() override;
     void FragmentBarrier() override;
     void TiledCacheBarrier() override;
     void FlushCommands() override;
@@ -161,6 +162,10 @@ public:
                                                             u32 pixel_stride);
 
 private:
+    /// EDEN_NX2_MEMBAR: WaitForIdle's event wait with `flags` as the destination and a memory
+    /// barrier; `membar`: for Nx2Membar (counted apart).
+    void Nx2Barrier(VkPipelineStageFlags flags, bool membar);
+
     static constexpr const u64 NEEDS_D24[] = {
         0x01006A800016E000ULL, // SSBU
         0x0100E95004038000ULL, // XC2
