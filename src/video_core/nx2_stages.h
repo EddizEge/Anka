@@ -261,8 +261,9 @@ void ParkB(FunctionRef op);
 /// buffer cache and C's caches and scheduler alike. They run on C at a record boundary of ring 3
 /// inside a ParkB (`run` its `op`; R2 F4), never inside a record (PrepareDrawC's TickWork) nor on
 /// B. True when the stages took them: `run` ran so, or waits for C's next record boundary, which
-/// calls GPU::TickWork again. False when the caller runs `run` now: cut c off (K1, =0, =3), or a
-/// thread that is no stage.
+/// calls GPU::TickWork again (from C inside a record, B, A outside a join). False when the caller
+/// runs `run` now: cut c off (K1, =0, =3), C inside a ParkB op or A inside its join (the others
+/// parked already), a thread that is no stage.
 bool StageTickWork(FunctionRef run);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and

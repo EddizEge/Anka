@@ -158,12 +158,18 @@ struct GpuHandler {
     void Hazard(u8, StageHazard, u64, u64) {
         Nx2Profile::Add(Counter::StageViolations, 1);
     }
-    /// C at a record boundary, asked (RequestBoundaryWork): nothing asks yet (StageTickWork).
-    void BoundaryWork() {}
+    /// C at a record boundary, asked (StageTickWork): the GPU's sync requests, in a ParkB.
+    void BoundaryWork() {
+        g_system->GPU().TickWork();
+    }
 };
 
 GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
+
+/// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
+/// and run the GPU's sync requests (StageTickWork).
+thread_local bool t_park_op{};
 
 /// The first reports of a check (CheckStage, CheckRecordOwner), with the stack (as
 /// GpuSplit::CheckOwner) on stderr, and in short in the log (the measuring scripts read the log
@@ -417,11 +423,36 @@ void ParkB(FunctionRef op) {
         op();
         return;
     }
-    g_pipeline.ParkB(op);
+    g_pipeline.ParkB([&] {
+        const bool was_park_op = t_park_op;
+        t_park_op = true;
+        op();
+        t_park_op = was_park_op;
+    });
 }
 
-bool StageTickWork([[maybe_unused]] FunctionRef run) {
-    // The interface first (T9a): until its body the caller runs the requests where it stands.
+bool StageTickWork(FunctionRef run) {
+    if (!Active() || !g_pipeline.Options().cut_c) {
+        return false;
+    }
+    if (OnStage(Stage::C)) {
+        if (t_park_op) {
+            // B parked already: the requests run here.
+            return false;
+        }
+        if (g_pipeline.CInRecord()) {
+            // At the record boundary after this one (the boundary work calls TickWork again).
+            g_pipeline.RequestBoundaryWork();
+            return true;
+        }
+        ParkB(run);
+        return true;
+    }
+    if (OnStage(Stage::B) || Forwarding()) {
+        g_pipeline.RequestBoundaryWork();
+        return true;
+    }
+    // A inside its join (B and C parked), a thread that is no stage.
     return false;
 }
 

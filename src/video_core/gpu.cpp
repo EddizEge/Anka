@@ -40,6 +40,7 @@
 #include "video_core/nx2_busy_clock.h"
 #include "video_core/nx2_mode_gov.h"
 #include "video_core/nx2_stage_proxy.h"
+#include "video_core/nx2_stages.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -167,6 +168,29 @@ struct GPU::Impl {
                              current_sync_fence.load(std::memory_order_acquire)) {
             return;
         }
+        if (VideoCommon::Nx2Stages::Active()) [[unlikely]] {
+            // Back stages, cut c: on C at a record boundary in a ParkB, else left for one (R2 F4).
+            if (VideoCommon::Nx2Stages::StageTickWork([this] { RunSyncRequests(); })) {
+                return;
+            }
+        }
+        std::unique_lock lck{sync_request_mutex};
+        while (!sync_requests.empty()) {
+            auto request = std::move(sync_requests.front());
+            sync_requests.pop_front();
+            sync_request_mutex.unlock();
+            request();
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkRequests, 1);
+            current_sync_fence.fetch_add(1, std::memory_order_release);
+            sync_request_mutex.lock();
+            sync_request_cv.notify_all();
+        }
+    }
+
+    /// TickWork's requests, for the back stages (StageTickWork: cut c runs them on C at a record
+    /// boundary, B parked and C caught up with it, so they see B's buffer cache and C's caches
+    /// and scheduler at one point of the stream).
+    void RunSyncRequests() {
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
