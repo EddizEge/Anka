@@ -64,6 +64,7 @@
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/nx2_stub_interface.h"
+#include "core/hle/service/nx2_vi2_reply.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
@@ -990,6 +991,9 @@ public:
             {228, &INx2Vi2Session::CancelClientBuffer, "CancelClientBuffer"},
             {229, &INx2Vi2Session::PresentClientBuffer, "PresentClientBuffer"},
         });
+        if (GetReplies() != nullptr) {
+            RegisterReplies();
+        }
     }
 
     ~INx2Vi2Session() override {
@@ -1402,12 +1406,15 @@ private:
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "
                      "requested interval 1x{} 2x{} 3x{} 4x{}, gpu busy {} ms, vsync ticks {}, "
-                     "vi2 calls{}",
+                     "vi2 calls{}{}",
                      to_us(paced - d.second) / 1e6, d.presents, d.shown[0], d.shown[1], d.shown[2],
                      d.shown[3], d.shown[4], d.min_us / 1000.0, d.max_us / 1000.0,
                      d.fence_us / 1000.0 / d.presents, d.pace_us / 1000.0 / d.presents,
                      d.intervals[1], d.intervals[2], d.intervals[3], d.intervals[4], busy,
-                     ticks - d.vsync_ticks, calls);
+                     ticks - d.vsync_ticks, calls,
+                     GetReplies() != nullptr
+                         ? fmt::format(", reply v{}", GetReplies()->version.load(std::memory_order_relaxed))
+                         : std::string{});
             d.vsync_ticks = ticks;
             d.second = paced;
             d.shown = {};
@@ -1644,6 +1651,108 @@ private:
     void SucceedQuietly(HLERequestContext& ctx) {
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
+    }
+
+    // EDEN_NX2_VI2_REPLY_FILE / EDEN_NX2_VI2_REPLY (off by default): replies from a table that may
+    // change while the game runs (nx2_vi2_reply.h), shared by every vi2 session. Null when off.
+    struct Replies {
+        std::mutex mutex;
+        Nx2Vi2Reply::Source source;
+        std::atomic<u32> version{}; // for the PRESENT_DIAG line
+    };
+
+    static void LogReplyUpdate(Replies& replies, const Nx2Vi2Reply::Source::Update& update) {
+        using Kind = Nx2Vi2Reply::Source::Kind;
+        const u32 version = replies.source.Version();
+        if (update.kind == Kind::Loaded) {
+            replies.version.store(version, std::memory_order_relaxed);
+            LOG_INFO(Service, "nx2:vi2 reply table v{}: {}", version, update.message);
+        } else if (update.kind == Kind::Same) {
+            LOG_INFO(Service, "nx2:vi2 reply file changed, same table (v{})", version);
+        } else if (update.kind == Kind::Failed) {
+            LOG_WARNING(Service, "nx2:vi2 reply table: {}; keeping v{}", update.message, version);
+        }
+    }
+
+    static Replies* GetReplies() {
+        static const std::unique_ptr<Replies> replies = []() -> std::unique_ptr<Replies> {
+            const char* file = std::getenv("EDEN_NX2_VI2_REPLY_FILE");
+            const char* text = std::getenv("EDEN_NX2_VI2_REPLY");
+            if (file != nullptr && file[0] != '\0') {
+                if (text != nullptr) {
+                    LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY ignored: EDEN_NX2_VI2_REPLY_FILE is set");
+                }
+                auto result = std::make_unique<Replies>();
+                result->source = Nx2Vi2Reply::Source{std::filesystem::path{file}};
+                LOG_INFO(Service, "EDEN_NX2_VI2_REPLY_FILE: nx2:vi2 replies from {} (checked at most once a second)",
+                         file);
+                LogReplyUpdate(*result, result->source.Poll(std::chrono::steady_clock::now()));
+                return result;
+            }
+            if (text == nullptr || text[0] == '\0') {
+                return nullptr;
+            }
+            auto parsed = Nx2Vi2Reply::ParseInline(text);
+            if (!parsed.table) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY=\"{}\": {}: off", text, parsed.error);
+                return nullptr;
+            }
+            auto result = std::make_unique<Replies>();
+            LogReplyUpdate(*result, result->source.Apply(std::move(*parsed.table)));
+            return result;
+        }();
+        return replies.get();
+    }
+
+    // Answers from the table: Bananza's per-frame queries (104, 105: empty success before), its
+    // setup queries (107, 261, 265, 267, 271, 351: auto-stubbed before) and any other command in
+    // the table when the session opens that has no handler of its own.
+    void RegisterReplies() {
+        auto& replies = *GetReplies();
+        std::set<u32> commands{104, 105, 107, 261, 265, 267, 271, 351};
+        {
+            std::scoped_lock lk{replies.mutex};
+            for (const auto& entry : replies.source.GetTable()) {
+                commands.insert(entry.first);
+            }
+        }
+        std::vector<FunctionInfo> functions;
+        for (const u32 command : commands) {
+            const auto it = handlers_tipc.find(command);
+            if (it != handlers_tipc.end()) {
+                if (command != 104 && command != 105) {
+                    LOG_WARNING(Service, "nx2:vi2 reply table: {} has a handler of its own, not replaced", command);
+                    continue;
+                }
+                handlers_tipc.erase(it);
+            }
+            functions.push_back({command, &INx2Vi2Session::ReplyFromTable, "ReplyFromTable (EDEN_NX2_VI2_REPLY)"});
+        }
+        RegisterHandlersTipc(functions.data(), functions.size());
+    }
+
+    // Success and the command's words; a command not in the table gets an empty success, the
+    // reply it had before. Logs each command's first call and its first call after a change.
+    void ReplyFromTable(HLERequestContext& ctx) {
+        auto& replies = *GetReplies();
+        const u32 command = ctx.GetCommand();
+        std::optional<std::vector<u32>> words;
+        {
+            std::scoped_lock lk{replies.mutex};
+            LogReplyUpdate(replies, replies.source.Poll(std::chrono::steady_clock::now()));
+            if (const auto* reply = replies.source.Find(command)) {
+                words = *reply;
+            }
+            if (replies.source.FirstCallSinceChange(command)) {
+                LOG_INFO(Service, "nx2:vi2 reply v{}: {} -> {}", replies.source.Version(), command,
+                         words ? Nx2Vi2Reply::FormatWords(*words) : "empty success (not in the table)");
+            }
+        }
+        if (words) {
+            TipcReplyWords(ctx, *words);
+        } else {
+            SucceedQuietly(ctx);
+        }
     }
 
     // Must be < 8; nn::vi::detail::LayerHistory creates 7 timestamp recorders per layer.
