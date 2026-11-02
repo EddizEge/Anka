@@ -1100,3 +1100,43 @@ TEST_CASE("Nx2StagePipeline: C stores B's marks without a join (R1 dikis-1)", "[
     pipe.Stop();
     REQUIRE(g_failures == 0);
 }
+
+namespace {
+std::atomic<u64> g_verified_target{};
+void VerifyTarget(u8 stage) {
+    // A Target record is not checked: the target checked is always the one of a record after it.
+    Expect(g_handler->logs[stage].target != 0, "=2: a check has a target");
+    g_verified_target = g_handler->logs[stage].target;
+}
+void PostTargetB(TestPipeline& pipe, u64 primary) {
+    u64* const body = pipe.BeginB(RecordKind::Target, 1);
+    body[0] = primary;
+    pipe.EndB();
+}
+} // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: =2 checks no Target record, the record after it (R1 dikis-4)",
+          "[video_core]") {
+    Watchdog watchdog{"target check"};
+    for (const bool cut_c : {false, true}) {
+        FakeHandler handler;
+        TestPipeline pipe{handler};
+        ResetGlobals(handler, pipe);
+        handler.on_verify = &VerifyTarget;
+        REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = cut_c}));
+        for (u64 target = 1; target <= 100; ++target) {
+            const u32 before = handler.logs[StageIdB].verifies;
+            PostTargetB(pipe, target);
+            REQUIRE(handler.logs[StageIdB].verifies == before);
+            PostCallB(pipe, &RanOnB, target);
+            REQUIRE(handler.logs[StageIdB].verifies == before + 1);
+            REQUIRE(g_verified_target == target);
+        }
+        Drain(pipe);
+        pipe.Stop();
+        REQUIRE(g_failures == 0);
+        // 100 calls and the drain's join; C (cut c) its join alone.
+        REQUIRE(handler.logs[StageIdB].verifies == 101);
+        REQUIRE(handler.logs[StageIdC].verifies == (cut_c ? 1U : 0U));
+    }
+}

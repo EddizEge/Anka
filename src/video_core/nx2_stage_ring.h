@@ -984,8 +984,10 @@ private:
         }
         if (options.mode == 2) {
             // Lockstep: the producer waits for this release, so the primaries are where this
-            // record left them (a Join verified before its ack, Park).
-            if (kind != RecordKind::Join) {
+            // record left them (a Join verified before its ack, Park). Not after a Target: it
+            // carries no state, and A may have touched the new target's primary before selecting
+            // it (its writes go with the next record); that record checks it (R1 dikis-4).
+            if (kind != RecordKind::Join && kind != RecordKind::Target) {
                 MaybeVerify(stage, self);
             }
             in.ring.Release(self.read);
