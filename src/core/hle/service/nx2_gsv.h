@@ -2023,6 +2023,7 @@ private:
     void RegisterReplies() {
         auto& replies = *GetReplies();
         std::set<u32> commands{104, 105, 107, 261, 265, 267, 271, 351};
+        commands.insert(ReplyOwnCommands().begin(), ReplyOwnCommands().end());
         {
             std::scoped_lock lk{replies.mutex};
             for (const auto& entry : replies.source.GetTable()) {
@@ -2034,6 +2035,13 @@ private:
         for (const u32 command : commands) {
             const auto it = handlers_tipc.find(command);
             if (it != handlers_tipc.end()) {
+                if (ReplyOwnCommands().contains(command)) {
+                    m_own_replaced.emplace(command, it->second);
+                    handlers_tipc.erase(it);
+                    functions.push_back({command, &INx2Vi2Session::ReplyOwnFromTable,
+                                         "ReplyOwnFromTable (EDEN_NX2_VI2_REPLY_OWN)"});
+                    continue;
+                }
                 if (command != 104 && command != 105) {
                     LOG_WARNING(Service, "nx2:vi2 reply table: {} has a handler of its own, not replaced", command);
                     own.insert(command);
@@ -2072,6 +2080,74 @@ private:
         if (words) {
             TipcReplyWords(ctx, *words);
         } else {
+            SucceedQuietly(ctx);
+        }
+    }
+
+    // EDEN_NX2_VI2_REPLY_OWN=<commands> (off by default; needs EDEN_NX2_VI2_REPLY_FILE or
+    // EDEN_NX2_VI2_REPLY): these commands keep their own handler but answer from the table when it
+    // lists them, for the setup replies Bananza's display gets from guesses (1 and 3 return 1, 101
+    // no data): "1,3,101". The handler still runs first (101 keeps its notification index), then
+    // the table's words replace its reply; not listed, its reply as before. Never 11, 21, 31, 32
+    // and 229: their replies carry handles, a buffer or a present.
+    static const std::set<u32>& ReplyOwnCommands() {
+        static const std::set<u32> commands = []() -> std::set<u32> {
+            const char* text = std::getenv("EDEN_NX2_VI2_REPLY_OWN");
+            if (text == nullptr || text[0] == '\0') {
+                return {};
+            }
+            if (GetReplies() == nullptr) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN needs EDEN_NX2_VI2_REPLY_FILE or "
+                                     "EDEN_NX2_VI2_REPLY: off");
+                return {};
+            }
+            auto parsed = Nx2Vi2Events::ParseCommandList(text);
+            if (!parsed.error.empty()) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN=\"{}\": {}: off", text, parsed.error);
+                return {};
+            }
+            if (!parsed.refused.empty()) {
+                LOG_WARNING(Service, "EDEN_NX2_VI2_REPLY_OWN: {} left out (their replies carry "
+                                     "handles, a buffer or a present)",
+                            fmt::join(parsed.refused, ", "));
+            }
+            if (!parsed.commands.empty()) {
+                LOG_INFO(Service, "nx2:vi2 reply own (EDEN_NX2_VI2_REPLY_OWN): {} answer from the "
+                                  "table when it lists them, after their own handler",
+                         fmt::join(parsed.commands, ", "));
+            }
+            return std::move(parsed.commands);
+        }();
+        return commands;
+    }
+
+    // The handlers EDEN_NX2_VI2_REPLY_OWN wrapped, by command.
+    std::map<u32, decltype(handlers_tipc)::mapped_type> m_own_replaced;
+
+    void ReplyOwnFromTable(HLERequestContext& ctx) {
+        auto& replies = *GetReplies();
+        const u32 command = ctx.GetCommand();
+        std::optional<std::vector<u32>> words;
+        {
+            std::scoped_lock lk{replies.mutex};
+            LogReplyUpdate(replies, replies.source.Poll(std::chrono::steady_clock::now()));
+            if (const auto* reply = replies.source.Find(command)) {
+                words = *reply;
+            }
+            if (replies.source.FirstCallSinceChange(command)) {
+                LOG_INFO(Service, "nx2:vi2 reply v{}: {} -> {} (EDEN_NX2_VI2_REPLY_OWN)",
+                         replies.source.Version(), command,
+                         words ? Nx2Vi2Reply::FormatWords(*words) + " instead of its own reply"
+                               : std::string{"its own reply (not in the table)"});
+            }
+        }
+        const auto own = m_own_replaced.find(command);
+        if (own != m_own_replaced.end()) {
+            handler_invoker(this, own->second.handler_callback, ctx);
+        }
+        if (words) {
+            TipcReplyWords(ctx, *words);
+        } else if (own == m_own_replaced.end()) {
             SucceedQuietly(ctx);
         }
     }
