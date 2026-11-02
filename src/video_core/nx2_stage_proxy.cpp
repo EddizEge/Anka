@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "video_core/control/channel_state.h"
+#include "video_core/memory_manager.h"
 #include "video_core/nx2_stage_proxy.h"
 
 // Skeleton (T0): every member calls the real rasterizer, and the proxy is never installed. The
@@ -216,6 +218,15 @@ void UninstallProxy(Core::System& system) {}
 
 Nx2StageProxy* Proxy() {
     return nullptr;
+}
+
+void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::RasterizerInterface& real) {
+    channel.BindRasterizer(&real);
+}
+
+void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
+                         VideoCore::RasterizerInterface& real) {
+    memory_manager.BindRasterizer(&real);
 }
 
 } // namespace VideoCommon::Nx2Stages

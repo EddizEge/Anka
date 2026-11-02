@@ -1986,8 +1986,8 @@ void Maxwell3D::StageCbForward(const u32* start_base, u32 amount) {
     ASSERT(regs.const_buffer.offset <= regs.const_buffer.size);
     const GPUVAddr address{buffer_address + regs.const_buffer.offset};
     regs.const_buffer.offset += amount * static_cast<u32>(sizeof(u32));
-    VideoCommon::Nx2Stages::PostCbData(VideoCommon::Nx2Stages::Ring::ToB, address, start_base,
-                                       amount);
+    VideoCommon::Nx2Stages::PostCbData(VideoCommon::Nx2Stages::Ring::ToB, *this, address,
+                                       start_base, amount);
 }
 
 void Maxwell3D::StageQueryCondition() {

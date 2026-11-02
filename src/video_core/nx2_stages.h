@@ -38,7 +38,8 @@ enum class Role : u8 { Memory, Record };
 
 struct Config {
     /// EDEN_NX2_BACK_STAGES: 0 off, 1 on, 2 verify (lockstep, depth 1, replicas compared),
-    /// 3 pass-through (A forwards ring 1 ranges for BC to run with GpuSplit::Execute)
+    /// 3 pass-through (A forwards ring 1 ranges for BC to run with GpuSplit::Execute; no channel
+    /// is staged and the proxy is not installed: BC runs the primaries as the unstaged back, K1)
     u8 mode{};
     bool cut_a{};        ///< EDEN_NX2_BACK_CUTS holds 'a' (default with mode != 0: "a" in K1)
     bool cut_c{};        ///< ... holds 'c' (K2)
@@ -58,7 +59,9 @@ inline thread_local u8 t_stage = NoStage;
 inline thread_local bool t_in_join{};
 } // namespace Detail
 
-/// Whether the stages run (Start to Stop). Any thread.
+/// Whether the stages run (Start to Stop), =3 included. Any thread. What depends on staged
+/// channels tests them, never Active() alone (K1): Maxwell3D's hooks its stage_capture
+/// (nx2_stage_api.h), the front's BindChannel tag ChannelStaged and Proxy() (nx2_stage_proxy.h).
 inline bool Active() {
     return Detail::g_active.load(std::memory_order_relaxed);
 }
@@ -70,7 +73,8 @@ inline bool InJoin() {
     return Detail::t_in_join;
 }
 /// What the proxy forwards from: A outside a join. From any other thread (B or C, the front
-/// after a Drain, A inside a join) it calls the real rasterizer.
+/// after a Drain, A inside a join) it calls the real rasterizer. Code choosing between a join, a
+/// record and the real call tests Forwarding(), never OnStage(Stage::A) alone (K4).
 inline bool Forwarding() {
     return OnStage(Stage::A) && !InJoin();
 }
@@ -85,8 +89,15 @@ using Ring1Thunk = void (*)(const u64* payload);
 
 /// Producer (A for ToB, B for ToC): room for a Call record running `thunk` with `payload_words`
 /// words; returns where the payload goes. From A, the deltas A's capture holds go in the same
-/// record, before it (S5/1). The consumer sees it from Commit on (published as GpuSplit does).
-/// Only while Active().
+/// record, before it (S5/1). From B (K2, K11; T9): the delta words of ring 2 records B applied to
+/// its replica and has not passed on yet go in it the same way, in their order, so C's replica
+/// follows the same stream; B passes a Target record on to ring 3 as it consumes it (the deltas
+/// pending for the old target in it), and a record B consumes alone (CbData, a B event) leaves
+/// its deltas for B's next ring 3 record. The consumer sees it from Commit on (published as
+/// GpuSplit does).
+/// Only while Active(). A inside a join writes no record (K4): Reserve, Post, Forward,
+/// PostCbData, PostTarget and PostMark assert !InJoin(). 1 + `payload_words` is at most
+/// MaxBodyWords (asserted; K9, nx2_stage_ring.h).
 u64* Reserve(Ring ring, Thunk thunk, u32 payload_words);
 void Commit(Ring ring);
 /// Makes what was committed visible to the consumer now (the end of a batch, before a wait).
@@ -110,12 +121,20 @@ void Post(Ring ring, const F& func) {
 /// A: a ring 1 Call entry tagged DeferTarget::Owner, copied as it is (thunk and payload, D2).
 void Forward(Ring ring, Ring1Thunk thunk, const u64* payload, u32 payload_words);
 /// A: constant buffer data ProcessCBMultiData sends while staged (T2), for the consumer's replica
-/// of the current target (StageCbWrite). Joins the CbData record just before when that is the
-/// last one written, not published yet and ends at `address` (S5/3).
-void PostCbData(Ring ring, GPUVAddr address, const u32* data, u32 count);
+/// of `primary` (StageCbWrite). First Capture().SelectTarget(primary): CallMultiMethod's cb data
+/// passes no ProcessDirtyRegisters, so after a channel change no Note may have sent its Target
+/// (K6). Joins the CbData record just before (S5/3) only when that is the last one written, not
+/// published yet, ends at `address`, the sum fits one record (MaxBodyWords) and no delta is
+/// pending (Capture().PendingWords() == 0: a register written between the two writes applies
+/// before the second, K6); else a new record. A write longer than one record goes in several, in
+/// order (K9). const_buffer.offset: A advances the primary's without noting it, StageCbWrite the
+/// replica's (a noted offset would leave a delta pending after every write and nothing would
+/// ever join, K6).
+void PostCbData(Ring ring, Tegra::Engines::Maxwell3D& primary, GPUVAddr address, const u32* data,
+                u32 count);
 /// A: the primary Maxwell3D the deltas after this record are for (the consumer takes its own
-/// replica, ReplicaOf). RegCapture::Note sends it when the engine written to changes; the deltas
-/// pending until then go in this record, for the previous target.
+/// replica, ReplicaOf). RegCapture::SelectTarget sends it when the engine A writes for changes
+/// (Note, PostCbData); the deltas pending until then go in this record, for the previous target.
 void PostTarget(Ring ring, Tegra::Engines::Maxwell3D* primary);
 /// A ran ring 1 up to `ring1_position` (the end of each batch, every 4096 words). The last stage
 /// (K1: B, K2: C) stores it to GpuSplit's consumed, then Nx2BackCpu::NoteBack and, caught up,
@@ -155,18 +174,38 @@ private:
 
 /// A: the stages below run everything sent before this point and park (B writes a Join to ring
 /// 3 and waits for C's park with cut c); then `op` runs on A with every cache, the scheduler and
-/// the replicas (equal to the primaries there), A being the record owner (InJoin, RecordOwner,
-/// CheckOwner); then they go on. The ack wait spins briefly, then sleeps (an atomic wait); with
-/// STAGE_CHECK one past 50 ms is logged. =2 lockstep: for a Join record the producer waits for
-/// the park ack, never for the record's end (the consumer ends it only once A releases; S8).
+/// the replicas, A being the record owner (InJoin, RecordOwner, CheckOwner); then they go on.
+/// There the replicas' registers equal the primaries' (the Join record takes the pending deltas);
+/// their side state may lag, it goes only with draws (K2, D4): `op` must not depend on it. The
+/// ack wait spins briefly, then sleeps (an atomic wait); with STAGE_CHECK one past 50 ms is
+/// logged. =2 lockstep: for a Join record the producer waits for the park ack, never for the
+/// record's end (the consumer ends it only once A releases; S8).
+/// Nested and elsewhere (K4): from A inside a join (InJoin(), e.g. engine_upload's block linear
+/// path in a ring level join of KeplerMemory), from any other thread and with the stages off or
+/// at =3, `op` runs at once: no record, no wait, not counted. Inside a join A sends nothing (see
+/// Reserve); RegCapture::Note only collects there, its words go with the first record after.
 void JoinFromA(JoinReason reason, FunctionRef op);
+// K2: joins between B and C (K1 calls neither: BC owns every cache). T1 writes them now, with
+// their unit tests; T9 calls them. The rules (S13, K3):
+// - A request is a flag outside the rings, not a record: the one asked answers it where it
+//   stands, at a park point; it acks, waits for the release and runs nothing meanwhile.
+// - B's park points (for ParkB): each record boundary of ring 2 and its wait for ring 2; each
+//   wait on ring 3: for room (ring 3 full while C waits in ParkB), for the end of a record at =2
+//   (C may be in ParkB inside it), for C's park ack of a Join B forwards from A.
+// - C's park points (for JoinFromB): each record boundary of ring 3, its wait for ring 3, and
+//   its wait in ParkB (priority: a JoinFromB B made first wins; C parks for it, then asks again).
+//   B's wait in JoinFromB is no park point, else each would park for the other.
+// - No lock across a wait: a stage holds no cache lock (buffer, texture, query, the scheduler's)
+//   at a park point, when it calls JoinFromB or ParkB, or while it writes or waits on ring 3. So
+//   `op` may take any lock: the parked stage holds none. `op` waits on no ring and no stage.
+
 /// K2, B: C runs everything before this point and parks; `op` runs on B (RESETFIX's FlushRegion,
-/// Wait/Finish from the buffer runtime, ...). B never calls it holding the buffer cache mutex
-/// (S13).
+/// Wait/Finish from the buffer runtime, ...). B calls it holding no cache lock (the buffer cache
+/// mutex included, S13).
 void JoinFromB(FunctionRef op);
-/// K2, C: B stops at a record boundary and parks; `op` runs on C (CPU FlushRegion requests run in
-/// TickWork, gpu.cpp:284-303). Priority (S13): while C waits for B's park, a JoinFromB B made
-/// first wins: C parks for it, then asks again. C takes no buffer cache lock while parked.
+/// K2, C: B parks at its next park point (a record boundary of ring 2, or a wait on a ring);
+/// `op` runs on C (CPU FlushRegion requests run in TickWork, gpu.cpp:284-303), then B goes on. C
+/// calls it holding no cache lock and answers B's JoinFromB while it waits (S13).
 void ParkB(FunctionRef op);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and
@@ -178,14 +217,17 @@ void CheckStage(Stage stage, const char* where);
 Stage RecordOwner();
 
 /// GpuSplit::MaybeStart, before the back thread starts (nothing runs behind the front): when
-/// Get().mode != 0, makes the rings, starts B (and C), installs the proxy and stages every channel
-/// (InstallProxy, S3); Active() is true from here on and the back thread runs A (RunStagedBack).
-/// The real rasterizer's NoteEngineWork: no light draw follows one from before (S18).
+/// Get().mode != 0, makes the rings and starts B (and C); at =1 and =2 it also installs the proxy
+/// and stages every channel (InstallProxy, S3), at =3 neither (K1: BC runs the primaries with
+/// GpuSplit::Execute, a staged channel's hooks would send records from BC to its own ring and its
+/// caches would read replicas no delta reaches). Active() is true from here on and the back
+/// thread runs A (RunStagedBack). The real rasterizer's NoteEngineWork: no light draw follows one
+/// from before (S18).
 void Start(Core::System& system);
 /// GpuSplit::Stop, after the back thread (A) stopped: B and C run what they hold and stop (at
 /// shutdown, with the stop request alone, they stop without it: NotifyShutdown, gpu_thread.cpp),
-/// the channels are unstaged (UninstallProxy), the rings freed, NoteEngineWork as at Start;
-/// Active() false.
+/// the channels are unstaged (UninstallProxy, =1 and =2), the rings freed, NoteEngineWork as at
+/// Start; Active() false.
 void Stop();
 
 } // namespace VideoCommon::Nx2Stages
