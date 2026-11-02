@@ -28,8 +28,13 @@ namespace VideoCommon::Nx2Stages {
 namespace {
 
 // Set by InstallProxy before A starts, reset by UninstallProxy once the stages stopped: the
-// stages read them as they run records. g_published is Proxy() (acquire, any thread).
+// stages read them as they run records. g_published is Proxy() (acquire, any thread), null
+// while not installed. The proxy itself is never freed (R1 sahiplik-1): an engine, memory
+// manager or a call that read the pointer before UninstallProxy may still reach it, and with no
+// A running it calls the real rasterizer. InstallProxy uses it again for the same real one and
+// retires it for another (a new renderer).
 std::unique_ptr<Nx2StageProxy> g_proxy;
+std::vector<std::unique_ptr<Nx2StageProxy>> g_retired;
 std::atomic<Nx2StageProxy*> g_published{};
 VideoCore::RasterizerInterface* g_real{};
 Core::System* g_system{};
@@ -66,7 +71,7 @@ void CheckStaged(Tegra::Control::ChannelState& channel) {
         return;
     }
     auto& maxwell_3d = channel.payload->maxwell_3d;
-    if (&maxwell_3d.Rasterizer() != g_proxy.get()) {
+    if (&maxwell_3d.Rasterizer() != Proxy()) {
         ReportUnstaged("has Maxwell3D on the real rasterizer", channel.bind_id);
     }
     if (ReplicaOf(maxwell_3d, Stage::B) == nullptr) {
@@ -593,12 +598,17 @@ void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {
     if (Get().mode == 3) {
         return;
     }
-    if (g_proxy) [[unlikely]] {
+    if (Proxy() != nullptr) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Back stages: the proxy was installed already");
         UninstallProxy(system);
     }
     std::scoped_lock lock{g_install_mutex};
-    g_proxy = std::make_unique<Nx2StageProxy>(real);
+    if (!g_proxy || &g_proxy->Real() != &real) {
+        if (g_proxy) {
+            g_retired.push_back(std::move(g_proxy));
+        }
+        g_proxy = std::make_unique<Nx2StageProxy>(real);
+    }
     g_real = &real;
     g_system = &system;
     g_check = Get().check;
@@ -621,18 +631,25 @@ void InstallProxy(Core::System& system, VideoCore::RasterizerInterface& real) {
 
 void UninstallProxy(Core::System& system) {
     std::scoped_lock lock{g_install_mutex};
-    if (!g_proxy) {
+    if (Proxy() == nullptr) {
         return;
     }
+    g_published.store(nullptr, std::memory_order_release);
+    // Every initialized channel, staged or only bound to the proxy (BindNewChannel), back on the
+    // real rasterizer, with its current memory manager. An address space BindNewAddressSpace
+    // bound that no channel holds stays on the proxy, which outlives it (above).
     if (auto* const scheduler = Tegra::Control::Scheduler::Current()) {
         for (const auto& channel : scheduler->Channels()) {
+            if (!channel->initialized || !channel->payload) {
+                continue;
+            }
             if (ChannelStaged(*channel)) {
                 UnstageChannel(*channel, *g_real);
+            } else {
+                SetEngineRasterizer(*channel, g_real);
             }
         }
     }
-    g_published.store(nullptr, std::memory_order_release);
-    g_proxy.reset();
     g_real = nullptr;
     g_system = nullptr;
     g_check = false;
@@ -644,29 +661,32 @@ Nx2StageProxy* Proxy() {
 
 void BindNewChannel(Tegra::Control::ChannelState& channel, VideoCore::RasterizerInterface& real) {
     std::scoped_lock lock{g_install_mutex};
-    if (!g_proxy) {
+    auto* const proxy = Proxy();
+    if (proxy == nullptr) {
         channel.BindRasterizer(&real);
         return;
     }
     channel.payload->dma_pusher.BindRasterizer(&real);
-    SetEngineRasterizer(channel, g_proxy.get());
+    SetEngineRasterizer(channel, proxy);
 }
 
 void BindNewAddressSpace(Tegra::MemoryManager& memory_manager,
                          VideoCore::RasterizerInterface& real) {
     std::scoped_lock lock{g_install_mutex};
-    memory_manager.BindRasterizer(g_proxy ? g_proxy.get() : &real);
+    auto* const proxy = Proxy();
+    memory_manager.BindRasterizer(proxy != nullptr ? proxy : &real);
 }
 
 void StageBoundChannel(Tegra::Control::ChannelState& channel) {
-    if (!g_proxy || !channel.initialized) {
+    auto* const proxy = Proxy();
+    if (proxy == nullptr || !channel.initialized) {
         return;
     }
     if (!ChannelStaged(channel)) {
-        StageChannel(channel, *g_proxy, *g_real);
+        StageChannel(channel, *proxy, *g_real);
     } else {
         // An address space the channel was given since (BindNewAddressSpace binds new ones).
-        SetEngineRasterizer(channel, g_proxy.get());
+        SetEngineRasterizer(channel, proxy);
     }
     if (g_check) {
         CheckStaged(channel);
