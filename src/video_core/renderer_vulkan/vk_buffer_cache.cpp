@@ -11,6 +11,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <vector>
 
 #include "common/logging.h"
@@ -346,7 +347,8 @@ public:
         }
     }
 
-    void BindBuffer(u32 first) {
+    /// Returns what it bound (the geometry mirror).
+    std::tuple<VkBuffer, VkDeviceSize, VkIndexType> BindBuffer(u32 first) {
         const VkIndexType index_type_ = index_type;
         const size_t sub_first_offset = static_cast<size_t>(first % 4) * GetQuadsNum(num_indices);
         const size_t offset =
@@ -354,6 +356,7 @@ public:
         target.Record([buffer_ = *buffer, index_type_, offset](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindIndexBuffer(buffer_, offset, index_type_);
         });
+        return {*buffer, offset, index_type_};
     }
 
 protected:
@@ -843,6 +846,7 @@ void BufferCacheRuntime::EndStages() {
 
 u64 BufferCacheRuntime::BeginRecords() {
     records->Begin(pending_seq);
+    packet_geometry.clear();
     target.list = records.get();
     descriptor_scratch->Restart(descriptor_scratch->UsesDescriptorBuffer());
     descriptor_queue = descriptor_scratch.get();
@@ -914,6 +918,18 @@ void BufferCacheRuntime::StageDropMultiRangeOwner(VkBuffer owner) {
         return;
     }
     pending_owner_drops.push_back(owner);
+}
+
+void BufferCacheRuntime::NoteGeometry(u8 slot, VkBuffer buffer, VkDeviceSize offset,
+                                      VkDeviceSize size, u32 stride, u8 index_format) {
+    VideoCommon::Nx2Stages::GeometrySlot& entry = packet_geometry.emplace_back();
+    entry.slot = slot;
+    entry.index_format = index_format;
+    entry.stride = stride;
+    static_assert(sizeof(buffer) <= sizeof(entry.buffer));
+    std::memcpy(&entry.buffer, &buffer, sizeof(buffer));
+    entry.offset = offset;
+    entry.size = size;
 }
 
 void BufferCacheRuntime::DropPendingMultiRangeOwners() {
@@ -1111,6 +1127,12 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
         ReserveNullBuffer();
         vk_buffer = *null_buffer;
     }
+    if (target.list != nullptr) [[unlikely]] {
+        NoteGeometry(GEOMETRY_INDEX_SLOT, vk_buffer, vk_offset, 0, 0,
+                     vk_index_type == VK_INDEX_TYPE_UINT32   ? GEOMETRY_INDEX_UINT32
+                     : vk_index_type == VK_INDEX_TYPE_UINT16 ? GEOMETRY_INDEX_UINT16
+                                                             : GEOMETRY_INDEX_UINT8);
+    }
     target.Record([vk_buffer, vk_offset, vk_index_type](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(vk_buffer, vk_offset, vk_index_type);
     });
@@ -1119,6 +1141,9 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
 void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
     if (count == 0) {
         ReserveNullBuffer();
+        if (target.list != nullptr) [[unlikely]] {
+            NoteGeometry(GEOMETRY_INDEX_SLOT, *null_buffer, 0, 0, 0, GEOMETRY_INDEX_UINT32);
+        }
         target.Record([this](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindIndexBuffer(*null_buffer, 0, VK_INDEX_TYPE_UINT32);
         });
@@ -1132,7 +1157,12 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         } else {
             quad_array_index_buffer->UpdateBuffer(first + count);
         }
-        quad_array_index_buffer->BindBuffer(first);
+        const auto [buffer, offset, type] = quad_array_index_buffer->BindBuffer(first);
+        if (target.list != nullptr) [[unlikely]] {
+            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0,
+                         type == VK_INDEX_TYPE_UINT32 ? GEOMETRY_INDEX_UINT32
+                                                      : GEOMETRY_INDEX_UINT16);
+        }
     } else if (topology == PrimitiveTopology::QuadStrip) {
         if (target.list != nullptr) [[unlikely]] {
             quad_strip_index_buffer->UpdateBufferStaged(first + count, *stage_pool, lut_graveyard,
@@ -1140,7 +1170,12 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         } else {
             quad_strip_index_buffer->UpdateBuffer(first + count);
         }
-        quad_strip_index_buffer->BindBuffer(first);
+        const auto [buffer, offset, type] = quad_strip_index_buffer->BindBuffer(first);
+        if (target.list != nullptr) [[unlikely]] {
+            NoteGeometry(GEOMETRY_INDEX_SLOT, buffer, offset, 0, 0,
+                         type == VK_INDEX_TYPE_UINT32 ? GEOMETRY_INDEX_UINT32
+                                                      : GEOMETRY_INDEX_UINT16);
+        }
     }
 }
 
@@ -1149,6 +1184,10 @@ void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset
         return;
     }
     if (device.IsExtExtendedDynamicStateSupported()) {
+        if (target.list != nullptr) [[unlikely]] {
+            NoteGeometry(static_cast<u8>(index), buffer, buffer != VK_NULL_HANDLE ? offset : 0,
+                         buffer != VK_NULL_HANDLE ? size : VK_WHOLE_SIZE, stride);
+        }
         target.Record([index, buffer, offset, size, stride](vk::CommandBuffer cmdbuf) {
             const VkDeviceSize vk_offset = buffer != VK_NULL_HANDLE ? offset : 0;
             const VkDeviceSize vk_size = buffer != VK_NULL_HANDLE ? size : VK_WHOLE_SIZE;
@@ -1160,6 +1199,9 @@ void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset
             ReserveNullBuffer();
             buffer = *null_buffer;
             offset = 0;
+        }
+        if (target.list != nullptr) [[unlikely]] {
+            NoteGeometry(static_cast<u8>(index), buffer, offset, 0, stride);
         }
         target.Record([index, buffer, offset](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindVertexBuffer(index, buffer, offset);
@@ -1188,6 +1230,14 @@ void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bi
     if (binding_count == 0) {
         return;
     }
+    if (target.list != nullptr) [[unlikely]] {
+        const bool sized = device.IsExtExtendedDynamicStateSupported();
+        for (u32 i = 0; i < binding_count; ++i) {
+            NoteGeometry(static_cast<u8>(bindings.min_index + i), buffer_handles[i],
+                         bindings.offsets[i], sized ? bindings.sizes[i] : 0,
+                         static_cast<u32>(bindings.strides[i]));
+        }
+    }
     if (device.IsExtExtendedDynamicStateSupported()) {
         target.Record([bindings_ = std::move(bindings), buffer_handles_ = std::move(buffer_handles), binding_count](vk::CommandBuffer cmdbuf) {
             cmdbuf.BindVertexBuffers2EXT(bindings_.min_index, binding_count, buffer_handles_.data(), bindings_.offsets.data(), bindings_.sizes.data(), bindings_.strides.data());
@@ -1213,6 +1263,9 @@ void BufferCacheRuntime::BindTransformFeedbackBuffer(u32 index, VkBuffer buffer,
         offset = 0;
         size = 0;
     }
+    if (target.list != nullptr) [[unlikely]] {
+        NoteGeometry(static_cast<u8>(GEOMETRY_TFB_SLOT + index), buffer, offset, size, 0);
+    }
     target.Record([index, buffer, offset, size](vk::CommandBuffer cmdbuf) {
         const VkDeviceSize vk_offset = offset;
         const VkDeviceSize vk_size = size;
@@ -1235,6 +1288,12 @@ void BufferCacheRuntime::BindTransformFeedbackBuffers(VideoCommon::HostBindings<
             bindings.sizes[i] = 0;
         }
         buffer_handles[i] = handle;
+    }
+    if (target.list != nullptr) [[unlikely]] {
+        for (u32 i = 0; i < buffer_handles.size(); ++i) {
+            NoteGeometry(static_cast<u8>(GEOMETRY_TFB_SLOT + i), buffer_handles[i],
+                         bindings.offsets[i], bindings.sizes[i], 0);
+        }
     }
     target.Record([bindings_ = std::move(bindings), buffer_handles_ = std::move(buffer_handles)](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindTransformFeedbackBuffersEXT(0, u32(buffer_handles_.size()), buffer_handles_.data(), bindings_.offsets.data(), bindings_.sizes.data());
