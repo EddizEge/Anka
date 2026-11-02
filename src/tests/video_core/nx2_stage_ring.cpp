@@ -1093,6 +1093,14 @@ void SendAndParkOnB(const u64* payload, u32) {
 void ProgressOnB(const u64*, u32) {
     ++g_b_progress;
 }
+/// A (the main thread) waits for B: in BeginB / EndB or its join. =2 checks C's replica only
+/// then, the primaries where the record left them (T9b review protokol-2).
+std::atomic<bool> g_a_waiting{};
+void VerifyWhileAWaits(u8 stage) {
+    if (stage == StageIdC) {
+        Expect(g_a_waiting.load(), "=2: C verifies while A waits");
+    }
+}
 } // Anonymous namespace
 
 TEST_CASE("Nx2StagePipeline: a ParkB's op runs once C ran up to where B parked (K3, F2)",
@@ -1103,20 +1111,27 @@ TEST_CASE("Nx2StagePipeline: a ParkB's op runs once C ran up to where B parked (
         FakeHandler handler;
         TestPipeline pipe{handler};
         ResetK3(handler, pipe);
+        handler.on_verify = &VerifyWhileAWaits;
         REQUIRE(pipe.Start(StageOptions{.mode = mode, .cut_c = true}));
         for (u32 round = 0; round < 300; ++round) {
             g_spin_c = random() % 30000;
             handler.capture = {u64{round} << 8 | 6};
+            g_a_waiting = true;
             PostCallB(pipe, &SendAndParkOnB, random() % 60);
+            g_a_waiting = false;
             // Deltas B applies and has not passed on when C's park comes after this record (B
             // idle after it: A's join, which would pass them on, only once the park ran).
             handler.capture = {u64{round} << 8 | 7, u64{round} << 8 | 8};
+            g_a_waiting = true;
             PostCallB(pipe, &ProgressOnB, 0);
+            g_a_waiting = false;
             pipe.PublishB();
             while (g_park_ops.load() != round + 1) {
                 std::this_thread::yield();
             }
+            g_a_waiting = true;
             Drain(pipe);
+            g_a_waiting = false;
         }
         pipe.Stop();
         REQUIRE(g_failures == 0);
@@ -1144,6 +1159,38 @@ void SendSlowAsk(const u64* payload, u32) {
     ++g_b_progress;
 }
 } // Anonymous namespace
+
+TEST_CASE("Nx2StagePipeline: =2 checks no record B writes as it parks, A going on (protokol-2)",
+          "[video_core]") {
+    Watchdog watchdog{"park deltas check"};
+    FakeHandler handler;
+    TestPipeline pipe{handler};
+    ResetK3(handler, pipe);
+    handler.on_verify = &VerifyWhileAWaits;
+    REQUIRE(pipe.Start(StageOptions{.mode = 2, .cut_c = true}));
+    for (u32 round = 0; round < 200; ++round) {
+        // Deltas B applies and keeps: the record sends nothing to C.
+        handler.capture = {u64{round} << 8 | 9, u64{round} << 8 | 10};
+        g_a_waiting = true;
+        PostCallB(pipe, &ProgressOnB, 0);
+        g_a_waiting = false;
+        // C's boundary work asked by A (StageTickWork outside a join): B parks idle, passing
+        // them in a record of their own while A goes on.
+        g_park_at_boundary = &CheckParked;
+        pipe.RequestBoundaryWork();
+        while (g_park_ops.load() != round + 1) {
+            std::this_thread::yield();
+        }
+    }
+    g_a_waiting = true;
+    Drain(pipe);
+    g_a_waiting = false;
+    pipe.Stop();
+    REQUIRE(g_failures == 0);
+    REQUIRE(handler.parks == 200);
+    REQUIRE(handler.logs[StageIdC].deltas == handler.logs[StageIdB].deltas);
+    REQUIRE(handler.logs[StageIdB].deltas.size() == 400);
+}
 
 TEST_CASE("Nx2StagePipeline: C waiting in ParkB parks for A's join on its way", "[video_core]") {
     Watchdog watchdog{"ParkB and A's join"};

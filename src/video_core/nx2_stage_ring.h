@@ -71,7 +71,7 @@ namespace Detail {
 
 /// Record header, one u64:
 ///   bits 0-3   kind (RecordKind)
-///   bits 4-7   flags (per kind; none defined yet)
+///   bits 4-7   flags (per kind: Mark MarkCaughtUp, Call CallNoVerify)
 ///   bits 8-31  words after the header (delta words included)
 ///   bits 32-47 delta words: the first words after the header are register deltas
 ///              (Nx2RegReplica delta words) for the current Target, applied before the record
@@ -120,6 +120,10 @@ constexpr bool SeqAtLeast(T a, T b) {
 /// Mark flag: A had run everything ring 1 held when it sent the mark (the end of its batch). The
 /// last stage storing it tells the busy clock (Nx2BusyClock::BackStored), as BackLoop did.
 inline constexpr u32 MarkCaughtUp = 1;
+/// Call flag (=2): no Handler::Verify after it. B wrote it at a ring 2 record boundary, A not
+/// waiting: the primaries may be past the deltas it brings (ServePark's; the next record checked
+/// has them too; T9b review protokol-2).
+inline constexpr u32 CallNoVerify = 1;
 
 /// The stages' values (Nx2Stages::Stage, nx2_stages.h, which includes this header).
 inline constexpr u8 StageIdA = 0;
@@ -492,8 +496,8 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 /// - Join: B with cut c makes C park first; then the stage acks the producer and waits for its
 ///   release (park).
 /// =2 (lockstep, depth 1): a producer waits after each record until it ran, Handler::Verify
-/// before its end; for a Join the joiner waits for the park ack instead, Verify before the ack
-/// (S8, K8). A stage stops at a record boundary once asked (Stop): with nothing left after a
+/// before its end (not after a Target or a CallNoVerify, which B writes as it parks with A going
+/// on); for a Join the joiner waits for the park ack instead, Verify before the ack (S8, K8). A stage stops at a record boundary once asked (Stop): with nothing left after a
 /// drain, and at shutdown without running what it holds.
 /// Between B and C (K2; S13, K3 as decided after R2, nx2_stages.h): JoinFromB, JoinFromBLocked
 /// and ParkB ask with flags outside the rings; the one asked answers at a park point:
@@ -917,7 +921,7 @@ private:
         park_served = id;
         LinkC& link = *to_c;
         if (!passed.empty()) {
-            FlushPassed();
+            FlushPassed(CallNoVerify);
         }
         link.ring.Publish();
         park_position.store(link.ring.WritePosition(), std::memory_order_relaxed);
@@ -1036,8 +1040,10 @@ private:
         passed.insert(passed.end(), words, words + count);
     }
 
-    void FlushPassed() {
-        u64* const body = BeginC(RecordKind::Call, 1);
+    /// B: its pending deltas to C in a record of their own (`flags`: CallNoVerify where A does
+    /// not wait for B, at a park point).
+    void FlushPassed(u32 flags = 0) {
+        u64* const body = BeginC(RecordKind::Call, 1, flags);
         body[0] = reinterpret_cast<u64>(&NopThunk);
         EndC();
     }
@@ -1147,8 +1153,10 @@ private:
             // Lockstep: the producer waits for this release, so the primaries are where this
             // record left them (a Join verified before its ack, Park). Not after a Target: it
             // carries no state, and A may have touched the new target's primary before selecting
-            // it (its writes go with the next record); that record checks it (R1 dikis-4).
-            if (kind != RecordKind::Join && kind != RecordKind::Target) {
+            // it (its writes go with the next record); that record checks it (R1 dikis-4). Not
+            // after a CallNoVerify either: B wrote it with A going on (ServePark).
+            if (kind != RecordKind::Join && kind != RecordKind::Target &&
+                !(kind == RecordKind::Call && (HeaderFlags(header) & CallNoVerify) != 0)) {
                 MaybeVerify(stage, self);
             }
             in.ring.Release(self.read);
