@@ -12,19 +12,22 @@
 // A page holds a sequence number, not a bit (S12): B sets pages for the draws and queries it
 // sends C before it sends them, conservatively (D6); C clears a page only when the sequence it
 // ran up to is at least the page's, so an older image's clean-up never clears what B set for a
-// later draw. Owner: T8. Skeleton (T0): every page may hold data.
+// later draw. The sequence is B's draw sequence (DrawToC::seq, u64, K5); a page may keep a
+// narrower copy compared with SeqAtLeast (nx2_stage_ring.h): a page left behind by half that
+// range reads as later and is kept, the safe side. Owner: T8. Skeleton (T0): every page may hold
+// data.
 namespace VideoCommon::Nx2Stages {
 
 class Nx2GpuPages {
 public:
     /// B, before sending draw or query `seq` to C: the render targets, depth, storage images
     /// and query results it may write.
-    void PreSet(DAddr begin, u64 size, u32 seq) {}
+    void PreSet(DAddr begin, u64 size, u64 seq) {}
     /// C: pages it holds GPU-written data for, as of its `seq` (an image marked GPU-modified, a
     /// pending query, a write around the caches).
-    void Set(DAddr begin, u64 size, u32 seq) {}
+    void Set(DAddr begin, u64 size, u64 seq) {}
     /// C: pages that no longer hold any, as of its `seq`; a page set for a later seq stays.
-    void Clear(DAddr begin, u64 size, u32 seq) {}
+    void Clear(DAddr begin, u64 size, u64 seq) {}
     /// B, lock-free: whether a page of [begin, begin + size) may hold C's GPU-written data.
     [[nodiscard]] bool Holds(DAddr begin, u64 size) const {
         return true;
