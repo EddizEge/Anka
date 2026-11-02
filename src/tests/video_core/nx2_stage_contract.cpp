@@ -32,6 +32,13 @@ static_assert(Same<u64* (*)(Ring, Thunk, u32), decltype(&Reserve)>);
 static_assert(Same<void (*)(JoinReason, FunctionRef), decltype(&JoinFromA)>);
 static_assert(Same<void (*)(FunctionRef), decltype(&JoinFromB)>);
 static_assert(Same<void (*)(FunctionRef), decltype(&ParkB)>);
+// K3 (a), T9: the buffer runtime's join keeps B's buffer cache mutex; the CPU's sync requests run
+// on C at a record boundary in a ParkB; the STAGE_CHECK diagnostics; the record side's hooks.
+static_assert(Same<void (*)(FunctionRef), decltype(&JoinFromBLocked)>);
+static_assert(Same<bool (*)(FunctionRef), decltype(&StageTickWork)>);
+static_assert(Same<void (*)(const char*), decltype(&CheckBufferLock)>);
+static_assert(Same<void (*)(const char*), decltype(&ReportStageHazard)>);
+static_assert(Same<void (*)(void (*)(void*), void (*)(void*), void*), decltype(&SetStageHooks)>);
 static_assert(Same<void (*)(Tegra::Control::ChannelState&, RasterizerInterface&),
                    decltype(&BindNewChannel)>);
 static_assert(Same<void (*)(Tegra::MemoryManager&, RasterizerInterface&),

@@ -195,36 +195,97 @@ private:
 /// at =3, `op` runs at once: no record, no wait, not counted. Inside a join A sends nothing (see
 /// Reserve); RegCapture::Note only collects there, its words go with the first record after.
 void JoinFromA(JoinReason reason, FunctionRef op);
-// K2: joins between B and C (K1 calls neither: BC owns every cache). T1 writes them now, with
-// their unit tests; T9 calls them. The rules (S13, K3):
-// - A request is a flag outside the rings, not a record: the one asked answers it where it
-//   stands, at a park point; it acks, waits for the release and runs nothing meanwhile.
-// - B's park points (for ParkB): each record boundary of ring 2 and its wait for ring 2; each
-//   wait on ring 3: for room (ring 3 full while C waits in ParkB), for the end of a record at =2
-//   (C may be in ParkB inside it), for C's park ack of a Join B forwards from A.
-// - C's park points (for JoinFromB): each record boundary of ring 3, its wait for ring 3, and
-//   its wait in ParkB (priority: a JoinFromB B made first wins; C parks for it, then asks again).
-//   B's wait in JoinFromB is no park point, else each would park for the other.
-// - No lock across a wait: a stage holds no cache lock (buffer, texture, query, the scheduler's)
-//   at a park point, when it calls JoinFromB or ParkB, or while it writes or waits on ring 3. So
-//   `op` may take any lock: the parked stage holds none. `op` waits on no ring and no stage.
+// K2: joins and parks between B and C (K1 calls none: BC owns every cache). The rules (S13; K3
+// as decided after R2, choice (a): the buffer runtime's join keeps B's buffer cache mutex):
+// - A request is a flag outside the rings, not a record. The one asked answers it at a park
+//   point: it acks, waits for the release and runs nothing meanwhile.
+// - B's park points (for ParkB): each record boundary of ring 2 and its wait for ring 2, nothing
+//   else. There B has no packet open, holds no cache lock and sent C its work up to that point:
+//   it passes its pending deltas and publishes ring 3 before it acks. B's other waits on C (room
+//   on ring 3, =2's end of a record, C's ack of a Join B passes on, JoinFromB, JoinFromBLocked)
+//   are made inside a record of ring 2, maybe inside a packet or holding the buffer cache mutex:
+//   B serves no ParkB there, and C, waiting for its own ParkB, goes on running ring 3 meanwhile,
+//   so neither waits on the other (R2 F6).
+// - C's park points (for JoinFromB, JoinFromBLocked): each record boundary of ring 3, its wait
+//   for ring 3 and its wait in ParkB, only once it ran everything B sent before asking (its read
+//   position at B's join target; R2 F1), never short of it.
+// - The buffer cache mutex (recursive) is B's. B takes it for its own work and holds it across
+//   JoinFromBLocked alone: never at a park point, when it calls JoinFromB, or while it writes or
+//   waits on ring 3. C takes it only inside a ParkB `op` (B parked, holding none); a record C runs
+//   never takes it, else a JoinFromBLocked waiting on C to reach its target would never end. A
+//   join's `op` runs on the joiner and may take it there: A in JoinFromA (B and C parked, holding
+//   none), B in JoinFromB, B again in JoinFromBLocked (the same thread; recursive). Threads that
+//   are no stage (the guest CPU's, the fence thread) take it as before and wait for a
+//   JoinFromBLocked to end.
+// - Every other cache lock (texture, query, the scheduler's): no stage holds one at a park point,
+//   when it asks (JoinFromB, JoinFromBLocked, ParkB) or while it writes or waits on ring 3. So an
+//   `op` may take any lock: the parked stage holds none.
+// - An `op` waits on no ring and no stage. The joiner writes no record inside its `op` (K4 for A;
+//   B inside a JoinFromB / JoinFromBLocked `op` is the record owner, RecordOwner() == Stage::B:
+//   it runs C's half of its work itself instead of sending it).
+// - STAGE_CHECK: CheckBufferLock where the mutex is taken off B; ReportStageHazard; a ParkB from
+//   inside a record at =1; a JoinFromBLocked waiting past 50 ms (logged as a K3 deadlock suspect).
 
-/// K2, B: C runs everything before this point and parks; `op` runs on B (RESETFIX's FlushRegion,
-/// Wait/Finish from the buffer runtime, ...). B calls it holding no cache lock (the buffer cache
-/// mutex included, S13).
+/// K2, B inside a record of ring 2, outside any packet and holding no cache lock (a draw's
+/// joined setup, RESETFIX's FlushRegion, a WaitForIdle with a query sync pending, an event whose
+/// halves are not split yet): B passes C the deltas it has not passed yet (a record of their own;
+/// its wait there serves no ParkB), publishes ring 3 and asks; C runs everything B sent before and
+/// parks; `op` runs on B, the record owner (RecordOwner, CheckOwner), with every cache and the
+/// scheduler, C's replica's registers equal to B's; then C goes on. Nested (B inside a join's
+/// `op`), without cut c or from another thread, `op` runs at once.
 void JoinFromB(FunctionRef op);
-/// K2, C: B parks at its next park point (a record boundary of ring 2, or a wait on a ring);
-/// `op` runs on C (CPU FlushRegion requests run in TickWork, gpu.cpp:284-303), then B goes on. C
-/// calls it holding no cache lock and answers B's JoinFromB while it waits (S13).
+/// K2, B inside a packet holding the buffer cache mutex: the buffer runtime's record owner hook
+/// (BufferCacheRuntime::JoinRecordOwner: Wait, Finish, a multi-range binding; R2 F6). B keeps the
+/// mutex (K3 (a): the CPU threads' OnCPUWrite / GetFlushArea wait meanwhile, so a download's "copy,
+/// wait, write back" keeps its order) and writes nothing to ring 3: the deltas it has not passed
+/// stay pending and go with its next ring 3 record. It publishes ring 3, asks and waits for C's
+/// ack (serving no ParkB); C runs everything B published before and parks; `op` runs on B under
+/// its lock (locking the mutex again is the same thread's), B the record owner; then C goes on.
+/// C's replica lags B's by those deltas: `op` uses B's state alone (B's list so far replayed, the
+/// scheduler's waits), never C's replica nor C's caches. Nested, without cut c or from another
+/// thread, `op` runs at once.
+void JoinFromBLocked(FunctionRef op);
+/// K2, C at a record boundary of ring 3 (the stages' own work there: StageTickWork): B parks at
+/// its next park point (a record boundary of ring 2, its wait for ring 2); C runs ring 3 on up to
+/// where B parked; then `op` runs on C with every cache, the buffer cache mutex included: B's
+/// caches and C's recorded commands stand at the same point of the stream, the replicas' registers
+/// equal (R2 F2). Then B goes on. Until B parked C goes on running ring 3 and answers B's joins
+/// once reached (F1): a B blocked on C (room, a join) never waits on this request. =2 alone, also
+/// from inside a record (CheckSplitSetup): B waits for that record's end there (the lockstep, no
+/// packet open, no lock), so `op` runs at once. Inside a record at =1 it is a STAGE_CHECK
+/// violation: C cannot run on to where B parks. Without cut c, once B stopped or from another
+/// thread, `op` runs at once.
 void ParkB(FunctionRef op);
+/// K2 (cut c), GPU::TickWork (gpu.cpp): the guest CPU's sync requests (a reactive FlushRegion, a
+/// preserving InvalidateRegion, RequestFlush, Composite with its TickFrame, captures) touch B's
+/// buffer cache and C's caches and scheduler alike. They run on C at a record boundary of ring 3
+/// inside a ParkB (`run` its `op`; R2 F4), never inside a record (PrepareDrawC's TickWork) nor on
+/// B. True when the stages took them: `run` ran so, or waits for C's next record boundary, which
+/// calls GPU::TickWork again. False when the caller runs `run` now: cut c off (K1, =0, =3), or a
+/// thread that is no stage.
+bool StageTickWork(FunctionRef run);
 
 /// EDEN_NX2_STAGE_CHECK: reports (the first ones, with the stack, as GpuSplit::CheckOwner) and
 /// counts (Counter::StageViolations) a call of `where` from a thread other than `stage`'s; A
 /// inside a join may do anything.
 void CheckStage(Stage stage, const char* where);
+/// EDEN_NX2_STAGE_CHECK, K3: call where the buffer cache mutex is taken off B (C's side of the
+/// rasterizer, the query cache's SyncValues, ...): reports and counts (StageViolations) taking
+/// it on C outside a ParkB `op` and on A outside a join.
+void CheckBufferLock(const char* where);
+/// EDEN_NX2_STAGE_CHECK: reports (with the stack, as CheckStage) and counts (StageViolations) a
+/// hazard its caller found: a download inside B's packet (a Finish through JoinFromBLocked:
+/// right, but the CPU threads wait on the mutex for it), a record list released out of order...
+void ReportStageHazard(const char* what);
 /// The stage recording Vulkan commands, whose use of the scheduler GpuSplit::CheckOwner checks:
-/// K1 B, K2 C; A inside a join.
+/// K1 B, K2 C; A inside its join; B inside a JoinFromB / JoinFromBLocked `op`.
 Stage RecordOwner();
+
+/// The record side's begin and end of the stages (the Vulkan rasterizer: its buffer runtime's
+/// BeginStages and record owner hook, EndStages; T7): with cut c, Start calls `begin` before B
+/// and C start and Stop calls `end` after they stopped; nothing runs behind either. One pair, set
+/// by its owner before the stages start; it outlives them. Null: none.
+void SetStageHooks(void (*begin)(void* context), void (*end)(void* context), void* context);
 
 /// GpuSplit::MaybeStart, before the back thread starts (nothing runs behind the front): when
 /// Get().mode != 0, makes the rings and starts B (and C); at =1 and =2 it also installs the proxy

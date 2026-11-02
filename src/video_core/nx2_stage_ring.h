@@ -492,6 +492,9 @@ inline StageOptions ParseStageOptions(const char* stages, const char* cuts, cons
 /// for ring 2, and each of its waits on ring 3 (room, the =2 end of a record, C's ack of a Join
 /// it passes on); C at each record boundary of ring 3 (once it ran everything B sent before
 /// asking), its wait for ring 3, and its wait in ParkB. B's wait in JoinFromB is none.
+/// T9a: nx2_stages.h now holds K3 as decided after R2 (choice (a): JoinFromBLocked; B parks only
+/// at ring 2; C answers a join only once reached and runs on to where B parked). The bodies here
+/// follow the rules above until T9's next step.
 ///
 /// Handler (nx2_stages.cpp's GpuHandler; the unit tests' fake):
 ///   Scopes: InWait, OutWait, JoinWait, ParkWait (see RingWaitScopes)

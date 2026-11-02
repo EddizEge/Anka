@@ -63,6 +63,10 @@ std::atomic<u8> g_owner{StageIdB};
 u8 g_default_owner{StageIdB};
 /// The default owner runs records (CheckRecordOwner: the front may use the scheduler otherwise).
 std::atomic<bool> g_record_busy{};
+/// The record side's begin and end of the stages (SetStageHooks).
+void (*g_hook_begin)(void*){};
+void (*g_hook_end)(void*){};
+void* g_hook_context{};
 
 /// What B and C do with the records (StagePipeline's handler).
 struct GpuHandler {
@@ -361,7 +365,9 @@ void JoinFromA(JoinReason reason, FunctionRef op) {
 }
 
 void JoinFromB(FunctionRef op) {
-    if (!Active() || !OnStage(Stage::B) || !g_pipeline.Options().cut_c) {
+    // Nested: B inside a join's op is the record owner with C parked already.
+    if (!Active() || !OnStage(Stage::B) || !g_pipeline.Options().cut_c ||
+        g_owner.load(std::memory_order_relaxed) == StageIdB) {
         op();
         return;
     }
@@ -373,12 +379,23 @@ void JoinFromB(FunctionRef op) {
     });
 }
 
+void JoinFromBLocked(FunctionRef op) {
+    // The interface first (T9a): until its body (no ring 3 record, no ParkB served while B holds
+    // the mutex) it joins as JoinFromB does, as the record owner hook did before.
+    JoinFromB(op);
+}
+
 void ParkB(FunctionRef op) {
     if (!Active() || !OnStage(Stage::C)) {
         op();
         return;
     }
     g_pipeline.ParkB(op);
+}
+
+bool StageTickWork([[maybe_unused]] FunctionRef run) {
+    // The interface first (T9a): until its body the caller runs the requests where it stands.
+    return false;
 }
 
 void CheckStage(Stage stage, const char* where) {
@@ -389,8 +406,26 @@ void CheckStage(Stage stage, const char* where) {
     ReportStack("stage check", where);
 }
 
+void CheckBufferLock([[maybe_unused]] const char* where) {
+    // The interface first (T9a): checked once ParkB marks its op (T9's next step).
+}
+
+void ReportStageHazard(const char* what) {
+    if (!g_check) {
+        return;
+    }
+    Nx2Profile::Add(Counter::StageViolations, 1);
+    ReportStack("stage hazard", what);
+}
+
 Stage RecordOwner() {
     return static_cast<Stage>(g_owner.load(std::memory_order_acquire));
+}
+
+void SetStageHooks(void (*begin)(void*), void (*end)(void*), void* context) {
+    g_hook_begin = begin;
+    g_hook_end = end;
+    g_hook_context = context;
 }
 
 void Start(Core::System& system) {
@@ -420,6 +455,9 @@ void Start(Core::System& system) {
     g_real->NoteEngineWork();
     // EDEN_NX2_BACK_CPU: the front on a core of its own too (S19); before B starts and pins.
     Nx2BackCpu::StartFront();
+    if (options.cut_c && g_hook_begin != nullptr) {
+        g_hook_begin(g_hook_context);
+    }
     g_pipeline.Start(options);
     // =1 and =2 only (K1): =3 runs the primaries on BC as the unstaged back did, with no proxy
     // and no staged channel (a staged channel's hooks would send records from BC to its own ring).
@@ -449,6 +487,9 @@ void Stop() {
     // A stopped (GpuSplit::Stop joined it): B and C stop at their next record boundary, with
     // nothing left after a drain, and at shutdown without running what they hold.
     g_pipeline.Stop();
+    if (g_pipeline.Options().cut_c && g_hook_end != nullptr) {
+        g_hook_end(g_hook_context);
+    }
     if (Get().mode != 3) {
         // As Start: only what it installed (K1).
         UninstallProxy(*g_system);
