@@ -66,6 +66,10 @@ std::atomic<bool> g_record_busy{};
 /// The record side's begin and end of the stages (SetStageHooks).
 void (*g_hook_begin)(void*){};
 void (*g_hook_end)(void*){};
+/// SetCbWriteCheck's (B's CbData records with cut c).
+CbWriteCheck g_cb_write_check{};
+void* g_cb_write_context{};
+bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count);
 void* g_hook_context{};
 
 /// What B and C do with the records (StagePipeline's handler).
@@ -103,6 +107,13 @@ struct GpuHandler {
     }
     void CbData(u8 stage, u64 address, const u32* data, u32 count) {
         if (Maxwell3D* const replica = Replica(stage)) {
+            if (g_cb_write_check != nullptr && stage == StageIdB &&
+                CbWriteJoins(*replica, address, count)) [[unlikely]] {
+                // Into a pool C may still read for work B sent before (omur-1): C parked having
+                // run it, B the record owner.
+                JoinFromB([&] { StageCbWrite(*replica, address, data, count); });
+                return;
+            }
             StageCbWrite(*replica, address, data, count);
         }
     }
@@ -164,6 +175,11 @@ struct GpuHandler {
 
 GpuHandler g_handler;
 StagePipeline<GpuHandler> g_pipeline{g_handler};
+
+bool CbWriteJoins(Maxwell3D& replica, u64 address, u32 count) {
+    return g_pipeline.Options().cut_c &&
+           g_cb_write_check(g_cb_write_context, replica, address, u64{count} * sizeof(u32));
+}
 
 /// C runs a ParkB's op (B parked): where it may take the buffer cache mutex (K3, CheckBufferLock)
 /// and run the GPU's sync requests (StageTickWork).
@@ -528,6 +544,11 @@ void SetStageHooks(void (*begin)(void*), void (*end)(void*), void* context) {
     g_hook_begin = begin;
     g_hook_end = end;
     g_hook_context = context;
+}
+
+void SetCbWriteCheck(CbWriteCheck check, void* context) {
+    g_cb_write_check = check;
+    g_cb_write_context = context;
 }
 
 void Start(Core::System& system) {

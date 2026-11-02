@@ -295,6 +295,17 @@ Stage RecordOwner();
 /// by its owner before the stages start; it outlives them. Null: none.
 void SetStageHooks(void (*begin)(void* context), void (*end)(void* context), void* context);
 
+/// K2 (cut c), B: whether constant buffer data B writes to guest memory at [address, address +
+/// size) for `replica`'s channel (a CbData record: StageCbWrite) hits what C may still read
+/// there for work B sent before, the texture header and sampler pools (T9c, omur-1; the
+/// rasterizer's check for its inline writes, RasterizerVulkan::WritesPoolsB). Then the write runs
+/// in a JoinFromB: C parked, having run that work.
+using CbWriteCheck = bool (*)(void* context, Tegra::Engines::Maxwell3D& replica, GPUVAddr address,
+                              u64 size);
+/// Sets the check (the Vulkan rasterizer: T7d), as SetStageHooks: by its owner before the stages
+/// start, outliving them. Null: no CbData write joins.
+void SetCbWriteCheck(CbWriteCheck check, void* context);
+
 /// GpuSplit::MaybeStart, before the back thread starts (nothing runs behind the front): when
 /// Get().mode != 0, makes the rings and starts B (and C); at =1 and =2 it also installs the proxy
 /// and stages every channel (InstallProxy, S3), at =3 neither (K1: BC runs the primaries with
