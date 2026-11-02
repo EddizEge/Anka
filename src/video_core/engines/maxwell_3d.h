@@ -3361,21 +3361,7 @@ private:
         }
         light.changes |= kind;
     }
-    void NoteLightWrite(GPUVAddr address, u32 size) {
-        ++light.cb_writes;
-        auto& written = light.written;
-        if (light.written_count != 0 && light.written_count <= written.size()) {
-            auto& [last_address, last_size] = written[light.written_count - 1];
-            if (last_address + last_size == address) {
-                last_size += size;
-                return;
-            }
-        }
-        if (light.written_count < written.size()) {
-            written[light.written_count] = {address, size};
-        }
-        light.written_count = (std::min)(light.written_count + 1, static_cast<u32>(written.size()) + 1);
-    }
+    void NoteLightWrite(GPUVAddr address, u32 size);
     /// Whether a constant buffer write of `data` at `address` changes nothing a draw sees.
     bool IsLightSameWrite(GPUVAddr address, const u32* data, size_t size);
 
@@ -3432,6 +3418,10 @@ private:
 
     /// Handles conditional rendering.
     void ProcessQueryCondition();
+
+    /// ProcessCBMultiData's write at `address` (and StageCbWrite's): light tracking, SAME_SKIP,
+    /// the cached write; the offset moves on.
+    void CbWriteImpl(GPUVAddr address, const u32* start_base, u32 amount);
 
     // Back stages, the primary on A while staged (T2): the paths the old functions take there.
     void StageNoteWrite(u32 method, u32 argument);
