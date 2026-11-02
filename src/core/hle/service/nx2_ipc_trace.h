@@ -3,12 +3,16 @@
 
 #pragma once
 
+#include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "common/common_types.h"
@@ -26,15 +30,19 @@ class HLERequestContext;
 // frame's module, offset, raw symbol and demangled name; the SDK function a command belongs to
 // tells its meaning and, through the mangled name, its parameter types. Filter: "all", or items
 // "<service name prefix>[:command,command...]" separated by ';' ("nx2:vi2", "nx2:vi2:104,105").
-// The value "1" keeps the older meaning (log every dispatched command, no backtraces).
+// Data words make a request new only for commands an item lists (at most MaxWordVariants word
+// lists each); "nx2:vi2" alone traces each command once. The value "1" keeps the older meaning
+// (log every dispatched command, no backtraces).
 namespace Service::Nx2IpcTrace {
 
 // At most this many requests are traced; then "trace limit reached" is logged once.
 constexpr u32 MaxTraced = 400;
 // Frames logged per request.
 constexpr u32 MaxFrames = 32;
-// Request data words that make a request "new" (and are logged).
+// Request data words logged (and, for listed commands, making a request "new").
 constexpr u32 MaxDataWords = 16;
+// Different data word lists traced per (service, command) a filter item lists.
+constexpr u32 MaxWordVariants = 4;
 
 // Parses a command number: decimal or 0x hexadecimal, the whole text.
 inline std::optional<u32> ParseNumber(std::string_view text) {
@@ -65,25 +73,61 @@ struct FilterItem {
     std::vector<u32> commands; // empty: every command
 };
 
+enum class MatchKind {
+    None,    // no item matches
+    Service, // only items without a command list match: data words do not make it new
+    Command, // an item lists the command: its data words make it new
+};
+
 struct Filter {
     std::vector<FilterItem> items;
 
-    bool Matches(std::string_view service, u32 command) const {
+    MatchKind Classify(std::string_view service, u32 command) const {
+        MatchKind kind = MatchKind::None;
         for (const auto& item : items) {
             if (!service.starts_with(item.prefix)) {
                 continue;
             }
             if (item.commands.empty()) {
-                return true;
+                kind = MatchKind::Service;
+                continue;
             }
             for (const u32 c : item.commands) {
                 if (c == command) {
-                    return true;
+                    return MatchKind::Command;
                 }
             }
         }
-        return false;
+        return kind;
     }
+
+    bool Matches(std::string_view service, u32 command) const {
+        return Classify(service, command) != MatchKind::None;
+    }
+};
+
+// Which requests are new: a (service, command type, command) the first time, and for a listed
+// command (by_words) each of its first MaxWordVariants data word lists. Not thread safe.
+class Seen {
+public:
+    // True, and remembered, when the request is new.
+    bool Admit(std::string_view service, u32 type, u32 command, const std::vector<u32>& words,
+               bool by_words) {
+        auto [it, inserted] = entries.try_emplace(std::make_tuple(std::string{service}, type, command));
+        auto& variants = it->second;
+        if (!by_words) {
+            return inserted;
+        }
+        if (std::find(variants.begin(), variants.end(), words) != variants.end() ||
+            variants.size() >= MaxWordVariants) {
+            return false;
+        }
+        variants.push_back(words);
+        return true;
+    }
+
+private:
+    std::map<std::tuple<std::string, u32, u32>, std::vector<std::vector<u32>>> entries;
 };
 
 // Service names contain ':' themselves ("nx2:vi2"), so only a last ':' followed by a valid command
@@ -173,6 +217,92 @@ inline std::vector<u32> RequestDataWords(std::span<const u32> buffer, bool tipc,
         words.push_back(buffer[first + i]);
     }
     return words;
+}
+
+// A module of the traced process: [base, end).
+struct ModuleRange {
+    u64 base{};
+    u64 end{};
+    std::string name;
+    bool operator==(const ModuleRange&) const = default;
+};
+
+// The module holding `address` in a list sorted by base, or nullptr.
+inline const ModuleRange* FindModule(std::span<const ModuleRange> modules, u64 address) {
+    const auto it = std::upper_bound(modules.begin(), modules.end(), address,
+                                     [](u64 a, const ModuleRange& m) { return a < m.base; });
+    if (it == modules.begin()) {
+        return nullptr;
+    }
+    const ModuleRange& module = *std::prev(it);
+    return address < module.end ? &module : nullptr;
+}
+
+// A module's ELF symbols with a size, sorted by start (offsets from the module's base).
+struct SymbolTable {
+    struct Entry {
+        u64 start{};
+        u64 end{};
+        std::string name;
+    };
+    std::vector<Entry> entries;
+
+    // The innermost symbol holding `offset`, or nullptr.
+    const Entry* Find(u64 offset) const {
+        auto it = std::upper_bound(entries.begin(), entries.end(), offset,
+                                   [](u64 o, const Entry& e) { return o < e.start; });
+        // Symbols may nest or overlap; look back a little for one that holds the offset.
+        for (int i = 0; i < 16 && it != entries.begin(); ++i) {
+            --it;
+            if (offset < it->end) {
+                return &*it;
+            }
+        }
+        return nullptr;
+    }
+};
+
+// Builds a table from raw .dynsym and .dynstr bytes (Elf64_Sym or Elf32_Sym entries of
+// entry_size bytes). Entries without a size, an address or a name inside strtab are left out.
+inline SymbolTable ParseSymbols(std::span<const u8> symtab, std::span<const u8> strtab, bool is_64,
+                                u64 entry_size) {
+    SymbolTable table;
+    const u64 min_size = is_64 ? 24 : 16;
+    if (entry_size < min_size) {
+        return table;
+    }
+    for (u64 at = 0; at + min_size <= symtab.size(); at += entry_size) {
+        const u8* const sym = symtab.data() + at;
+        u32 name{};
+        u64 value{};
+        u64 size{};
+        std::memcpy(&name, sym, 4);
+        if (is_64) {
+            std::memcpy(&value, sym + 8, 8);
+            std::memcpy(&size, sym + 16, 8);
+        } else {
+            u32 value32{};
+            u32 size32{};
+            std::memcpy(&value32, sym + 4, 4);
+            std::memcpy(&size32, sym + 8, 4);
+            value = value32;
+            size = size32;
+        }
+        if (value == 0 || size == 0 || name >= strtab.size() || value + size < value) {
+            continue;
+        }
+        const auto* const text = reinterpret_cast<const char*>(strtab.data()) + name;
+        const void* const nul = std::memchr(text, 0, strtab.size() - name);
+        const std::size_t length = nul == nullptr ? strtab.size() - name
+                                                  : static_cast<std::size_t>(static_cast<const char*>(nul) - text);
+        if (length == 0) {
+            continue;
+        }
+        table.entries.push_back({value, value + size, std::string{text, length}});
+    }
+    std::stable_sort(table.entries.begin(), table.entries.end(),
+                     [](const auto& a, const auto& b) { return a.start < b.start; });
+    return table;
 }
 
 // EDEN_NX2_IPC_TRACE=1: the older per-command log (InvokeRequest / InvokeRequestTipc).
