@@ -19,6 +19,7 @@
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2_busy_clock.h"
+#include "video_core/nx2_front_diag_hooks.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
@@ -62,6 +63,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         const bool busy_clock = VideoCommon::Nx2BusyClock::Tracked();
         while (!stop_token.stop_requested()) {
             Profile::Report();
+            if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+                VideoCommon::Nx2FrontDiag::Report();
+            }
             split.MaybeStart(system);
             if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
@@ -101,20 +105,35 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 // Only command lists are parsed here; everything else runs on the back thread
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
+                namespace Diag = VideoCommon::Nx2FrontDiag;
+                const bool diag = Diag::On();
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                     Profile::Scope scope{Profile::Zone::Push};
                     // Held-back guest CPU writes first (see the single-thread path below).
                     split.Defer([gpu = &system.GPU()] { gpu->InvalidateGPUCache(); });
                     scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                    // EDEN_NX2_PROBE_FRONT_US: a slower front, for how much its time costs.
+                    if (const u32 probe_us = Diag::ProbeFrontUs(); probe_us != 0) [[unlikely]] {
+                        Diag::SpinFor(probe_us);
+                    }
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
+                    if (diag) [[unlikely]] {
+                        Diag::NoteWork(Diag::WorkKind::Tick);
+                    }
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     // Unknown work: on A with the back stages parked (nx2_stages.h).
                     split.DeferFunctionTo<VideoCommon::DeferTarget::Join>(std::move(run->func));
+                    if (diag) [[unlikely]] {
+                        Diag::NoteWork(Diag::WorkKind::Run);
+                    }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
                         rasterizer_ptr->FlushRegion(addr, size);
                     });
+                    if (diag) [[unlikely]] {
+                        Diag::NoteDeviceWrite(Diag::WriteKind::Download, flush->addr, flush->size);
+                    }
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
                         rasterizer_ptr->OnCacheInvalidation(addr, size);

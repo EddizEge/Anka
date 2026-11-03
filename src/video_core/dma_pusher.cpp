@@ -23,6 +23,7 @@
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_front_diag_hooks.h"
 #include "video_core/nx2_stage_proxy.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -30,6 +31,41 @@ namespace Tegra {
 
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
+
+namespace {
+
+// Front diag (EDEN_NX2_GPU_PROFILE): what methods just sent to an engine other than Maxwell3D's
+// front write (nx2_front_diag_hooks.h), out of line.
+YUZU_NO_INLINE void DiagNoteEngineSlow(const MemoryManager& memory,
+                                       const Engines::EngineInterface* engine,
+                                       Engines::EngineTypes type, u32 method, const u32* arguments,
+                                       u32 count) {
+    VideoCommon::Nx2FrontDiag::NoteEngineMethod(memory, engine, type, method, arguments, count,
+                                                engine->execution_mask[method]);
+}
+
+void DiagNoteEngine(const MemoryManager& memory, const Engines::EngineInterface* engine,
+                    Engines::EngineTypes type, u32 method, const u32* arguments, u32 count) {
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        DiagNoteEngineSlow(memory, engine, type, method, arguments, count);
+    }
+}
+
+// Front diag: an increasing (or increase once) command header to Maxwell3D's split front, how
+// long its run is and whether its words are all in the command list (NoteFrontRun), out of line.
+YUZU_NO_INLINE void DiagNoteRun(Engines::EngineInterface* engine, Engines::EngineTypes type,
+                                u32 method, u32 count, bool increase_once, bool in_list) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (engine == nullptr || type != Engines::EngineTypes::Maxwell3D || !split.Active() ||
+        !split.FrontMacros() ||
+        !static_cast<Engines::Maxwell3D*>(engine)->GetNativeMacroEngine().native_turing) {
+        return;
+    }
+    VideoCommon::Nx2FrontDiag::NoteFrontRun(increase_once, method >= MacroRegistersStart, count,
+                                            in_list);
+}
+
+} // Anonymous namespace
 
 void Nx2CheckMarkWord(u64 index, u64 mask, u64 pages) {
     static std::atomic<u64> checked{};
@@ -169,7 +205,7 @@ bool DmaPusher::Step() {
                         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterFlushChecks, 1);
                         if (auto& split = VideoCommon::GpuSplit::Get();
                             split.Active() &&
-                            VideoCommon::Nx2Profile::CountDrain(
+                            VideoCommon::Nx2FrontDiag::CountDrain(
                                 split, VideoCommon::Nx2Profile::DrainSite::PusherParameters)) {
                             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::ParameterDrainWaits, 1);
                         }
@@ -308,8 +344,8 @@ bool DmaPusher::Step() {
     }
 
     if (signal_sync) {
-        VideoCommon::Nx2Profile::CountDrain(VideoCommon::GpuSplit::Get(),
-                                            VideoCommon::Nx2Profile::DrainSite::PusherSync);
+        VideoCommon::Nx2FrontDiag::CountDrain(VideoCommon::GpuSplit::Get(),
+                                              VideoCommon::Nx2Profile::DrainSite::PusherSync);
         rasterizer->SignalFence([this]() {
             std::scoped_lock lk(sync_mutex);
             synced = true;
@@ -321,6 +357,9 @@ bool DmaPusher::Step() {
 }
 
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset) {
+    // Front diag (EDEN_NX2_GPU_PROFILE): each method call timed for whom it went to.
+    namespace Diag = VideoCommon::Nx2FrontDiag;
+    const bool diag = Diag::On();
     for (size_t index = 0; index < commands.size();) {
         // Data word of methods command
         if (dma_state.method_count && dma_state.non_incrementing) {
@@ -330,7 +369,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             if (g_nx2_ampere && dma_state.method < non_puller_methods) {
                 max_write = 1; // a semaphore acquire may suspend the channel after any word
             }
-            CallMultiMethod(&command_header.argument, max_write);
+            if (diag) [[unlikely]] {
+                Diag::TimedSend([&] { CallMultiMethod(&command_header.argument, max_write); });
+            } else {
+                CallMultiMethod(&command_header.argument, max_write);
+            }
             dma_state.method_count -= max_write;
             dma_state.is_last_call = true;
             index += max_write;
@@ -338,7 +381,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             auto const command_header = commands[index]; //can copy
             dma_state.dma_word_offset = u64((word_offset + index) * sizeof(u32));
             dma_state.is_last_call = dma_state.method_count <= 1;
-            CallMethod(command_header.argument);
+            if (diag) [[unlikely]] {
+                Diag::TimedSend([&] { CallMethod(command_header.argument); });
+            } else {
+                CallMethod(command_header.argument);
+            }
             dma_state.method += !dma_state.non_incrementing ? 1 : 0;
             dma_state.non_incrementing |= dma_increment_once;
             dma_state.method_count--;
@@ -351,6 +398,12 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 SetState(command_header);
                 dma_state.non_incrementing = false;
                 dma_increment_once = false;
+                if (diag && command_header.method >= non_puller_methods) [[unlikely]] {
+                    DiagNoteRun(subchannels[command_header.subchannel],
+                                subchannel_type[command_header.subchannel], command_header.method,
+                                command_header.method_count, false,
+                                index + 1 + command_header.method_count <= commands.size());
+                }
                 break;
             case SubmissionMode::NonIncreasing:
                 SetState(command_header);
@@ -361,7 +414,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 dma_state.method = command_header.method;
                 dma_state.subchannel = command_header.subchannel;
                 dma_state.dma_word_offset = u64(-s64(dma_state.dma_get)); // negate to set address as 0
-                CallMethod(command_header.arg_count);
+                if (diag) [[unlikely]] {
+                    Diag::TimedSend([&] { CallMethod(command_header.arg_count); });
+                } else {
+                    CallMethod(command_header.arg_count);
+                }
                 dma_state.non_incrementing = true;
                 dma_increment_once = false;
                 break;
@@ -369,6 +426,12 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 SetState(command_header);
                 dma_state.non_incrementing = false;
                 dma_increment_once = true;
+                if (diag && command_header.method >= non_puller_methods) [[unlikely]] {
+                    DiagNoteRun(subchannels[command_header.subchannel],
+                                subchannel_type[command_header.subchannel], command_header.method,
+                                command_header.method_count, true,
+                                index + 1 + command_header.method_count <= commands.size());
+                }
                 break;
             default:
                 break;
@@ -461,8 +524,11 @@ void DmaPusher::CallMethod(u32 argument) {
     if (g_semaphore_watch != 0) [[unlikely]] {
         WatchArgument(dma_state.method, argument);
     }
+    // Front diag (EDEN_NX2_GPU_PROFILE, ProcessCommands): whom the call went to.
+    namespace Diag = VideoCommon::Nx2FrontDiag;
     auto& split = VideoCommon::GpuSplit::Get();
     if (dma_state.method < non_puller_methods) {
+        Diag::SetSendKind(Diag::SendKind::Puller);
         puller.CallPullerMethod(*this, Engines::Puller::MethodCall{
             dma_state.method,
             argument,
@@ -482,6 +548,7 @@ void DmaPusher::CallMethod(u32 argument) {
                 if (type == Engines::EngineTypes::Maxwell3D) {
                     auto* const maxwell3d = static_cast<Engines::Maxwell3D*>(subchannel);
                     if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                        Diag::SetSendKind(Diag::SendKind::Front3D);
                         maxwell3d->FrontCallMethod(system, split, dma_state.method, argument,
                                                    dma_state.is_last_call);
                         return;
@@ -489,16 +556,22 @@ void DmaPusher::CallMethod(u32 argument) {
                 } else if (type == Engines::EngineTypes::KeplerCompute) {
                     auto* const compute = static_cast<Engines::KeplerCompute*>(subchannel);
                     if (compute->FrontRunsMacros()) {
+                        Diag::SetSendKind(Diag::SendKind::FrontCompute);
                         compute->FrontCallMethod(system, split, dma_state.method, argument,
                                                  dma_state.is_last_call, &segment);
+                        DiagNoteEngine(memory_manager, subchannel, type, dma_state.method,
+                                       &argument, 1);
                         return;
                     }
                 }
             }
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr);
+            DiagNoteEngine(memory_manager, subchannel, subchannel_type[dma_state.subchannel],
+                           dma_state.method, &argument, 1);
             return;
         }
+        Diag::SetSendKind(Diag::SendKind::Direct);
         if (!subchannel->execution_mask[dma_state.method]) {
             subchannel->method_sink.emplace_back(dma_state.method, argument);
         } else {
@@ -516,8 +589,10 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             WatchArgument(dma_state.method + (dma_state.non_incrementing ? 0 : i), base_start[i]);
         }
     }
+    namespace Diag = VideoCommon::Nx2FrontDiag;
     auto& split = VideoCommon::GpuSplit::Get();
     if (dma_state.method < non_puller_methods) {
+        Diag::SetSendKind(Diag::SendKind::Puller);
         puller.CallMultiMethod(*this, dma_state.method, dma_state.subchannel, base_start, num_methods, dma_state.method_count);
     } else {
         auto subchannel = subchannels[dma_state.subchannel];
@@ -532,6 +607,7 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                 if (type == Engines::EngineTypes::Maxwell3D) {
                     auto* const maxwell3d = static_cast<Engines::Maxwell3D*>(subchannel);
                     if (maxwell3d->GetNativeMacroEngine().native_turing) {
+                        Diag::SetSendKind(Diag::SendKind::Front3D);
                         maxwell3d->FrontCallMultiMethod(system, split, dma_state.method, base_start,
                                                         num_methods, dma_state.method_count);
                         return;
@@ -539,16 +615,22 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                 } else if (type == Engines::EngineTypes::KeplerCompute) {
                     auto* const compute = static_cast<Engines::KeplerCompute*>(subchannel);
                     if (compute->FrontRunsMacros()) {
+                        Diag::SetSendKind(Diag::SendKind::FrontCompute);
                         compute->FrontCallMultiMethod(system, split, dma_state.method, base_start,
                                                       num_methods, dma_state.method_count, &segment);
+                        DiagNoteEngine(memory_manager, subchannel, type, dma_state.method,
+                                       base_start, num_methods);
                         return;
                     }
                 }
             }
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr);
+            DiagNoteEngine(memory_manager, subchannel, subchannel_type[dma_state.subchannel],
+                           dma_state.method, base_start, num_methods);
             return;
         }
+        Diag::SetSendKind(Diag::SendKind::Direct);
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
@@ -600,7 +682,7 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     // The caches belong to the split's back: it first runs what the front queued (the dispatch
     // that writes these words among it).
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListChecks, 1);
-    if (VideoCommon::Nx2Profile::CountDrain(
+    if (VideoCommon::Nx2FrontDiag::CountDrain(
             VideoCommon::GpuSplit::Get(), VideoCommon::Nx2Profile::DrainSite::PusherCommandList)) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::CommandListDrainWaits, 1);
     }
