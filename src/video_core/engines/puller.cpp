@@ -27,6 +27,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_acquire_peek.h"
+#include "video_core/nx2_front_diag_hooks.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -99,7 +100,7 @@ Peek::Tracker& PeekTracker() {
 
 // The caller is counted while profiling (EDEN_NX2_GPU_PROFILE, Nx2Profile::CountDrain).
 void DrainBack(VideoCommon::Nx2Profile::DrainSite site) {
-    VideoCommon::Nx2Profile::CountDrain(VideoCommon::GpuSplit::Get(), site);
+    VideoCommon::Nx2FrontDiag::CountDrain(VideoCommon::GpuSplit::Get(), site);
     if (PeekTracking()) {
         PeekTracker().Drained();
     }

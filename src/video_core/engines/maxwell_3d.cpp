@@ -25,6 +25,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_front_diag_hooks.h"
 #include "video_core/nx2_indirect_diag.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
@@ -1508,8 +1509,8 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
     if (!front) [[unlikely]] {
         // Copy the back's state and take the macros over while it is idle (state writes it
         // still holds in its method sink first).
-        VideoCommon::Nx2Profile::CountDrain(split,
-                                            VideoCommon::Nx2Profile::DrainSite::Front3DOther);
+        VideoCommon::Nx2FrontDiag::CountDrain(split,
+                                              VideoCommon::Nx2Profile::DrainSite::Front3DOther);
         const bool staged = stage_capture != nullptr;
         if (!staged) {
             ConsumeSink(system);
@@ -1559,6 +1560,11 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     if (Profile::Enabled()) [[unlikely]] {
         Profile::Add(Profile::Counter::MethodWrites, 1);
         fs.NoteGapMethod(from_macro ? 3 : 1, method);
+        if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+            const bool same = fs.regs[method] == value;
+            VideoCommon::Nx2FrontDiag::NoteRegisterWrite(
+                method, same, !execution_mask[method] && same && shadow_kept && fs.skip_same);
+        }
     }
     if (method == MAXWELL3D_REG_INDEX(shadow_ram_control) && FrontVerifyEnabled()) [[unlikely]] {
         fs.control_writes[fs.control_count++ % fs.control_writes.size()] = {
@@ -1744,10 +1750,16 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
+    namespace Diag = VideoCommon::Nx2FrontDiag;
+    const bool diag = Diag::On();
     if (fs.indirect_record != 0) {
         const GPUVAddr record = std::exchange(fs.indirect_record, GPUVAddr{0});
         if (fs.parameters.size() == 6) {
+            const Diag::Timer diag_timer = diag ? Diag::MacroBegin(start) : Diag::Timer{};
             FrontIndirectDraw(system, split, fs, record);
+            if (diag) [[unlikely]] {
+                Diag::MacroEnd(diag_timer, start, true);
+            }
             fs.parameters.clear();
             return;
         }
@@ -1776,23 +1788,32 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         }
         engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
         fs.fifo.assign(fs.parameters.begin(), fs.parameters.end());
+        const Diag::Timer diag_timer = diag ? Diag::MacroBegin(start) : Diag::Timer{};
         const auto result = engine.native_jit->Execute(
             start, fs.fifo, std::span<u32>{native_data_ram},
             [&fs](u32 address) { return address < Regs::NUM_REGS ? fs.regs[address] : 0U; },
-            [&](u32 address, u32 value) {
+            [&, diag](u32 address, u32 value) {
                 if (address >= MacroRegistersStart) {
                     return false;
                 }
                 if (check != nullptr && fs.checked_writes.size() < 32) [[unlikely]] {
                     fs.checked_writes.emplace_back(address, value);
                 }
-                FrontWrite(split, fs, address, value, true, true);
+                if (diag) [[unlikely]] {
+                    Diag::TimedMacroWrite(
+                        [&] { FrontWrite(split, fs, address, value, true, true); });
+                } else {
+                    FrontWrite(split, fs, address, value, true, true);
+                }
                 // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
                 if (address == 0x157 || address == 0x158) {
                     FrontDmaRead(split, fs, address, value);
                 }
                 return true;
             });
+        if (diag) [[unlikely]] {
+            Diag::MacroEnd(diag_timer, start, false);
+        }
         if (!result.success) {
             engine.native_execution_failed = true;
             LOG_ERROR(HW_GPU, "Native MME (JIT, split front) failed: start={:#x}, consumed={}/{}, error={}",
@@ -1836,7 +1857,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                              u32 count) {
     // The words may be written by methods still queued for the back (indirect draw arguments
     // from a culling dispatch), and the caches that may hold newer ones belong to it.
-    VideoCommon::Nx2Profile::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::FrontDmaRead);
+    VideoCommon::Nx2FrontDiag::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::FrontDmaRead);
     const GPUVAddr source = (GPUVAddr{fs.regs[0x154] & 0x1ffffff} << 32) | fs.regs[0x155];
     const u32 ram = fs.regs[0x156];
     const u32 words = std::min<u32>(count, 0x1000);
@@ -1858,7 +1879,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
 }
 
 void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
-    VideoCommon::Nx2Profile::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::Front3DOther);
+    VideoCommon::Nx2FrontDiag::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::Front3DOther);
     static u64 checks{};
     static u64 differences{};
     ++checks;
