@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -953,6 +954,9 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
             image_view.flags |= ImageViewFlagBits::PreemtiveDownload;
         }
         area->preemtive &= image.info.forced_flushed;
+        if (!image.info.forced_flushed) {
+            image.nx2_read_latched = true;
+        }
         image.info.forced_flushed = true;
     });
     return area;
@@ -3625,9 +3629,36 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id) 
             False(slot_images[old_view.image_id].flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
             const PendingDownload new_download{true, 0, old_view.image_id};
             uncommitted_downloads.emplace_back(new_download);
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                NoteReactiveRtDownload(slot_images[old_view.image_id]);
+            }
         }
     }
     *old_id = new_id;
+}
+
+template <class P>
+void TextureCache<P>::NoteReactiveRtDownload(ImageBase& image) {
+    namespace Reactive = Common::Nx2Reactive;
+    const bool latched = image.nx2_read_latched;
+    Reactive::Add(latched ? Reactive::Counter::RtDownloadsLatched
+                          : Reactive::Counter::RtDownloadsForced,
+                  1);
+    Reactive::Add(latched ? Reactive::Counter::RtDownloadBytesLatched
+                          : Reactive::Counter::RtDownloadBytesForced,
+                  image.unswizzled_size_bytes);
+    if (!image.nx2_rt_download_logged) {
+        image.nx2_rt_download_logged = true;
+        if (Reactive::TakeImageLog()) {
+            LOG_INFO(HW_GPU,
+                     "nx2 reactive: render target download ({}): gpu {:#x} cpu {:#x}, {}x{}x{} "
+                     "format {}, {} levels {} layers, {} bytes",
+                     latched ? "latched by a CPU read" : "pitch linear", image.gpu_addr,
+                     image.cpu_addr, image.info.size.width, image.info.size.height,
+                     image.info.size.depth, image.info.format, image.info.resources.levels,
+                     image.info.resources.layers, image.unswizzled_size_bytes);
+        }
+    }
 }
 
 template <class P>

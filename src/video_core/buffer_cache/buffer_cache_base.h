@@ -485,6 +485,9 @@ public:
     /// AsyncBufferDownloads, GPU writes there are still copied back at fences from now on.
     void NoteCpuRead(DAddr addr, size_t size);
 
+    /// 4 KiB pages in the CPU-read ranges (EDEN_NX2_REACTIVE_STATS; walks them).
+    [[nodiscard]] u64 CpuReadPages() const;
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 

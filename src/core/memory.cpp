@@ -20,6 +20,7 @@
 #include "common/common_types.h"
 #include "common/heap_tracker.h"
 #include "common/logging.h"
+#include "common/nx2_reactive.h"
 #include "common/page_table.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -745,6 +746,9 @@ struct Memory::Impl {
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         // Any other calls threads go to syscore (their id is past the cores: up to 255).
         const size_t core = Core::HostCoreSlot(system.GetCurrentHostThreadID());
+        if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Common::Nx2Reactive::CountSlowRead(core);
+        }
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }

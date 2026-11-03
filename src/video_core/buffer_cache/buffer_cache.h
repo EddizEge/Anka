@@ -13,6 +13,7 @@
 #include <vector>
 #include <fmt/ranges.h>
 
+#include "common/nx2_reactive.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/word_manager.h"
@@ -790,6 +791,11 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     }
     Nx2Profile::Add(Nx2Profile::Counter::DownloadBytes, total_size_bytes);
     Nx2Profile::Add(Nx2Profile::Counter::DownloadCopies, downloads.size());
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferDownloads, downloads.size());
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferDownloadBytes,
+                                 total_size_bytes);
+    }
     auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes, true);
     boost::container::small_vector<BufferCopy, 4> normalized_copies;
     runtime.PreCopyBarrier();
@@ -908,6 +914,16 @@ void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
             LOG_INFO(HW_GPU, "CPU-read buffer pages noted: {} (latest {:#x})", noted, addr);
         }
     }
+}
+
+template <class P>
+u64 BufferCache<P>::CpuReadPages() const {
+    u64 pages = 0;
+    cpu_read_ranges.ForEach([&pages](DAddr start, DAddr end) {
+        pages += (Common::AlignUp(end, DEVICE_PAGESIZE) - Common::AlignDown(start, DEVICE_PAGESIZE)) /
+                 DEVICE_PAGESIZE;
+    });
+    return pages;
 }
 
 template <class P>

@@ -58,6 +58,10 @@ public:
 
     void TickFrame();
 
+    /// Bytes of the cached staging buffers of one use (DeviceLocal, Upload or Download), free or
+    /// in use; not the stream buffer (EDEN_NX2_REACTIVE_STATS).
+    [[nodiscard]] u64 CachedBytes(MemoryUsage usage) const noexcept;
+
 private:
     struct StreamBufferCommit {
         size_t upper_bound;

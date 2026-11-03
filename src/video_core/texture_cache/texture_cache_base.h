@@ -488,6 +488,10 @@ private:
     /// Bind an image view as render target, downloading resources preemtively if needed
     void BindRenderTarget(ImageViewId* old_id, ImageViewId new_id);
 
+    /// EDEN_NX2_REACTIVE_STATS: counts a render target download BindRenderTarget queued, by why
+    /// the image is forced_flushed, and logs the image at its first one.
+    void NoteReactiveRtDownload(ImageBase& image);
+
     /// Create a render target from a given image and image view parameters
     [[nodiscard]] std::pair<FramebufferId, ImageViewId> RenderTargetFromImage(
         ImageId, const ImageViewInfo& view_info);

@@ -171,6 +171,10 @@ public:
                                                             u32 pixel_stride);
 
 private:
+    /// EDEN_NX2_REACTIVE_STATS: counts the frame and, every ~10 s, sets the gauges (CPU-read
+    /// buffer pages, staging pool) and writes the "nx2 reactive:" line. From TickFrame.
+    void ReportReactiveStats();
+
     /// EDEN_NX2_MEMBAR: WaitForIdle's event wait with `flags` as the destination and a memory
     /// barrier; `membar`: for Nx2Membar (counted apart). The caller signals the ordering (on B
     /// with cut c, where C records this).
