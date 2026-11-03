@@ -53,7 +53,7 @@ void CheckMode(const LoweredProgram& lowered, bool overlap, u32 hmma_offset) {
     } else {
         REQUIRE(static_cast<bool>(lowered));
     }
-    // KeplerCompute::ProcessNativeLaunch stands in with an upscale for these rejections.
+    // KeplerCompute::DispatchNativeCompute stands in with an upscale for these rejections.
     if (!lowered) REQUIRE(lowered.error.find("matrix multiply") != std::string_view::npos);
 }
 
