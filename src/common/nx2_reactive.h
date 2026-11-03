@@ -108,6 +108,10 @@ struct State {
     /// steady_clock time (ns) of the next line; 0 before the first call
     std::atomic<s64> next_report_ns{};
     s64 window_start_ns{};
+    /// EDEN_NX2_READ_LATCH_AGE: bumped at each aging step; Memory forgets each core's cached read
+    /// area when it changed, so reads reach GetFlushArea again (and refresh the age). Stays 0
+    /// without the switch.
+    alignas(64) std::atomic<u32> read_area_epoch{};
 };
 
 inline constexpr u32 MAX_IMAGE_LOGS = 16;
@@ -142,6 +146,15 @@ inline void CountSlowRead(std::size_t slot) noexcept {
 
 inline void CountFastmemFallback() noexcept {
     GetState().fastmem_fallbacks.fetch_add(1, std::memory_order_relaxed);
+}
+
+/// See State::read_area_epoch.
+[[nodiscard]] inline u32 ReadAreaEpoch() noexcept {
+    return GetState().read_area_epoch.load(std::memory_order_relaxed);
+}
+
+inline void BumpReadAreaEpoch() noexcept {
+    GetState().read_area_epoch.fetch_add(1, std::memory_order_relaxed);
 }
 
 /// Whether this render target image gets its one log line (the first MAX_IMAGE_LOGS do).

@@ -36,6 +36,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/engines/fermi_2d.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
 #include "video_core/texture_cache/image_base.h"
@@ -252,6 +253,12 @@ public:
     void DownloadMemory(DAddr cpu_addr, size_t size);
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr cpu_addr, u64 size);
+
+    /// Images a guest CPU read latched forced_flushed and still has (EDEN_NX2_READ_LATCH_AGE or
+    /// EDEN_NX2_REACTIVE_STATS; 0 without both).
+    [[nodiscard]] size_t ReadLatchedImages() const noexcept {
+        return read_latches.Size();
+    }
 
     /// Remove images in a region
     void UnmapMemory(DAddr cpu_addr, size_t size);
@@ -598,6 +605,15 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
+    /// EDEN_NX2_READ_LATCH_AGE (0: off; nx2_reactive_flush.h)
+    const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    /// The images GetFlushArea latched (nx2_read_latched), kept with the switch or the stats
+    const bool track_read_latches =
+        read_latch_age != 0 || ::Common::Nx2Reactive::StatsEnabled();
+    Nx2Reactive::ReadLatchList<ImageId> read_latches;
+    /// Clears the read latch of the images no CPU read saw for read_latch_age frames (TickFrame,
+    /// every AgeStep frames).
+    void AgeReadLatches();
     u64 image_view_epoch = 0; ///< See ImageViewEpoch
     std::atomic<u64> write_hits{}; ///< See WriteHits
 

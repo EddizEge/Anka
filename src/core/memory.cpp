@@ -762,6 +762,13 @@ struct Memory::Impl {
             }
         };
         auto& current_area = rasterizer_read_areas[core];
+        // EDEN_NX2_READ_LATCH_AGE: the cached area is forgotten at each aging step, so this
+        // core's reads reach GetFlushArea again (the epoch stays 0 without the switch).
+        if (const u32 epoch = Common::Nx2Reactive::ReadAreaEpoch();
+            epoch != rasterizer_read_epochs[core]) [[unlikely]] {
+            rasterizer_read_epochs[core] = epoch;
+            current_area = {};
+        }
         gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             const DAddr end_address = address + size;
             if (current_area.start_address <= address && end_address <= current_area.end_address)
@@ -841,6 +848,7 @@ struct Memory::Impl {
     Common::PageTable* current_page_table = nullptr;
 
     std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::NUM_CPU_CORES> rasterizer_read_areas{};
+    std::array<u32, Core::Hardware::NUM_CPU_CORES> rasterizer_read_epochs{};
     std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;

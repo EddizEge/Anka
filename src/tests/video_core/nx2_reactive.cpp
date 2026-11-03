@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <map>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -291,6 +294,173 @@ TEST_CASE("Reactive first read area", "[video_core][nx2_reactive]") {
         } else {
             REQUIRE(flushed.start_address == page_start);
             REQUIRE(flushed.end_address == page_end);
+        }
+    }
+}
+
+TEST_CASE("Reactive latch age step", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    REQUIRE(Flush::AgeStep(1) == 1);
+    REQUIRE(Flush::AgeStep(3) == 1);
+    REQUIRE(Flush::AgeStep(4) == 1);
+    REQUIRE(Flush::AgeStep(8) == 2);
+    REQUIRE(Flush::AgeStep(120) == 30);
+    REQUIRE(!Flush::Expired(10, 10, 0));
+    REQUIRE(Flush::Expired(11, 10, 0));
+    REQUIRE(!Flush::Expired(70, 10, 60));
+    REQUIRE(Flush::Expired(71, 10, 60));
+    // A read "later" than the frame (another cache's counter) is never expired.
+    REQUIRE(!Flush::Expired(5, 10, 1));
+
+    const u32 epoch = Reactive::ReadAreaEpoch();
+    Reactive::BumpReadAreaEpoch();
+    REQUIRE(Reactive::ReadAreaEpoch() == epoch + 1);
+}
+
+TEST_CASE("Reactive read page ages", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    Flush::ReadPageAges ages;
+    ages.Note(0x10000, 0, 1);
+    REQUIRE(ages.Size() == 0);
+    ages.Note(0x10000, 0x3000, 1); // pages 0x10..0x12
+    ages.Note(0x12fff, 2, 5);      // pages 0x12, 0x13
+    ages.Note(0x20000, 1, 9);      // page 0x20
+    REQUIRE(ages.Size() == 5);
+    std::vector<u64> dropped;
+    const auto drop = [&dropped](u64 page) { dropped.push_back(page); };
+    REQUIRE(ages.Expire(4, 3, drop) == 0);
+    REQUIRE(ages.Expire(5, 3, drop) == 2);
+    std::sort(dropped.begin(), dropped.end());
+    REQUIRE(dropped == std::vector<u64>{0x10000, 0x11000});
+    REQUIRE(ages.Size() == 3);
+    dropped.clear();
+    REQUIRE(ages.Expire(9, 3, drop) == 2);
+    std::sort(dropped.begin(), dropped.end());
+    REQUIRE(dropped == std::vector<u64>{0x12000, 0x13000});
+    ages.Note(0x20000, 0x1000, 20);
+    dropped.clear();
+    REQUIRE(ages.Expire(23, 3, drop) == 0);
+    REQUIRE(ages.Expire(24, 3, drop) == 1);
+    REQUIRE(dropped == std::vector<u64>{0x20000});
+    REQUIRE(ages.Size() == 0);
+}
+
+TEST_CASE("Reactive read latch list", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    Flush::ReadLatchList<u32> list;
+    for (u32 id = 1; id <= 6; ++id) {
+        list.Add(id);
+    }
+    list.Remove(3);
+    list.Remove(42);
+    REQUIRE(list.Size() == 5);
+    std::set<u32> seen;
+    const u64 cleared = list.Age([&seen](u32 id) {
+        seen.insert(id);
+        return id % 2 == 0;
+    });
+    REQUIRE(cleared == 3);
+    REQUIRE(seen == std::set<u32>{1, 2, 4, 5, 6});
+    REQUIRE(list.Size() == 2);
+    seen.clear();
+    REQUIRE(list.Age([&seen](u32 id) {
+                seen.insert(id);
+                return false;
+            }) == 0);
+    REQUIRE(seen == std::set<u32>{1, 5});
+    list.Remove(1);
+    list.Remove(5);
+    REQUIRE(list.Size() == 0);
+    REQUIRE(list.Age([](u32) { return true; }) == 0);
+}
+
+namespace {
+
+/// The buffer cache's CPU-read pages with EDEN_NX2_READ_LATCH_AGE (NoteCpuRead, TickFrame), a
+/// core's cached read area (Memory) and the read epoch, per page.
+struct LatchModel {
+    explicit LatchModel(u64 age_) : age{age_} {}
+
+    /// A core's read of `page` at this frame: through its cached area unless the epoch changed.
+    void Read(u64 page) {
+        if (epoch != core_epoch) {
+            core_epoch = epoch;
+            cached_page.reset();
+        }
+        if (cached_page == page) {
+            return;
+        }
+        cached_page = page;
+        // GetFlushArea -> NoteCpuRead
+        if (age != 0) {
+            ages.Note(page << 12, 0x1000, frame);
+        }
+        noted.insert(page);
+    }
+
+    void TickFrame() {
+        if (age != 0 && frame % VideoCommon::Nx2Reactive::AgeStep(age) == 0) {
+            ages.Expire(frame, age, [this](u64 addr) { noted.erase(addr >> 12); });
+            ++epoch;
+        }
+        ++frame;
+    }
+
+    u64 age;
+    u64 frame = 0;
+    u32 epoch = 0;
+    u32 core_epoch = 0;
+    std::optional<u64> cached_page;
+    std::set<u64> noted;
+    VideoCommon::Nx2Reactive::ReadPageAges ages;
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Reactive latch age model", "[video_core][nx2_reactive]") {
+    // Off: pages stay noted for good, as before.
+    {
+        LatchModel model{0};
+        model.Read(1);
+        model.Read(2);
+        for (int i = 0; i < 1000; ++i) {
+            model.TickFrame();
+        }
+        REQUIRE(model.noted == std::set<u64>{1, 2});
+        REQUIRE(model.epoch == 0);
+    }
+    std::mt19937 rng{3};
+    for (const u64 age : {1ULL, 2ULL, 5ULL, 8ULL, 60ULL, 120ULL}) {
+        LatchModel model{age};
+        const u64 step = VideoCommon::Nx2Reactive::AgeStep(age);
+        std::map<u64, u64> last_read;
+        for (int frame = 0; frame < 3000; ++frame) {
+            // Page 1: read every frame, from the cached area mostly. Page 2: read every `step`
+            // frames. Pages 10..19: read now and then.
+            model.Read(1);
+            last_read[1] = model.frame;
+            if (model.frame % step == 0) {
+                model.Read(2);
+                last_read[2] = model.frame;
+            }
+            if (rng() % 7 == 0) {
+                const u64 page = 10 + rng() % 10;
+                model.Read(page);
+                last_read[page] = model.frame;
+            }
+            model.Read(1);
+            model.TickFrame();
+            // Read at least once an aging step: never dropped.
+            REQUIRE(model.noted.count(1) == 1);
+            REQUIRE(model.noted.count(2) == 1);
+            for (const auto& [page, last] : last_read) {
+                const u64 idle = model.frame - last;
+                if (idle <= age) {
+                    REQUIRE(model.noted.count(page) == 1);
+                } else if (idle > age + step) {
+                    REQUIRE(model.noted.count(page) == 0);
+                }
+            }
         }
     }
 }

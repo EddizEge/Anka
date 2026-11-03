@@ -2621,6 +2621,10 @@ void RasterizerVulkan::ReportReactiveStats() {
         std::scoped_lock lock{buffer_cache.mutex};
         Reactive::SetGauge(Reactive::Gauge::ReadPages, buffer_cache.CpuReadPages());
     }
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        Reactive::SetGauge(Reactive::Gauge::LatchedImages, texture_cache.ReadLatchedImages());
+    }
     const u64 download_bytes = staging_pool.CachedBytes(MemoryUsage::Download);
     Reactive::SetGauge(Reactive::Gauge::StagingDownloadBytes, download_bytes);
     Reactive::SetGauge(Reactive::Gauge::StagingBytes,

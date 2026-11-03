@@ -37,6 +37,7 @@
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -891,6 +892,12 @@ private:
     /// Copying every GPU-written range back instead (each written native storage binding is an
     /// 8 MiB window) dropped it from 60 to about 42 frames a second.
     SummarizedRangeSet<false> cpu_read_ranges;
+    /// EDEN_NX2_READ_LATCH_AGE (0: off): the frame each of cpu_read_ranges' pages was last read in
+    const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    Nx2Reactive::ReadPageAges read_page_ages;
+    /// Drops the CPU-read pages not read for read_latch_age frames and makes the cores' reads
+    /// reach GetFlushArea again (TickFrame, every AgeStep frames).
+    void AgeCpuReads();
 
     /// Queues the parts of a GPU write to [addr, addr + size) that are copied back at the next
     /// fence.

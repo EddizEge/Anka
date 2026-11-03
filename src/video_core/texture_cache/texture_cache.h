@@ -452,6 +452,9 @@ void TextureCache<P>::TickFrame() {
     TickAsyncUnswizzle();
 
     runtime.TickFrame();
+    if (read_latch_age != 0 && frame_tick % Nx2Reactive::AgeStep(read_latch_age) == 0) [[unlikely]] {
+        AgeReadLatches();
+    }
     ++frame_tick;
 
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
@@ -937,7 +940,10 @@ template <class P>
 std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(DAddr cpu_addr,
                                                                                u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> area{};
-    ForEachImageInRegion(cpu_addr, size, [&](ImageId, ImageBase& image) {
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
+        if (read_latch_age != 0) [[unlikely]] {
+            image.nx2_last_cpu_read = frame_tick;
+        }
         if (False(image.flags & ImageFlagBits::GpuModified)) {
             return;
         }
@@ -956,6 +962,9 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
         area->preemtive &= image.info.forced_flushed;
         if (!image.info.forced_flushed) {
             image.nx2_read_latched = true;
+            if (track_read_latches) [[unlikely]] {
+                read_latches.Add(image_id);
+            }
         }
         image.info.forced_flushed = true;
     });
@@ -3218,6 +3227,9 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
+    if (image.nx2_read_latched && track_read_latches) [[unlikely]] {
+        read_latches.Remove(image_id);
+    }
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
@@ -3635,6 +3647,27 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id) 
         }
     }
     *old_id = new_id;
+}
+
+template <class P>
+void TextureCache<P>::AgeReadLatches() {
+    const u64 cleared = read_latches.Age([this](ImageId image_id) {
+        ImageBase& image = slot_images[image_id];
+        if (!Nx2Reactive::Expired(frame_tick, image.nx2_last_cpu_read, read_latch_age)) {
+            return false;
+        }
+        // Back to how a read found it: not forced_flushed (it was not pitch linear forced, or it
+        // would not have latched), its views not downloaded at a render target bind.
+        image.nx2_read_latched = false;
+        image.info.forced_flushed = false;
+        for (const ImageViewId view_id : image.image_view_ids) {
+            slot_image_views[view_id].flags &= ~ImageViewFlagBits::PreemtiveDownload;
+        }
+        return true;
+    });
+    if (cleared != 0 && ::Common::Nx2Reactive::StatsEnabled()) {
+        ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::LatchImagesCleared, cleared);
+    }
 }
 
 template <class P>

@@ -161,6 +161,9 @@ void BufferCache<P>::TickFrame() {
     if (gpu_modified_ranges.WantsRebuild()) {
         gpu_modified_ranges.Rebuild();
     }
+    if (read_latch_age != 0 && frame_tick % Nx2Reactive::AgeStep(read_latch_age) == 0) [[unlikely]] {
+        AgeCpuReads();
+    }
     ++frame_tick;
     delayed_destruction_ring.Tick();
 
@@ -901,6 +904,9 @@ bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
     if (AsyncBufferDownloads()) {
         return false;
     }
+    if (read_latch_age != 0) [[unlikely]] {
+        read_page_ages.Note(addr, size, frame_tick);
+    }
     size_t covered = 0;
     cpu_read_ranges.ForEachInRange(addr, size,
                                    [&](DAddr start, DAddr end) { covered += end - start; });
@@ -915,6 +921,17 @@ bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
         }
     }
     return true;
+}
+
+template <class P>
+void BufferCache<P>::AgeCpuReads() {
+    const u64 dropped = read_page_ages.Expire(frame_tick, read_latch_age, [this](DAddr page) {
+        cpu_read_ranges.Subtract(page, DEVICE_PAGESIZE);
+    });
+    Common::Nx2Reactive::BumpReadAreaEpoch();
+    if (dropped != 0 && Common::Nx2Reactive::StatsEnabled()) {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::LatchPagesDropped, dropped);
+    }
 }
 
 template <class P>

@@ -4,7 +4,10 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/nx2_reactive.h"
@@ -54,5 +57,112 @@ namespace VideoCommon::Nx2Reactive {
         .preemtive = !flush_buffer,
     };
 }
+
+/// EDEN_NX2_READ_LATCH_AGE=<frames> (0 / unset: off). What a guest CPU read latches is kept
+/// while the guest keeps reading it: buffer pages it read (copied back at every fence) not read
+/// again for more than that many frames are dropped from the CPU-read ranges, and images a read
+/// made forced_flushed (downloaded at every render target bind) lose it the same way. Images
+/// forced_flushed from their creation (pitch linear, reactive flushing off) keep it. Every
+/// AgeStep frames each core's cached read area is forgotten (State::read_area_epoch) so its next
+/// read of GPU-cached memory reaches GetFlushArea again and refreshes the age. A page or image
+/// read again after it was dropped is latched again; until then the first-read gap is back
+/// (EDEN_NX2_FLUSH_FIRST_READ closes it for buffers; a dropped image's next read downloads it).
+[[nodiscard]] inline u64 ReadLatchAge() noexcept {
+    static const u64 frames =
+        Common::Nx2Reactive::ParseFrames(Common::Nx2Reactive::GetEnv("EDEN_NX2_READ_LATCH_AGE"));
+    return frames;
+}
+
+/// Frames between aging steps: a quarter of the age, so a latch read at least that often stays.
+[[nodiscard]] constexpr u64 AgeStep(u64 age) noexcept {
+    return age / 4 != 0 ? age / 4 : 1;
+}
+
+/// Whether a latch last read at frame `last` is older than `age` at frame `frame`.
+[[nodiscard]] constexpr bool Expired(u64 frame, u64 last, u64 age) noexcept {
+    return frame > last && frame - last > age;
+}
+
+/// The frame each CPU-read buffer page was last read in.
+class ReadPageAges {
+public:
+    static constexpr u64 PAGE_BITS = 12;
+
+    /// The guest read [addr, addr + size) at `frame`.
+    void Note(u64 addr, u64 size, u64 frame) {
+        if (size == 0) {
+            return;
+        }
+        const u64 last = (addr + size - 1) >> PAGE_BITS;
+        for (u64 page = addr >> PAGE_BITS; page <= last; ++page) {
+            frames[page] = frame;
+        }
+    }
+
+    /// Forgets the pages older than `age` at `frame`, calling drop(page address) for each;
+    /// returns how many.
+    template <typename Func>
+    u64 Expire(u64 frame, u64 age, Func&& drop) {
+        u64 dropped = 0;
+        for (auto it = frames.begin(); it != frames.end();) {
+            if (Expired(frame, it->second, age)) {
+                drop(it->first << PAGE_BITS);
+                it = frames.erase(it);
+                ++dropped;
+            } else {
+                ++it;
+            }
+        }
+        return dropped;
+    }
+
+    [[nodiscard]] std::size_t Size() const noexcept {
+        return frames.size();
+    }
+
+private:
+    std::unordered_map<u64, u64> frames;
+};
+
+/// The images a CPU read latched (by id), for aging.
+template <typename Id>
+class ReadLatchList {
+public:
+    void Add(Id id) {
+        ids.push_back(id);
+    }
+
+    void Remove(Id id) {
+        const auto it = std::find(ids.begin(), ids.end(), id);
+        if (it != ids.end()) {
+            *it = ids.back();
+            ids.pop_back();
+        }
+    }
+
+    /// Calls expire(id) for each; drops the ids it returns true for (it cleared their latch).
+    /// Returns how many.
+    template <typename Func>
+    u64 Age(Func&& expire) {
+        u64 cleared = 0;
+        for (std::size_t i = 0; i < ids.size();) {
+            if (expire(ids[i])) {
+                ids[i] = ids.back();
+                ids.pop_back();
+                ++cleared;
+            } else {
+                ++i;
+            }
+        }
+        return cleared;
+    }
+
+    [[nodiscard]] std::size_t Size() const noexcept {
+        return ids.size();
+    }
+
+private:
+    std::vector<Id> ids;
+};
 
 } // namespace VideoCommon::Nx2Reactive
