@@ -90,6 +90,12 @@ enum class Gauge : u32 {
 /// Slots of the per core slow read counters (memory's HostCoreSlot; more go to the last).
 inline constexpr std::size_t SLOW_READ_SLOTS = 8;
 
+// The padding is the point (one cache line each); dynarmic builds without /wd4324.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 struct alignas(64) PaddedCounter {
     std::atomic<u64> value{};
 };
@@ -113,6 +119,10 @@ struct State {
     /// without the switch.
     alignas(64) std::atomic<u32> read_area_epoch{};
 };
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 inline constexpr u32 MAX_IMAGE_LOGS = 16;
 inline constexpr s64 REPORT_PERIOD_NS = 10'000'000'000;
