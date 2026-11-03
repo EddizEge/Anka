@@ -26,6 +26,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_front_diag_hooks.h"
+#include "video_core/nx2_front_same.h"
 #include "video_core/nx2_indirect_diag.h"
 #include "video_core/nx2_mode_diag.h"
 #include "video_core/nx2_profile.h"
@@ -1382,10 +1383,12 @@ struct Maxwell3D::FrontState {
     /// EDEN_NX2_GPU_PROFILE: methods noted since the last indirect draw (~0: none yet).
     u32 gap_methods{~0U};
 
-    /// Profiling: remembers what was written first after the held indirect draw.
+    /// Profiling: remembers what was written first after the held indirect draw. Lean: from
+    /// the write position and the macro writes held, without sending those (WritePosition does).
     void NoteInterposer(VideoCommon::GpuSplit& split, u32 kind, u32 method) {
         if (held_indirect.payload != nullptr && indirect_interposer == 0 &&
-            split.WritePosition() == held_indirect.end) {
+            (lean ? split.DiagHeldWrites() == 0 && split.DiagWritePosition() == held_indirect.end
+                  : split.WritePosition() == held_indirect.end)) {
             indirect_interposer = (kind << 16) | (method & 0xffff);
         }
     }
@@ -1398,7 +1401,42 @@ struct Maxwell3D::FrontState {
                                           (kind << 16) | (method & 0xffff));
         }
     }
+
+    /// EDEN_NX2_PROFILE_LEAN=1 (with the profile, read once): FrontWrite's profile counts kept
+    /// here and added at each macro's end (FlushLean), the macro zone's time left to push, the
+    /// interposer read without side effects.
+    bool lean{};
+    VideoCommon::Nx2FrontSame::LeanCounts lean_counts;
+    void FlushLean() {
+        namespace Profile = VideoCommon::Nx2Profile;
+        const auto [writes, same_writes] = lean_counts.Take();
+        Profile::Add(Profile::Counter::MethodWrites, writes);
+        Profile::Add(Profile::Counter::SameValueWrites, same_writes);
+    }
+    /// EDEN_NX2_FRONT_DIAG_REGS=0: front diag without its register table (which counts every
+    /// write, so the same value filter stays armed).
+    bool diag_regs{true};
+    /// EDEN_NX2_JIT_SAME (nx2_front_same.h): the methods whose same value writes the filter
+    /// drops, each macro call's filter, and with =1 / =2 the JIT compiled with it (the engine's
+    /// own JIT is shared with the back and the compute front).
+    VideoCommon::Nx2FrontSame::Table same_table{};
+    VideoCommon::Nx2FrontSame::Filter same;
+#ifdef ARCHITECTURE_x86_64
+    std::unique_ptr<TuringMacroJit> front_jit;
+#endif
 };
+
+// What nx2_front_same.h (and the JIT's filter) assume of the registers.
+static_assert(VideoCommon::Nx2FrontSame::NumRegs == Maxwell3D::Regs::NUM_REGS);
+static_assert(VideoCommon::Nx2FrontSame::NumRegs == MacroRegistersStart);
+static_assert(static_cast<u32>(Maxwell3D::Regs::ShadowRamControl::Track) ==
+                  VideoCommon::Nx2FrontSame::Track &&
+              static_cast<u32>(Maxwell3D::Regs::ShadowRamControl::TrackWithFilter) ==
+                  VideoCommon::Nx2FrontSame::TrackWithFilter &&
+              static_cast<u32>(Maxwell3D::Regs::ShadowRamControl::Passthrough) ==
+                  VideoCommon::Nx2FrontSame::Passthrough &&
+              static_cast<u32>(Maxwell3D::Regs::ShadowRamControl::Replay) ==
+                  VideoCommon::Nx2FrontSame::Replay);
 
 // What the back runs for FrontIndirectDraw: `count` records `stride` bytes apart.
 struct Maxwell3D::IndirectDrawCall {
@@ -1598,6 +1636,31 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
                 front->control == Control::Replay, method_sink);
         }
         front->skip_same = SkipSameValueWrites() && FrontSkipSame();
+        {
+            // EDEN_NX2_PROFILE_LEAN, EDEN_NX2_FRONT_DIAG_REGS, EDEN_NX2_JIT_SAME.
+            namespace Same = VideoCommon::Nx2FrontSame;
+            const char* lean = std::getenv("EDEN_NX2_PROFILE_LEAN");
+            front->lean = VideoCommon::Nx2Profile::Enabled() && lean != nullptr && lean[0] == '1';
+            front->diag_regs = VideoCommon::Nx2FrontDiag::RegistersOn();
+            front->same_table = Same::BuildTable(execution_mask);
+#ifdef ARCHITECTURE_x86_64
+            front->same.mode = Same::ParseMode(std::getenv("EDEN_NX2_JIT_SAME"));
+            if (front->same.mode == 1 || front->same.mode == 2) {
+                front->front_jit = std::make_unique<TuringMacroJit>(
+                    front->same.mode == 1 ? TuringMacroJit::SameFilter::Skip
+                                          : TuringMacroJit::SameFilter::Verify);
+            }
+#endif
+            if (front->lean || !front->diag_regs || front->same.mode != 0) {
+                LOG_INFO(HW_GPU,
+                         "Split front: EDEN_NX2_JIT_SAME={} (1: the macro JIT drops state writes "
+                         "the front would not send, 2: checks that against FrontWrite, 3: drops "
+                         "them in C++), EDEN_NX2_PROFILE_LEAN={} (profile counts batched, macro "
+                         "time within push, filter armed after indirect draws), "
+                         "EDEN_NX2_FRONT_DIAG_REGS={}",
+                         front->same.mode, front->lean ? 1 : 0, front->diag_regs ? 1 : 0);
+            }
+        }
         front->executing_macro = executing_macro;
         front->parameters = std::move(macro_params);
         macro_params.clear();
@@ -1626,12 +1689,19 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         value = fs.shadow[method];
     }
     if (Profile::Enabled()) [[unlikely]] {
-        Profile::Add(Profile::Counter::MethodWrites, 1);
+        if (fs.lean) {
+            if (fs.lean_counts.Write()) {
+                fs.FlushLean();
+            }
+        } else {
+            Profile::Add(Profile::Counter::MethodWrites, 1);
+        }
         fs.NoteGapMethod(from_macro ? 3 : 1, method);
-        if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        if (VideoCommon::Nx2FrontDiag::On() && fs.diag_regs) [[unlikely]] {
             const bool same = fs.regs[method] == value;
             VideoCommon::Nx2FrontDiag::NoteRegisterWrite(
-                method, same, !execution_mask[method] && same && shadow_kept && fs.skip_same);
+                method, same, !execution_mask[method] && same && shadow_kept && fs.skip_same,
+                from_macro);
         }
     }
     if (method == MAXWELL3D_REG_INDEX(shadow_ram_control) && FrontVerifyEnabled()) [[unlikely]] {
@@ -1643,7 +1713,11 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         // writes, and the shadow RAM (tracked by default) holds the value already.
         if (fs.regs[method] == value && shadow_kept && fs.skip_same) {
             if (Profile::Enabled()) [[unlikely]] {
-                Profile::Add(Profile::Counter::SameValueWrites, 1);
+                if (fs.lean) {
+                    ++fs.lean_counts.same;
+                } else {
+                    Profile::Add(Profile::Counter::SameValueWrites, 1);
+                }
             }
             return;
         }
@@ -1657,6 +1731,10 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
             // register, which a later Replay write reads back.
             fs.control = static_cast<Regs::ShadowRamControl>(argument);
             fs.shadow[method] = argument;
+            if (fs.same.mode != 0) {
+                // A macro may write it: its same value filter follows the mode.
+                fs.same.Control(argument, fs.regs.data(), fs.shadow.data());
+            }
             break;
         case MAXWELL3D_REG_INDEX(load_mme.instruction_ptr):
             GetNativeMacroEngine().ClearCode(fs.regs[MAXWELL3D_REG_INDEX(load_mme.instruction_ptr)]);
@@ -1687,6 +1765,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     }
     if (Profile::Enabled()) [[unlikely]] {
         fs.NoteInterposer(split, from_macro ? 3 : 1, method);
+    }
+    if (fs.same.mode == 2) [[unlikely]] {
+        fs.same.sent = true;
     }
     if (from_macro) {
         split.MacroWrite(this, method, argument);
@@ -1834,9 +1915,12 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             const Diag::Timer diag_timer = diag ? Diag::MacroBegin(start) : Diag::Timer{};
             FrontIndirectDraw(system, split, fs, record);
             if (diag) [[unlikely]] {
-                Diag::MacroEnd(diag_timer, start, true);
+                Diag::MacroEnd(diag_timer, start, true, 0, 0);
             }
             fs.parameters.clear();
+            if (fs.lean) [[unlikely]] {
+                fs.FlushLean();
+            }
             return;
         }
         LOG_ERROR(HW_GPU, "Indirect draw macro {:#x} got {} parameters, not 6", method,
@@ -1855,40 +1939,123 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             check = &entry;
             fs.checked_writes.clear();
         }
+        if (diag) [[unlikely]] {
+            Diag::NoteIndirectLookup(check == nullptr);
+        }
     }
     {
-        VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+        namespace Same = VideoCommon::Nx2FrontSame;
+        // Lean: the macro's time stays in the zone around it (push), the front's busy time too.
+        VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro,
+                                                     !fs.lean && VideoCommon::Nx2Profile::Enabled()};
         engine.native_interpreter.active_dram = &native_data_ram;
-        if (!engine.native_jit) {
-            engine.native_jit = std::make_shared<TuringMacroJit>();
+        // EDEN_NX2_JIT_SAME=1/2: the front's JIT with the filter (same code and generation).
+        TuringMacroJit* jit = fs.front_jit.get();
+        if (jit == nullptr) {
+            if (!engine.native_jit) {
+                engine.native_jit = std::make_shared<TuringMacroJit>();
+            }
+            jit = engine.native_jit.get();
         }
-        engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
+        jit->Prepare(engine.native_code, engine.native_code_generation);
         fs.fifo.assign(fs.parameters.begin(), fs.parameters.end());
+        if (fs.same.mode != 0) [[unlikely]] {
+            // Lean: the gap histogram notes the methods sent, the filter is not disarmed for it.
+            fs.same.Begin(fs.same_table.data(), fs.skip_same, static_cast<u32>(fs.control),
+                          check != nullptr, diag && fs.diag_regs,
+                          VideoCommon::Nx2Profile::Enabled() && !fs.lean, fs.gap_methods,
+                          fs.regs.data(), fs.shadow.data());
+        }
         const Diag::Timer diag_timer = diag ? Diag::MacroBegin(start) : Diag::Timer{};
-        const auto result = engine.native_jit->Execute(
-            start, fs.fifo, std::span<u32>{native_data_ram},
-            [&fs](u32 address) { return address < Regs::NUM_REGS ? fs.regs[address] : 0U; },
-            [&, diag](u32 address, u32 value) {
-                if (address >= MacroRegistersStart) {
-                    return false;
+        u32 diag_emits = 0;
+        u32 diag_reads = 0;
+        const auto read = [&fs, diag, &diag_reads](u32 address) {
+            if (diag) [[unlikely]] {
+                ++diag_reads;
+            }
+            return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
+        };
+        const auto write = [&, diag](u32 address, u32 value) {
+            if (address >= MacroRegistersStart) {
+                return false;
+            }
+            if (check != nullptr && fs.checked_writes.size() < 32) [[unlikely]] {
+                fs.checked_writes.emplace_back(address, value);
+            }
+            if (diag) [[unlikely]] {
+                ++diag_emits;
+                Diag::TimedMacroWrite([&] { FrontWrite(split, fs, address, value, true, true); });
+            } else {
+                FrontWrite(split, fs, address, value, true, true);
+            }
+            // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
+            if (address == 0x157 || address == 0x158) {
+                FrontDmaRead(split, fs, address, value);
+            }
+            return true;
+        };
+        const std::span<u32> data_ram{native_data_ram};
+        const auto result = [&] {
+            if (fs.same.mode == 2) [[unlikely]] {
+                // The JIT's choice against FrontWrite's: a write it would drop comes through
+                // verify, the rest through checked; all are sent as without the filter.
+                const auto checked = [&](u32 address, u32 value) {
+                    const bool in_scope = Same::InScope(fs.same.ctx, address);
+                    fs.same.sent = false;
+                    const bool ok = write(address, value);
+                    if (in_scope && !fs.same.sent) {
+                        ++fs.same.missed;
+                    }
+                    return ok;
+                };
+                const auto verify = [&](u32 address, u32 value) {
+                    fs.same.sent = false;
+                    const bool ok = write(address, value);
+                    if (fs.same.sent && fs.same.NoteMismatch()) {
+                        LOG_ERROR(HW_GPU,
+                                  "Front same filter (EDEN_NX2_JIT_SAME=2): the JIT would drop "
+                                  "macro {:#x}'s write {:#x} = {:#x} (shadow RAM mode {}), which "
+                                  "the front sends ({} so far)",
+                                  start, address, value, static_cast<u32>(fs.control),
+                                  fs.same.mismatches);
+                    }
+                    return ok;
+                };
+                return jit->Execute(start, fs.fifo, data_ram, read, checked, &fs.same.ctx, verify);
+            }
+            if (fs.same.mode == 3) [[unlikely]] {
+                // The filter in C++, on the JIT without it.
+                const auto filtered = [&](u32 address, u32 value) {
+                    if (Same::Hit(fs.same.ctx, address, value)) {
+                        ++fs.same.ctx.hits;
+                        return true;
+                    }
+                    return write(address, value);
+                };
+                return jit->Execute(start, fs.fifo, data_ram, read, filtered);
+            }
+            return jit->Execute(start, fs.fifo, data_ram, read, write,
+                                fs.same.mode == 1 ? &fs.same.ctx : nullptr);
+        }();
+        if (fs.same.mode != 0) [[unlikely]] {
+            // The writes dropped, as FrontWrite would have counted them.
+            namespace Profile = VideoCommon::Nx2Profile;
+            const u64 dropped = fs.same.Dropped();
+            if (Profile::Enabled()) {
+                if (fs.lean) {
+                    fs.lean_counts.writes += dropped;
+                    fs.lean_counts.same += dropped;
+                } else if (dropped != 0) {
+                    Profile::Add(Profile::Counter::MethodWrites, dropped);
+                    Profile::Add(Profile::Counter::SameValueWrites, dropped);
                 }
-                if (check != nullptr && fs.checked_writes.size() < 32) [[unlikely]] {
-                    fs.checked_writes.emplace_back(address, value);
-                }
-                if (diag) [[unlikely]] {
-                    Diag::TimedMacroWrite(
-                        [&] { FrontWrite(split, fs, address, value, true, true); });
-                } else {
-                    FrontWrite(split, fs, address, value, true, true);
-                }
-                // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
-                if (address == 0x157 || address == 0x158) {
-                    FrontDmaRead(split, fs, address, value);
-                }
-                return true;
-            });
+                Diag::NoteSameCall(fs.same.mode, fs.same.why, fs.same.ctx.hits,
+                                   fs.same.CallMismatches(), fs.same.CallMissed());
+            }
+            diag_emits += static_cast<u32>(dropped);
+        }
         if (diag) [[unlikely]] {
-            Diag::MacroEnd(diag_timer, start, false);
+            Diag::MacroEnd(diag_timer, start, false, diag_emits, diag_reads);
         }
         if (!result.success) {
             engine.native_execution_failed = true;
@@ -1925,6 +2092,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
+    }
+    if (fs.lean) [[unlikely]] {
+        fs.FlushLean();
     }
 #else
     fs.executing_macro = 0;

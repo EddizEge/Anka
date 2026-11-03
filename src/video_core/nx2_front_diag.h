@@ -281,7 +281,8 @@ private:
 };
 
 /// Front macro calls by their start address: calls, sampled exclusive time (nested profile zones
-/// out: drains, ring waits) and the nested time itself, DMA reads; JIT or HLE (FrontIndirectDraw).
+/// out: drains, ring waits) and the nested time itself, DMA reads; JIT or HLE (FrontIndirectDraw);
+/// the JIT calls' emits (with those the same value filter dropped) and register reads (MME_READ).
 class MacroTable {
 public:
     static constexpr size_t Slots = 512;
@@ -296,6 +297,8 @@ public:
         u64 child_ticks{}; ///< Of the sampled calls: in nested zones
         u64 dma_reads{};
         u64 dma_words{};
+        u64 emits{};
+        u64 reads{};
 
         /// Exclusive ticks over all calls (the sample's mean times the calls).
         [[nodiscard]] double EstimatedTicks() const {
@@ -363,18 +366,28 @@ private:
 };
 
 /// 3D register writes by method (Maxwell3D::FrontWrite): all, those of the value the register
-/// held, and those the front did not send (state writes of the same value).
+/// held, and those the front did not send (state writes of the same value); and by where they
+/// came from (pushed, written by a front macro).
 class RegisterWrites {
 public:
     static constexpr u32 NumRegs = 0xE00;
 
-    void Note(u32 method, bool same, bool skipped) {
+    void Note(u32 method, bool same, bool skipped, bool from_macro = false) {
         if (method >= NumRegs) {
             return;
         }
         ++total[method];
         same_value[method] += same ? 1 : 0;
         skipped_writes[method] += skipped ? 1 : 0;
+        auto& origin = by_origin[from_macro ? 1 : 0];
+        ++origin[0];
+        origin[1] += same ? 1 : 0;
+        origin[2] += skipped ? 1 : 0;
+    }
+
+    /// All, same value and not sent of the pushed writes (false) or the macros' (true).
+    [[nodiscard]] const std::array<u64, 3>& Origin(bool from_macro) const {
+        return by_origin[from_macro ? 1 : 0];
     }
 
     struct Row {
@@ -416,12 +429,58 @@ public:
         total.fill(0);
         same_value.fill(0);
         skipped_writes.fill(0);
+        by_origin = {};
     }
 
 private:
     std::array<u64, NumRegs> total{};
     std::array<u64, NumRegs> same_value{};
     std::array<u64, NumRegs> skipped_writes{};
+    std::array<std::array<u64, 3>, 2> by_origin{};
+};
+
+/// DmaPusher's command headers to Maxwell3D's front: increasing runs of state methods by length
+/// (1, 2, 3-4, 5-8, more words), and how increase-once macro calls arrive (their first word as one
+/// method call, the rest as one more within the same command list, or split across lists).
+struct FrontRuns {
+    static constexpr std::size_t Buckets = 5;
+    std::array<u64, Buckets> state_runs{};
+    u64 state_words{};
+    u64 macro_runs{};       ///< Increasing runs into the macro range
+    u64 once_one{};         ///< Increase once, macro range, one word: one send
+    u64 once_two{};         ///< ... more words, all in the list: two sends
+    u64 once_split{};       ///< ... words past the list's end: more
+    u64 once_state{};       ///< Increase once below the macro range
+
+    [[nodiscard]] static constexpr std::size_t Bucket(u32 words) noexcept {
+        return words <= 1 ? 0 : words == 2 ? 1 : words <= 4 ? 2 : words <= 8 ? 3 : 4;
+    }
+
+    /// A header of `words` words; `macro`: its method in the macro range; `in_list`: all its
+    /// words in the command list it starts in.
+    void Note(bool increase_once, bool macro, u32 words, bool in_list) {
+        if (words == 0) {
+            return;
+        }
+        if (!increase_once) {
+            if (macro) {
+                ++macro_runs;
+            } else {
+                ++state_runs[Bucket(words)];
+                state_words += words;
+            }
+            return;
+        }
+        if (!macro) {
+            ++once_state;
+        } else if (!in_list) {
+            ++once_split;
+        } else if (words == 1) {
+            ++once_one;
+        } else {
+            ++once_two;
+        }
+    }
 };
 
 /// A drain's wait in time stamp counter ticks, by power of two.

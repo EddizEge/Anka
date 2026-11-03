@@ -8,12 +8,15 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 // Eden's Xbyak configuration (its hash maps): every translation unit must see the same one.
+#include "common/assert.h"
 #include "common/x64/xbyak.h"
 
 #include "video_core/macro_turing.h"
+#include "video_core/nx2_front_same.h"
 
 namespace Tegra {
 
@@ -26,6 +29,15 @@ class TuringMacroJit {
 public:
     using Word = std::uint32_t;
     using Result = TuringMacroInterpreter::Result;
+
+    /// What each emit checks first (EDEN_NX2_JIT_SAME, nx2_front_same.h): Off, the code as it
+    /// was; Skip, a write the filter takes is counted and not emitted; Verify, counted and
+    /// emitted through `verify` instead, its method with VerifyFlag.
+    enum class SameFilter : std::uint8_t { Off, Skip, Verify };
+    static constexpr Word VerifyFlag = 0x10000;
+
+    TuringMacroJit() = default;
+    explicit TuringMacroJit(SameFilter same_filter_) : same_filter{same_filter_} {}
 
     struct State {
         std::array<Word, 24> regs;
@@ -53,6 +65,8 @@ public:
         bool (*emit)(State*, Word method, Word value);
         Word (*read)(State*, Word address);
         const std::vector<Word>* fifo;
+        void* same; ///< Nx2FrontSame::Ctx, with a filter
+        bool (*emit_verify)(State*, Word method, Word value);
     };
 
     enum Error : Word {
@@ -95,13 +109,22 @@ public:
         if (program && generation == compiled_generation) {
             return;
         }
-        program = std::make_unique<Program>(code);
+        program = std::make_unique<Program>(code, same_filter);
         compiled_generation = generation;
     }
 
-    template <typename Read, typename Emit>
+    /// Verify's stand-in when there is none.
+    struct NoVerify {
+        bool operator()(Word, Word) const {
+            return false;
+        }
+    };
+
+    /// `same`: the filter's Nx2FrontSame::Ctx (with a filter); `verify`: what Verify emits
+    /// through.
+    template <typename Read, typename Emit, typename Verify = NoVerify>
     Result Execute(Word start, std::vector<Word>& parameters, std::span<Word> data_ram, Read read,
-                   Emit emit) {
+                   Emit emit, void* same = nullptr, Verify verify = {}) {
         State state;
         state.regs.fill(0);
         state.carry = state.method = state.increment = 0;
@@ -115,10 +138,19 @@ public:
         state.params_size = static_cast<Word>(parameters.size());
         state.dram = data_ram.data();
         state.fifo = &parameters;
-        Thunks<Read, Emit> thunks{read, emit};
+        state.same = same;
+        // A filtered program reads `same` at each emit, and Verify's hits call `verify`.
+        DEBUG_ASSERT(program->filter == SameFilter::Off || same != nullptr);
+        DEBUG_ASSERT((program->filter != SameFilter::Verify || !std::is_same_v<Verify, NoVerify>));
+        Thunks<Read, Emit, Verify> thunks{read, emit, verify};
         state.user = &thunks;
-        state.emit = &Thunks<Read, Emit>::CallEmit;
-        state.read = &Thunks<Read, Emit>::CallRead;
+        state.emit = &Thunks<Read, Emit, Verify>::CallEmit;
+        state.read = &Thunks<Read, Emit, Verify>::CallRead;
+        if constexpr (std::is_same_v<Verify, NoVerify>) {
+            state.emit_verify = nullptr;
+        } else {
+            state.emit_verify = &Thunks<Read, Emit, Verify>::CallEmitVerify;
+        }
         const Word error = program->entry(&state);
         if (error == None) {
             return {true, state.fail_pc, state.consumed, {}};
@@ -127,13 +159,20 @@ public:
     }
 
 private:
-    template <typename Read, typename Emit>
+    template <typename Read, typename Emit, typename Verify>
     struct Thunks {
         Read& read;
         Emit& emit;
+        Verify& verify;
         static bool CallEmit(State* state, Word method, Word value) {
             const bool ok = static_cast<Thunks*>(state->user)->emit(method, value);
             // MME_DMA_READ_FIFOED appends to the FIFO from inside the emit.
+            state->params = state->fifo->data();
+            state->params_size = static_cast<Word>(state->fifo->size());
+            return ok;
+        }
+        static bool CallEmitVerify(State* state, Word method, Word value) {
+            const bool ok = static_cast<Thunks*>(state->user)->verify(method & ~VerifyFlag, value);
             state->params = state->fifo->data();
             state->params_size = static_cast<Word>(state->fifo->size());
             return ok;
@@ -144,14 +183,15 @@ private:
     };
 
     struct Program : Xbyak::CodeGenerator {
-        explicit Program(std::span<const Word> code)
-            : Xbyak::CodeGenerator(1 << 20, Xbyak::AutoGrow) {
+        explicit Program(std::span<const Word> code, SameFilter filter_)
+            : Xbyak::CodeGenerator(1 << 20, Xbyak::AutoGrow), filter{filter_} {
             Generate(code);
             ready();
             entry = getCode<Word (*)(State*)>();
         }
 
         Word (*entry)(State*) = nullptr;
+        const SameFilter filter;
 
     private:
         using Decoded = TuringMacroInterpreter::Decoded;
@@ -160,7 +200,8 @@ private:
 #else
         const Xbyak::Reg64 arg0 = rdi, arg1 = rsi, arg2 = rdx;
 #endif
-        // rbx: State*; r12d/r13d: the instruction's FIFO loads; r14d/r15d: its ALU results.
+        // rbx: State*; r12d/r13d: the instruction's FIFO loads; r14d/r15d: its ALU results;
+        // rbp: the filter's Nx2FrontSame::Ctx (with one).
         const Xbyak::Reg64 st = rbx;
 
         static constexpr std::size_t RegOffset(Word reg) {
@@ -179,6 +220,9 @@ private:
             push(rbx); push(rbp); push(r12); push(r13); push(r14); push(r15);
             sub(rsp, 40);
             mov(st, arg0);
+            if (filter != SameFilter::Off) {
+                mov(rbp, qword[st + offsetof(State, same)]);
+            }
             mov(eax, dword[st + offsetof(State, start)]);
             cmp(eax, count);
             jae(fail_outside, T_NEAR);
@@ -391,12 +435,20 @@ private:
                 }
                 if (d.out_emit[lane]) {
                     Output(eax, d, d.out_emit[lane]);
+                    Xbyak::Label slow, after;
+                    if (filter != SameFilter::Off) {
+                        SameCheck(slow, after);
+                        L(slow);
+                    }
                     mov(arg2.cvt32(), eax);
                     mov(arg1.cvt32(), dword[st + offsetof(State, method)]);
                     mov(arg0, st);
                     call(ptr[st + offsetof(State, emit)]);
                     test(al, al);
                     jz(fail_emit, T_NEAR);
+                    if (filter != SameFilter::Off) {
+                        L(after);
+                    }
                     mov(eax, dword[st + offsetof(State, increment)]);
                     add(dword[st + offsetof(State, method)], eax);
                 }
@@ -446,6 +498,37 @@ private:
             } else {
                 jmp(fail_outside, T_NEAR);
             }
+        }
+
+        // The filter, with the value in eax: a write Nx2FrontSame::Hit takes is counted and goes
+        // on to `after` (Verify: emitted through emit_verify first); the rest take the call at
+        // `slow`. The method is masked only when set: past the table (an increment carried it
+        // into the macro range, or beyond 0xfff) it takes the call.
+        void SameCheck(Xbyak::Label& slow, Xbyak::Label& after) {
+            namespace Same = VideoCommon::Nx2FrontSame;
+            mov(ecx, dword[st + offsetof(State, method)]);
+            cmp(ecx, Same::NumRegs);
+            jae(slow);
+            mov(rdx, qword[rbp + Same::CtxTable]);
+            cmp(byte[rdx + rcx], 0);
+            je(slow);
+            mov(rdx, qword[rbp + Same::CtxRegs]);
+            cmp(dword[rdx + rcx * 4], eax);
+            jne(slow);
+            mov(rdx, qword[rbp + Same::CtxCmp2]);
+            cmp(dword[rdx + rcx * 4], eax);
+            jne(slow);
+            inc(qword[rbp + Same::CtxHits]);
+            if (filter == SameFilter::Verify) {
+                mov(arg2.cvt32(), eax);
+                or_(ecx, VerifyFlag);
+                mov(arg1.cvt32(), ecx);
+                mov(arg0, st);
+                call(ptr[st + offsetof(State, emit_verify)]);
+                test(al, al);
+                jz(fail_emit, T_NEAR);
+            }
+            jmp(after);
         }
 
         void Output(const Xbyak::Reg32& dst, const Decoded& d, Word selector) {
@@ -657,6 +740,14 @@ private:
 
     std::unique_ptr<Program> program;
     std::uint64_t compiled_generation{~std::uint64_t{0}};
+    SameFilter same_filter{SameFilter::Off};
+
+public:
+    /// The compiled code (tests: with the filter off its bytes stay as they were).
+    [[nodiscard]] std::span<const std::uint8_t> Code() const {
+        return program ? std::span<const std::uint8_t>{program->getCode(), program->getSize()}
+                       : std::span<const std::uint8_t>{};
+    }
 };
 
 } // namespace Tegra

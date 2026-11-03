@@ -51,6 +51,20 @@ void DiagNoteEngine(const MemoryManager& memory, const Engines::EngineInterface*
     }
 }
 
+// Front diag: an increasing (or increase once) command header to Maxwell3D's split front, how
+// long its run is and whether its words are all in the command list (NoteFrontRun), out of line.
+YUZU_NO_INLINE void DiagNoteRun(Engines::EngineInterface* engine, Engines::EngineTypes type,
+                                u32 method, u32 count, bool increase_once, bool in_list) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (engine == nullptr || type != Engines::EngineTypes::Maxwell3D || !split.Active() ||
+        !split.FrontMacros() ||
+        !static_cast<Engines::Maxwell3D*>(engine)->GetNativeMacroEngine().native_turing) {
+        return;
+    }
+    VideoCommon::Nx2FrontDiag::NoteFrontRun(increase_once, method >= MacroRegistersStart, count,
+                                            in_list);
+}
+
 } // Anonymous namespace
 
 void Nx2CheckMarkWord(u64 index, u64 mask, u64 pages) {
@@ -384,6 +398,12 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 SetState(command_header);
                 dma_state.non_incrementing = false;
                 dma_increment_once = false;
+                if (diag && command_header.method >= non_puller_methods) [[unlikely]] {
+                    DiagNoteRun(subchannels[command_header.subchannel],
+                                subchannel_type[command_header.subchannel], command_header.method,
+                                command_header.method_count, false,
+                                index + 1 + command_header.method_count <= commands.size());
+                }
                 break;
             case SubmissionMode::NonIncreasing:
                 SetState(command_header);
@@ -406,6 +426,12 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
                 SetState(command_header);
                 dma_state.non_incrementing = false;
                 dma_increment_once = true;
+                if (diag && command_header.method >= non_puller_methods) [[unlikely]] {
+                    DiagNoteRun(subchannels[command_header.subchannel],
+                                subchannel_type[command_header.subchannel], command_header.method,
+                                command_header.method_count, true,
+                                index + 1 + command_header.method_count <= commands.size());
+                }
                 break;
             default:
                 break;

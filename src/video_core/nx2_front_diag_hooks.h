@@ -21,6 +21,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_front_diag.h"
+#include "video_core/nx2_front_same.h"
 #include "video_core/nx2_profile.h"
 
 #ifdef _MSC_VER
@@ -61,6 +62,16 @@ inline bool On() {
         return ReadOn();
     }
     return value != 0;
+}
+
+/// EDEN_NX2_FRONT_DIAG_REGS=0: the register table off (Maxwell3D's front reads it once; its same
+/// value filter stays armed then).
+inline bool RegistersOn() {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_NX2_FRONT_DIAG_REGS");
+        return value == nullptr || value[0] != '0';
+    }();
+    return on;
 }
 
 /// Who a DmaPusher method call went to.
@@ -132,6 +143,9 @@ struct State {
     u64 macro_writes_sampled{};
     u64 macro_write_ticks{};
     ReadStats reads;
+    u64 indirect_lookups{}; ///< FrontRunMacro's indirect draw checks looked up
+    u64 indirect_decided{}; ///< ... for a macro decided already
+    FrontRuns runs;
 
     // Kept.
     Sampler sampler;
@@ -214,6 +228,9 @@ inline State& Window() {
         state.macro_writes_sampled = 0;
         state.macro_write_ticks = 0;
         state.reads = ReadStats{};
+        state.indirect_lookups = 0;
+        state.indirect_decided = 0;
+        state.runs = FrontRuns{};
         state.reset_programs.clear();
         state.last_program_known = false;
         // The translation shortcuts go stale with a remap: at most a window.
@@ -572,12 +589,14 @@ YUZU_NO_INLINE inline Timer MacroBegin(u32 start) {
     return StartTimer(state, MacroSampleBits);
 }
 
-/// ... and ended; `hle`: FrontIndirectDraw took it.
-YUZU_NO_INLINE inline void MacroEnd(const Timer& timer, u32 start, bool hle) {
+/// ... and ended; `hle`: FrontIndirectDraw took it; the JIT's `emits` and register `reads`.
+YUZU_NO_INLINE inline void MacroEnd(const Timer& timer, u32 start, bool hle, u32 emits, u32 reads) {
     State& state = GetState(); // MacroBegin took the window
     MacroTable::Entry& entry = state.macros.Find(start);
     ++entry.calls;
     entry.hle_calls += hle ? 1 : 0;
+    entry.emits += emits;
+    entry.reads += reads;
     if (timer.sampled) {
         const auto [exclusive, child] = StopTimer(timer);
         ++entry.sampled;
@@ -623,9 +642,72 @@ YUZU_NO_INLINE void TimedMacroWrite(const Write& write) {
     }
 }
 
-/// A 3D register write FrontWrite got: the value held already, not sent (On()).
-inline void NoteRegisterWrite(u32 method, bool same, bool skipped) {
-    Window().registers.Note(method, same, skipped);
+/// A 3D register write FrontWrite got: the value held already, not sent, a macro's (On()).
+inline void NoteRegisterWrite(u32 method, bool same, bool skipped, bool from_macro) {
+    Window().registers.Note(method, same, skipped, from_macro);
+}
+
+/// FrontRunMacro looked up whether a macro is NVN's indirect draw: `decided` already (On()).
+inline void NoteIndirectLookup(bool decided) {
+    State& state = Window();
+    ++state.indirect_lookups;
+    state.indirect_decided += decided ? 1 : 0;
+}
+
+/// A command header DmaPusher starts to Maxwell3D's front (FrontRuns::Note, On()).
+YUZU_NO_INLINE inline void NoteFrontRun(bool increase_once, bool macro, u32 words, bool in_list) {
+    Window().runs.Note(increase_once, macro, words, in_list);
+}
+
+/// EDEN_NX2_JIT_SAME's line, per profile window whether front diag is on or not.
+struct SameStats {
+    u64 window{};
+    u32 mode{};
+    u64 calls{};
+    u64 hits{};
+    std::array<u64, static_cast<size_t>(Nx2FrontSame::Disarm::Count)> calls_by{};
+    u64 mismatches{};
+    u64 missed{};
+};
+
+inline void LogSame(const SameStats& stats, u64 window_ns) {
+    namespace Same = Nx2FrontSame;
+    const double per_second = 1e9 / static_cast<double>(window_ns);
+    const auto rate = [per_second](u64 value) { return static_cast<double>(value) * per_second; };
+    const auto by = [&](Same::Disarm why) {
+        return rate(stats.calls_by[static_cast<size_t>(why)]);
+    };
+    LOG_INFO(HW_GPU,
+             "GPU thread front same filter per second: hits {:.0f}, disarmed calls {:.0f} (replay "
+             "{:.0f} / check {:.0f} / diag {:.0f} / gap {:.0f} / skip {:.0f}) of {:.0f}, verify "
+             "mismatch {}, verify missed {} | EDEN_NX2_JIT_SAME={}",
+             rate(stats.hits), rate(stats.calls - stats.calls_by[0]), by(Same::Disarm::Replay),
+             by(Same::Disarm::Check), by(Same::Disarm::Diag), by(Same::Disarm::Gap),
+             by(Same::Disarm::Skip), rate(stats.calls), stats.mismatches, stats.missed, stats.mode);
+}
+
+/// A front macro call with the filter ended (with the profile): its hits, why it was disarmed,
+/// its =2 mismatches and misses. A window is logged at the first call of a later one.
+YUZU_NO_INLINE inline void NoteSameCall(u32 mode, Nx2FrontSame::Disarm why, u64 hits,
+                                        u64 mismatches, u64 missed) {
+    static SameStats stats;
+    const u64 window = Nx2Profile::t_data.window_start;
+    if (window != stats.window) [[unlikely]] {
+        if (stats.window != 0 && window > stats.window && stats.calls != 0) {
+            // Report's windows last 10 s (a little more); longer, windows without calls followed.
+            constexpr u64 nominal = 10'000'000'000ULL;
+            const u64 length = window - stats.window;
+            LogSame(stats, length < nominal * 3 / 2 ? length : nominal);
+        }
+        stats = {};
+        stats.window = window;
+    }
+    stats.mode = mode;
+    ++stats.calls;
+    stats.hits += hits;
+    ++stats.calls_by[static_cast<size_t>(why)];
+    stats.mismatches += mismatches;
+    stats.missed += missed;
 }
 
 /// An MME DMA read of `words` words at `source` (On()), before its drain: what is pending of it,
@@ -806,16 +888,27 @@ inline void LogWindow(State& state, u64 window_ns, double ns_per_tick) {
         const char* kind = entry->hle_calls == 0               ? "J"
                            : entry->hle_calls == entry->calls ? "H"
                                                               : "JH";
-        top += fmt::format("{}{:#x} {} {:.0f} x {:.0f} ns (nested {:.0f} ns) dma {:.0f}",
+        const u64 jit_calls = entry->calls - entry->hle_calls;
+        const auto per_jit_call = [jit_calls](u64 value) {
+            return jit_calls != 0 ? static_cast<double>(value) / static_cast<double>(jit_calls)
+                                  : 0.0;
+        };
+        top += fmt::format("{}{:#x} {} {:.0f} x {:.0f} ns (nested {:.0f} ns) dma {:.0f} emit "
+                           "{:.1f} read {:.1f}",
                            top.empty() ? "" : ", ", entry->start, kind, rate(entry->calls),
-                           per_call, nested, rate(entry->dma_reads));
+                           per_call, nested, rate(entry->dma_reads), per_jit_call(entry->emits),
+                           per_jit_call(entry->reads));
     }
     LOG_INFO(HW_GPU,
              "GPU thread front macros per second: calls {:.0f} ({} starts; JIT {:.0f}, HLE {:.0f}, "
              "interpreter 0) taking {:.1f} ms exclusive, {:.1f} ms nested (sampled 1/{}) | first "
-             "16 (start kind calls x exclusive ns): {}",
+             "16 (start kind calls x exclusive ns, per JIT call emits and register reads): {} | "
+             "indirect draw checks looked up {:.0f}, decided already {:.1f}%",
              rate(calls), state.macros.Used(), rate(calls - hle), rate(hle), ms(ticks), ms(child),
-             1U << MacroSampleBits, top.empty() ? "-" : top);
+             1U << MacroSampleBits, top.empty() ? "-" : top, rate(state.indirect_lookups),
+             state.indirect_lookups != 0 ? 100.0 * static_cast<double>(state.indirect_decided) /
+                                               static_cast<double>(state.indirect_lookups)
+                                         : 0.0);
 
     // Sends.
     std::string sends;
@@ -838,23 +931,43 @@ inline void LogWindow(State& state, u64 window_ns, double ns_per_tick) {
                   static_cast<double>(state.macro_writes) /
                   static_cast<double>(state.macro_writes_sampled)
             : 0.0;
-    LOG_INFO(HW_GPU,
-             "GPU thread front sends per second: method calls {:.0f} taking {:.1f} ms ({}) | macro "
-             "writes {:.0f} taking {:.1f} ms (sampled 1/{}, nested zones out)",
-             rate(send_calls), ms(send_ticks), sends, rate(state.macro_writes),
-             ms(macro_write_ticks), 1U << SendSampleBits);
-
-    // Register writes.
-    const auto totals = state.registers.Totals();
-    std::string same;
-    for (const auto& row : state.registers.Top(16)) {
-        same += fmt::format("{}{:#x} {:.0f}/{:.0f} ({:.0f} not sent)", same.empty() ? "" : ", ",
-                            row.method, rate(row.same), rate(row.total), rate(row.skipped));
+    const FrontRuns& runs = state.runs;
+    std::string run_lengths;
+    for (const u64 count : runs.state_runs) {
+        run_lengths += fmt::format("{}{:.0f}", run_lengths.empty() ? "" : "/", rate(count));
     }
     LOG_INFO(HW_GPU,
-             "GPU thread front register writes per second: {:.0f} ({:.0f} same value, {:.0f} not "
-             "sent) | same value by method (first 16, same/all): {}",
-             rate(totals[0]), rate(totals[1]), rate(totals[2]), same.empty() ? "-" : same);
+             "GPU thread front sends per second: method calls {:.0f} taking {:.1f} ms ({}) | macro "
+             "writes {:.0f} taking {:.1f} ms (sampled 1/{}, nested zones out) | 3D front "
+             "increasing runs (1/2/3-4/5-8/more words): {} ({:.0f} words), into macros {:.0f} | "
+             "increase once macro calls: one send {:.0f}, two sends {:.0f}, split {:.0f}; state "
+             "{:.0f}",
+             rate(send_calls), ms(send_ticks), sends, rate(state.macro_writes),
+             ms(macro_write_ticks), 1U << SendSampleBits, run_lengths, rate(runs.state_words),
+             rate(runs.macro_runs), rate(runs.once_one), rate(runs.once_two),
+             rate(runs.once_split), rate(runs.once_state));
+
+    // Register writes.
+    if (!RegistersOn()) {
+        LOG_INFO(HW_GPU,
+                 "GPU thread front register writes per second: off (EDEN_NX2_FRONT_DIAG_REGS=0)");
+    } else {
+        const auto totals = state.registers.Totals();
+        std::string same;
+        for (const auto& row : state.registers.Top(16)) {
+            same += fmt::format("{}{:#x} {:.0f}/{:.0f} ({:.0f} not sent)", same.empty() ? "" : ", ",
+                                row.method, rate(row.same), rate(row.total), rate(row.skipped));
+        }
+        const auto& pushed = state.registers.Origin(false);
+        const auto& macro = state.registers.Origin(true);
+        LOG_INFO(HW_GPU,
+                 "GPU thread front register writes per second: {:.0f} ({:.0f} same value, {:.0f} "
+                 "not sent) | same value by method (first 16, same/all): {} | by origin (all/same "
+                 "value/not sent): macro {:.0f}/{:.0f}/{:.0f}, push {:.0f}/{:.0f}/{:.0f}",
+                 rate(totals[0]), rate(totals[1]), rate(totals[2]), same.empty() ? "-" : same,
+                 rate(macro[0]), rate(macro[1]), rate(macro[2]), rate(pushed[0]), rate(pushed[1]),
+                 rate(pushed[2]));
+    }
 
     // Drains.
     std::string drains;
