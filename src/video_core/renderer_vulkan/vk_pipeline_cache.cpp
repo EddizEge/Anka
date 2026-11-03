@@ -120,7 +120,9 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 18;
+// The disk cache stores lowered native code, so lowering changes need a new version. Ours count
+// from 1000 + upstream's: 2.5.0's 19 is another file layout and must never be read here.
+constexpr u32 CACHE_VERSION = 1018;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};

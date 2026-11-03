@@ -54,7 +54,8 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 15;
+// Lowered native code is cached too; see vk_pipeline_cache.cpp for the 1000 offset.
+constexpr u32 CACHE_VERSION = 1015;
 
 template <typename Container>
 auto MakeSpan(Container& container) {
