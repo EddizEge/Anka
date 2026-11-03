@@ -39,6 +39,12 @@ public:
     TuringMacroJit() = default;
     explicit TuringMacroJit(SameFilter same_filter_) : same_filter{same_filter_} {}
 
+    /// Emits reload the FIFO (params) only after `method`, the only one that appends to it
+    /// (EDEN_NX2_FRONT_MACRO_LEAN: MME_DMA_READ_FIFOED on Maxwell3D's front); else after each.
+    void ReloadFifoOnlyAfter(Word method) {
+        fifo_method = method;
+    }
+
     struct State {
         std::array<Word, 24> regs;
         Word carry;
@@ -142,9 +148,10 @@ public:
         // A filtered program reads `same` at each emit, and Verify's hits call `verify`.
         DEBUG_ASSERT(program->filter == SameFilter::Off || same != nullptr);
         DEBUG_ASSERT((program->filter != SameFilter::Verify || !std::is_same_v<Verify, NoVerify>));
-        Thunks<Read, Emit, Verify> thunks{read, emit, verify};
+        Thunks<Read, Emit, Verify> thunks{read, emit, verify, fifo_method};
         state.user = &thunks;
-        state.emit = &Thunks<Read, Emit, Verify>::CallEmit;
+        state.emit = fifo_method != AnyMethod ? &Thunks<Read, Emit, Verify>::CallEmitFifoMethod
+                                              : &Thunks<Read, Emit, Verify>::CallEmit;
         state.read = &Thunks<Read, Emit, Verify>::CallRead;
         if constexpr (std::is_same_v<Verify, NoVerify>) {
             state.emit_verify = nullptr;
@@ -159,16 +166,30 @@ public:
     }
 
 private:
+    static constexpr Word AnyMethod = ~Word{0};
+
     template <typename Read, typename Emit, typename Verify>
     struct Thunks {
         Read& read;
         Emit& emit;
         Verify& verify;
+        Word fifo_method;
         static bool CallEmit(State* state, Word method, Word value) {
             const bool ok = static_cast<Thunks*>(state->user)->emit(method, value);
             // MME_DMA_READ_FIFOED appends to the FIFO from inside the emit.
             state->params = state->fifo->data();
             state->params_size = static_cast<Word>(state->fifo->size());
+            return ok;
+        }
+        static bool CallEmitFifoMethod(State* state, Word method, Word value) {
+            auto* const thunks = static_cast<Thunks*>(state->user);
+            const bool ok = thunks->emit(method, value);
+            if (method == thunks->fifo_method) {
+                state->params = state->fifo->data();
+                state->params_size = static_cast<Word>(state->fifo->size());
+            }
+            DEBUG_ASSERT(state->params == state->fifo->data() &&
+                         state->params_size == state->fifo->size());
             return ok;
         }
         static bool CallEmitVerify(State* state, Word method, Word value) {
@@ -741,6 +762,7 @@ private:
     std::unique_ptr<Program> program;
     std::uint64_t compiled_generation{~std::uint64_t{0}};
     SameFilter same_filter{SameFilter::Off};
+    Word fifo_method{AnyMethod};
 
 public:
     /// The compiled code (tests: with the filter off its bytes stay as they were).

@@ -1424,6 +1424,32 @@ struct Maxwell3D::FrontState {
 #ifdef ARCHITECTURE_x86_64
     std::unique_ptr<TuringMacroJit> front_jit;
 #endif
+    /// EDEN_NX2_FRONT_MACRO_LEAN=1: HleIndirectEnabled, FrontVerifyEnabled and
+    /// IndirectBatchEnabled read once (no guarded statics per call), indirect_checks' decided
+    /// entries found without a lookup (decided_checks, direct mapped by start), front_jit's emits
+    /// reloading the FIFO only after MME_DMA_READ_FIFOED.
+    bool macro_lean{};
+    bool hle_indirect{};
+    bool front_verify{};
+    bool indirect_batch{};
+    struct DecidedCheck {
+        u32 key{}; ///< The macro's start + 1 (0: none; a start of ~0 is never kept)
+        bool indirect{}; ///< NVN's indexed indirect draw (else not)
+    };
+    std::array<DecidedCheck, 256> decided_checks{};
+    DecidedCheck& Decided(u32 start) {
+        return decided_checks[start % decided_checks.size()];
+    }
+    /// Whether `slot` holds `start`'s verdict.
+    static bool Holds(const DecidedCheck& slot, u32 start) {
+        return slot.key != 0 && slot.key == start + 1;
+    }
+    /// Keeps `entry`'s verdict for `start` when it is decided.
+    void NoteDecided(u32 start, const IndirectCheck& entry) {
+        if (start != ~0U && (entry.failed || entry.matches >= IndirectCheck::Needed)) {
+            Decided(start) = {start + 1, !entry.failed};
+        }
+    }
 };
 
 // What nx2_front_same.h (and the JIT's filter) assume of the registers.
@@ -1651,14 +1677,30 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
                                           : TuringMacroJit::SameFilter::Verify);
             }
 #endif
-            if (front->lean || !front->diag_regs || front->same.mode != 0) {
+            const char* macro_lean = std::getenv("EDEN_NX2_FRONT_MACRO_LEAN");
+            front->macro_lean = macro_lean != nullptr && macro_lean[0] == '1';
+            front->hle_indirect = HleIndirectEnabled();
+            front->front_verify = FrontVerifyEnabled();
+            front->indirect_batch = IndirectBatchEnabled();
+            bool fifo_narrowed = false;
+#ifdef ARCHITECTURE_x86_64
+            if (front->macro_lean && front->front_jit) {
+                front->front_jit->ReloadFifoOnlyAfter(Same::FifoAppend);
+                fifo_narrowed = true;
+            }
+#endif
+            if (front->lean || !front->diag_regs || front->same.mode != 0 || front->macro_lean) {
                 LOG_INFO(HW_GPU,
                          "Split front: EDEN_NX2_JIT_SAME={} (1: the macro JIT drops state writes "
                          "the front would not send, 2: checks that against FrontWrite, 3: drops "
                          "them in C++), EDEN_NX2_PROFILE_LEAN={} (profile counts batched, macro "
                          "time within push, filter armed after indirect draws), "
-                         "EDEN_NX2_FRONT_DIAG_REGS={}",
-                         front->same.mode, front->lean ? 1 : 0, front->diag_regs ? 1 : 0);
+                         "EDEN_NX2_FRONT_DIAG_REGS={}, EDEN_NX2_FRONT_MACRO_LEAN={} (switches "
+                         "read once, decided indirect checks without a lookup; the front JIT's "
+                         "FIFO reloaded only after MME_DMA_READ_FIFOED: {})",
+                         front->same.mode, front->lean ? 1 : 0, front->diag_regs ? 1 : 0,
+                         front->macro_lean ? 1 : 0,
+                         fifo_narrowed ? "yes" : "no, EDEN_NX2_JIT_SAME=1/2 only");
             }
         }
         front->executing_macro = executing_macro;
@@ -1930,14 +1972,23 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     // writes on its first calls with one instance.
     if (fs.indirect_generation != engine.native_code_generation) {
         fs.indirect_checks.clear();
+        if (fs.macro_lean) {
+            fs.decided_checks.fill({});
+        }
         fs.indirect_generation = engine.native_code_generation;
     }
     FrontState::IndirectCheck* check = nullptr;
-    if (HleIndirectEnabled() && fs.parameters.size() == 6 && fs.parameters[2] == 1) {
-        auto& entry = fs.indirect_checks[start];
-        if (!entry.failed && entry.matches < FrontState::IndirectCheck::Needed) {
-            check = &entry;
-            fs.checked_writes.clear();
+    if ((fs.macro_lean ? fs.hle_indirect : HleIndirectEnabled()) && fs.parameters.size() == 6 &&
+        fs.parameters[2] == 1) {
+        if (!fs.macro_lean || !FrontState::Holds(fs.Decided(start), start)) {
+            auto& entry = fs.indirect_checks[start];
+            if (!entry.failed && entry.matches < FrontState::IndirectCheck::Needed) {
+                check = &entry;
+                fs.checked_writes.clear();
+            } else if (fs.macro_lean) {
+                // Decided for this code generation: no lookup from now on.
+                fs.NoteDecided(start, entry);
+            }
         }
         if (diag) [[unlikely]] {
             Diag::NoteIndirectLookup(check == nullptr);
@@ -2090,7 +2141,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             Diag::NoteDeferredDraw(false, false, true);
         }
     }
-    if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
+    if ((fs.macro_lean ? fs.front_verify : FrontVerifyEnabled()) && (++fs.calls & 4095) == 0)
+        [[unlikely]] {
         FrontVerify(split, fs);
     }
     if (fs.lean) [[unlikely]] {
@@ -2217,7 +2269,20 @@ bool Maxwell3D::FrontTakeIndirectRecord(Core::System& system, VideoCommon::GpuSp
     const auto positions = GetNativeMacroPositions();
     const u32 start =
         positions[((fs.executing_macro - MacroRegistersStart) >> 1) % positions.size()];
+    if (fs.macro_lean) {
+        if (const auto& decided = fs.Decided(start); FrontState::Holds(decided, start)) {
+            if (!decided.indirect) {
+                return false;
+            }
+            fs.indirect_record = record;
+            return true;
+        }
+    }
     const auto it = fs.indirect_checks.find(start);
+    if (fs.macro_lean && it != fs.indirect_checks.end()) {
+        // The decided indirect draw's calls are taken here, not in FrontRunMacro's check.
+        fs.NoteDecided(start, it->second);
+    }
     if (it == fs.indirect_checks.end() || it->second.failed ||
         it->second.matches < FrontState::IndirectCheck::Needed) {
         return false;
@@ -2240,7 +2305,8 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
     // registers and c[0][0x640..0x647] to the same values, and the draws in between read their
     // base vertex and instance from the record instead (BackDrawIndexedIndirect).
     auto& held = fs.held_indirect;
-    if (held.payload != nullptr && IndirectBatchEnabled() && held.session == split.Session() &&
+    const bool batch = fs.macro_lean ? fs.indirect_batch : IndirectBatchEnabled();
+    if (held.payload != nullptr && batch && held.session == split.Session() &&
         held.end == split.WritePosition() && !split.Published(held.start)) {
         IndirectDrawCall call;
         std::memcpy(&call, held.payload, sizeof(call));
@@ -2280,7 +2346,7 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
                 Profile::Note(Profile::Histogram::IndirectGroupStride, call.stride);
             }
         }
-    } else if (Profile::Enabled() && IndirectBatchEnabled()) [[unlikely]] {
+    } else if (Profile::Enabled() && batch) [[unlikely]] {
         if (held.payload == nullptr) {
             Profile::Add(Profile::Counter::IndirectNoPrevious, 1);
         } else if (held.session != split.Session()) {

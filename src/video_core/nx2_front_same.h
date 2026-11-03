@@ -23,6 +23,9 @@ namespace VideoCommon::Nx2FrontSame {
 inline constexpr u32 NumRegs = 0xE00; ///< Maxwell3D::Regs::NUM_REGS (the macro range starts there)
 inline constexpr u32 DmaRead = 0x157;
 inline constexpr u32 DmaReadFifoed = 0x158;
+/// The only method whose emit appends to the macro's FIFO (Maxwell3D::FrontDmaRead):
+/// EDEN_NX2_FRONT_MACRO_LEAN's front JIT reloads the FIFO after it alone.
+inline constexpr u32 FifoAppend = DmaReadFifoed;
 
 /// Maxwell3D::Regs::ShadowRamControl. Any other value behaves as Passthrough (FrontWrite).
 inline constexpr u32 Track = 0;

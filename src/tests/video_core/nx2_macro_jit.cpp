@@ -510,7 +510,9 @@ struct Outcome {
     std::uint64_t missed{};
 };
 
-enum class Variant { Reference, Interpreter, Skip, Verify, Cpp };
+/// SkipFifo, VerifyFifo: as EDEN_NX2_FRONT_MACRO_LEAN's front JIT, the FIFO reloaded only after
+/// Same::FifoAppend.
+enum class Variant { Reference, Interpreter, Skip, Verify, Cpp, SkipFifo, VerifyFifo };
 
 struct Compiled {
     const Program* program;
@@ -518,6 +520,8 @@ struct Compiled {
     Jit off;
     Jit skip{Jit::SameFilter::Skip};
     Jit verify{Jit::SameFilter::Verify};
+    Jit skip_fifo{Jit::SameFilter::Skip};
+    Jit verify_fifo{Jit::SameFilter::Verify};
 };
 
 std::uint64_t StateDigest(const Front& front, const std::vector<Word>& fifo) {
@@ -557,7 +561,8 @@ Outcome Run(Compiled& compiled, const Setup& setup, const std::vector<std::uint8
     front.dram = &dram;
     front.fifo = &fifo;
     Same::Filter filter;
-    filter.mode = variant == Variant::Verify ? 2 : variant == Variant::Cpp ? 3 : 1;
+    const bool verifies = variant == Variant::Verify || variant == Variant::VerifyFifo;
+    filter.mode = verifies ? 2 : variant == Variant::Cpp ? 3 : 1;
     filter.Begin(table.data(), setup.skip_same, setup.control, setup.has_check,
                  setup.diag_regs_on, setup.profile_on, setup.gap_methods, front.regs.data(),
                  front.shadow.data());
@@ -584,16 +589,20 @@ Outcome Run(Compiled& compiled, const Setup& setup, const std::vector<std::uint8
         outcome.error = result.error;
         break;
     }
-    case Variant::Skip: {
-        const auto result = compiled.skip.Execute(start, fifo, ram, read, emit, &filter.ctx);
+    case Variant::Skip:
+    case Variant::SkipFifo: {
+        Jit& jit = variant == Variant::Skip ? compiled.skip : compiled.skip_fifo;
+        const auto result = jit.Execute(start, fifo, ram, read, emit, &filter.ctx);
         outcome.success = result.success;
         outcome.consumed = result.consumed;
         outcome.error = result.error;
         break;
     }
-    case Variant::Verify: {
+    case Variant::Verify:
+    case Variant::VerifyFifo: {
         // As FrontRunMacro: a write the JIT would drop goes through verify, the rest through
         // the emit, both to FrontWrite.
+        Jit& jit = variant == Variant::Verify ? compiled.verify : compiled.verify_fifo;
         const auto checked = [&](Word method, Word value) {
             const bool in_scope = Same::InScope(filter.ctx, method);
             filter.sent = false;
@@ -611,8 +620,7 @@ Outcome Run(Compiled& compiled, const Setup& setup, const std::vector<std::uint8
             }
             return ok;
         };
-        const auto result =
-            compiled.verify.Execute(start, fifo, ram, read, checked, &filter.ctx, verify);
+        const auto result = jit.Execute(start, fifo, ram, read, checked, &filter.ctx, verify);
         outcome.success = result.success;
         outcome.consumed = result.consumed;
         outcome.error = result.error;
@@ -697,6 +705,10 @@ std::vector<std::unique_ptr<Compiled>> CompileAll(const std::vector<Program>& pr
         compiled->off.Prepare(compiled->code, 1);
         compiled->skip.Prepare(compiled->code, 1);
         compiled->verify.Prepare(compiled->code, 1);
+        compiled->skip_fifo.ReloadFifoOnlyAfter(Same::FifoAppend);
+        compiled->verify_fifo.ReloadFifoOnlyAfter(Same::FifoAppend);
+        compiled->skip_fifo.Prepare(compiled->code, 1);
+        compiled->verify_fifo.Prepare(compiled->code, 1);
         all.push_back(std::move(compiled));
     }
     return all;
@@ -744,10 +756,18 @@ void RunSeeds(std::uint32_t first, std::uint32_t count, std::uint64_t& total_hit
             const Outcome skip = Run(*entry, setup, table, Variant::Skip);
             const Outcome verify = Run(*entry, setup, table, Variant::Verify);
             const Outcome cpp = Run(*entry, setup, table, Variant::Cpp);
+            const Outcome skip_fifo = Run(*entry, setup, table, Variant::SkipFifo);
+            const Outcome verify_fifo = Run(*entry, setup, table, Variant::VerifyFifo);
             RequireSame(reference, interpreter);
             RequireSame(reference, skip);
             RequireSame(reference, verify);
             RequireSame(reference, cpp);
+            RequireSame(reference, skip_fifo);
+            RequireSame(reference, verify_fifo);
+            REQUIRE(skip_fifo.hits == skip.hits);
+            REQUIRE(verify_fifo.hits == verify.hits);
+            REQUIRE(verify_fifo.mismatches == 0);
+            REQUIRE(verify_fifo.missed == 0);
             // The filter drops exactly the early returns it looks at; none is left to FrontWrite.
             REQUIRE(skip.hits == reference.dropped_in_scope);
             REQUIRE(skip.dropped_in_scope == 0);
@@ -789,6 +809,15 @@ TEST_CASE("Macro JIT code is unchanged with the filter off", "[video_core][nx2_m
         const auto [skip_size, skip_digest] = Digest(skip, programs[i].code.size());
         REQUIRE(skip_digest != digest);
         REQUIRE((skip_size >= size + 32) == emits);
+        // EDEN_NX2_FRONT_MACRO_LEAN picks the emit thunk only: the code is the same.
+        Jit off_fifo;
+        off_fifo.ReloadFifoOnlyAfter(Same::FifoAppend);
+        off_fifo.Prepare(code, 1);
+        Jit skip_fifo{Jit::SameFilter::Skip};
+        skip_fifo.ReloadFifoOnlyAfter(Same::FifoAppend);
+        skip_fifo.Prepare(code, 1);
+        REQUIRE(Digest(off_fifo, programs[i].code.size()) == std::pair{size, digest});
+        REQUIRE(Digest(skip_fifo, programs[i].code.size()) == std::pair{skip_size, skip_digest});
     }
 }
 
@@ -892,6 +921,15 @@ TEST_CASE("Macro JIT filter: hand checks", "[video_core][nx2_macro_jit]") {
     REQUIRE(skip.consumed == 8);
     REQUIRE(skip.sent.size() == 2 + 7);
     REQUIRE(skip.sent.back() == std::pair<Word, Word>{0x3c6, 0x1000 * 31 + 5 * 7 + 1});
+    // The FIFO grows (and moves: Run shrinks it to fit) in the emit of MME_DMA_READ_FIFOED; the
+    // narrowed thunk reloads it there.
+    for (const Variant variant : {Variant::SkipFifo, Variant::VerifyFifo}) {
+        const auto narrowed = Run(find("dma fifoed"), setup, table, variant);
+        REQUIRE(narrowed.success);
+        REQUIRE(narrowed.consumed == 8);
+        REQUIRE(narrowed.sent == skip.sent);
+        REQUIRE(narrowed.state == skip.state);
+    }
 }
 
 TEST_CASE("Macro JIT filter against the JIT, the interpreter and FrontWrite (seeds)",
