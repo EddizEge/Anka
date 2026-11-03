@@ -7,6 +7,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <optional>
 
 namespace Nx2AutoScript {
@@ -69,36 +70,62 @@ std::optional<double> Number(std::string_view word) {
     return value;
 }
 
-// Returns an error message, or an empty string when the line was taken.
-std::string ParseLine(const std::vector<std::string_view>& words, Script& script,
-                      bool& anchor_set) {
+std::optional<Anchor> AnchorNamed(std::string_view name) {
+    if (SameText(name, "boot")) {
+        return Anchor::Boot;
+    }
+    if (SameText(name, "present")) {
+        return Anchor::Present;
+    }
+    if (SameText(name, "album")) {
+        return Anchor::Album;
+    }
+    return std::nullopt;
+}
+
+// Returns an error message, or an empty string when the line was taken. A press without an '@'
+// anchor goes on the file's clock: its index is added to file_clock, for once the file is read.
+std::string ParseLine(std::vector<std::string_view> words, Script& script, bool& anchor_set,
+                      std::vector<size_t>& file_clock) {
     if (SameText(words[0], "anchor")) {
         if (words.size() != 2) {
             return "expected 'anchor boot', 'anchor present' or 'anchor album'";
         }
-        Anchor anchor;
-        if (SameText(words[1], "boot")) {
-            anchor = Anchor::Boot;
-        } else if (SameText(words[1], "present")) {
-            anchor = Anchor::Present;
-        } else if (SameText(words[1], "album")) {
-            anchor = Anchor::Album;
-        } else {
+        const auto anchor = AnchorNamed(words[1]);
+        if (!anchor) {
             return "unknown anchor (boot, present or album)";
         }
         if (anchor_set) {
             return "a second anchor line";
         }
         anchor_set = true;
-        script.anchor = anchor;
+        script.anchor = *anchor;
         return {};
+    }
+    if (SameText(words[0], "until")) {
+        if (words.size() != 2 || !SameText(words[1], "album")) {
+            return "expected 'until album'";
+        }
+        script.until_album = true;
+        return {};
+    }
+    std::optional<Anchor> own_anchor;
+    if (words[0].starts_with('@')) {
+        own_anchor = AnchorNamed(words[0].substr(1));
+        if (!own_anchor) {
+            return "unknown anchor after '@' (boot, present or album)";
+        }
+        words.erase(words.begin());
+        if (words.empty()) {
+            return "expected a press after the anchor";
+        }
     }
     const auto start = Number(words[0]);
     if (!start || *start < 0.0) {
         return "the time is not a number of seconds >= 0";
     }
-    Event event{.start = *start, .duration = 0.0, .stick = false, .id = 0, .x = 0.0f, .y = 0.0f,
-                .name = {}};
+    Event event{.anchor = own_anchor.value_or(Anchor::Present), .start = *start, .duration = 0.0,
+                .stick = false, .id = 0, .x = 0.0f, .y = 0.0f, .name = {}};
     size_t duration_word;
     if (words.size() >= 2 && SameText(words[1], "stick")) {
         if (words.size() != 6) {
@@ -140,6 +167,9 @@ std::string ParseLine(const std::vector<std::string_view>& words, Script& script
         return "the held time is not a number of seconds > 0";
     }
     event.duration = *duration;
+    if (!own_anchor) {
+        file_clock.push_back(script.events.size());
+    }
     script.events.push_back(std::move(event));
     return {};
 }
@@ -149,6 +179,7 @@ std::string ParseLine(const std::vector<std::string_view>& words, Script& script
 Script ParseScript(std::string_view text) {
     Script script;
     bool anchor_set = false;
+    std::vector<size_t> file_clock;
     size_t line_number = 0;
     size_t begin = 0;
     while (begin <= text.size()) {
@@ -163,7 +194,7 @@ Script ParseScript(std::string_view text) {
         if (words.empty()) {
             continue;
         }
-        if (std::string error = ParseLine(words, script, anchor_set); !error.empty()) {
+        if (std::string error = ParseLine(words, script, anchor_set, file_clock); !error.empty()) {
             std::string shown{line};
             while (!shown.empty() && (shown.back() == ' ' || shown.back() == '\t' ||
                                       shown.back() == '\r')) {
@@ -173,14 +204,20 @@ Script ParseScript(std::string_view text) {
                                     shown + "'");
         }
     }
+    // The anchor line may come after the presses.
+    for (const size_t i : file_clock) {
+        script.events[i].anchor = script.anchor;
+    }
     return script;
 }
 
-std::vector<Action> Schedule(const Script& script) {
+std::vector<Action> Schedule(const Script& script, Anchor anchor) {
     std::vector<Action> actions;
-    actions.reserve(script.events.size() * 2);
     for (size_t i = 0; i < script.events.size(); ++i) {
         const Event& event = script.events[i];
+        if (event.anchor != anchor) {
+            continue;
+        }
         actions.push_back({event.start, true, i});
         actions.push_back({event.start + event.duration, false, i});
     }
@@ -191,6 +228,28 @@ std::vector<Action> Schedule(const Script& script) {
         return !a.down && b.down;
     });
     return actions;
+}
+
+size_t DropUnstarted(std::vector<Action>& actions, size_t next) {
+    next = std::min(next, actions.size());
+    std::vector<bool> dropped;
+    size_t count = 0;
+    for (size_t i = next; i < actions.size(); ++i) {
+        if (actions[i].down) {
+            if (actions[i].event >= dropped.size()) {
+                dropped.resize(actions[i].event + 1);
+            }
+            dropped[actions[i].event] = true;
+            ++count;
+        }
+    }
+    const auto first = actions.begin() + static_cast<std::ptrdiff_t>(next);
+    actions.erase(std::remove_if(first, actions.end(),
+                                 [&](const Action& action) {
+                                     return action.event < dropped.size() && dropped[action.event];
+                                 }),
+                  actions.end());
+    return count;
 }
 
 ExitSpec ParseExit(std::string_view text) {
@@ -205,17 +264,12 @@ ExitSpec ParseExit(std::string_view text) {
     }
     std::string_view seconds = words[0];
     if (const size_t at = seconds.find('@'); at != std::string_view::npos) {
-        const std::string_view anchor = seconds.substr(at + 1);
-        if (SameText(anchor, "boot")) {
-            spec.anchor = Anchor::Boot;
-        } else if (SameText(anchor, "present")) {
-            spec.anchor = Anchor::Present;
-        } else if (SameText(anchor, "album")) {
-            spec.anchor = Anchor::Album;
-        } else {
+        const auto anchor = AnchorNamed(seconds.substr(at + 1));
+        if (!anchor) {
             spec.error = "unknown anchor after '@' (boot, present or album)";
             return spec;
         }
+        spec.anchor = *anchor;
         seconds = seconds.substr(0, at);
     }
     const auto value = Number(seconds);

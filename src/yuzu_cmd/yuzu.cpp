@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <iterator>
 #include <fstream>
@@ -495,13 +497,16 @@ static_assert(int(VirtualButton::ButtonA) == 0 && int(VirtualButton::ButtonY) ==
                   int(VirtualButton::ButtonDown) == 15,
               "nx2_auto_script.cpp key ids");
 
+constexpr std::array Clocks{Anchor::Boot, Anchor::Present, Anchor::Album};
+
 struct AutoRun {
     bool active = false;
     Nx2AutoScript::Script script;
     Nx2AutoScript::ExitSpec exit;
     bool exiting = false;
-    std::vector<Nx2AutoScript::Action> actions;
-    size_t next = 0;
+    // One schedule and cursor per clock, by Anchor value.
+    std::array<std::vector<Nx2AutoScript::Action>, Clocks.size()> actions;
+    std::array<size_t, Clocks.size()> next{};
     bool bound = false;
     size_t port = 0;
     std::chrono::steady_clock::time_point boot;
@@ -544,17 +549,30 @@ static void StartAutoRun() {
     for (const std::string& error : g_auto.script.errors) {
         LOG_ERROR(Frontend, "nx2 auto input: {}: {} (skipped)", path, error);
     }
-    g_auto.actions = Nx2AutoScript::Schedule(g_auto.script);
-    LOG_INFO(Frontend, "nx2 auto input: {} presses from {}, anchor {}, {} bad lines",
-             g_auto.script.events.size(), path, Nx2AutoScript::AnchorName(g_auto.script.anchor),
-             g_auto.script.errors.size());
+    for (const Anchor clock : Clocks) {
+        g_auto.actions[size_t(clock)] = Nx2AutoScript::Schedule(g_auto.script, clock);
+    }
+    LOG_INFO(Frontend,
+             "nx2 auto input: {} presses from {} ({} after boot, {} after present, {} after album; "
+             "file anchor {}{}), {} bad lines",
+             g_auto.script.events.size(), path, g_auto.actions[size_t(Anchor::Boot)].size() / 2,
+             g_auto.actions[size_t(Anchor::Present)].size() / 2,
+             g_auto.actions[size_t(Anchor::Album)].size() / 2,
+             Nx2AutoScript::AnchorName(g_auto.script.anchor),
+             g_auto.script.until_album ? ", until album" : "", g_auto.script.errors.size());
+}
+
+static void ClearAutoInput() {
+    for (auto& actions : g_auto.actions) {
+        actions.clear();
+    }
 }
 
 static void BindAutoInput(SdlState& state) {
     g_auto.bound = true;
     if (state.input_subsystem.GetVirtualGamepad() == nullptr) {
         LOG_ERROR(Frontend, "nx2 auto input: no virtual gamepad engine, the script is not run");
-        g_auto.actions.clear();
+        ClearAutoInput();
         return;
     }
     constexpr size_t HandheldPort = Service::HID::NpadIdTypeToIndex(Core::HID::NpadIdType::Handheld);
@@ -584,7 +602,7 @@ static void BindAutoInput(SdlState& state) {
     if (player1 == nullptr || !player1->IsConnected()) {
         LOG_ERROR(Frontend,
                   "nx2 auto input: could not connect player 1, the script's presses reach no controller");
-        g_auto.actions.clear();
+        ClearAutoInput();
         return;
     }
     LOG_INFO(Frontend,
@@ -621,6 +639,15 @@ static bool RunAutoInput(SdlState& state) {
         g_auto.first_album = now;
         LOG_INFO(Frontend, "nx2 auto: first album orientation call {:.2f} s after start-up (present #{})",
                  std::chrono::duration<double>(now - g_auto.boot).count(), presents);
+        if (g_auto.script.until_album) {
+            size_t dropped = 0;
+            for (const Anchor clock : {Anchor::Boot, Anchor::Present}) {
+                dropped += Nx2AutoScript::DropUnstarted(g_auto.actions[size_t(clock)],
+                                                        g_auto.next[size_t(clock)]);
+            }
+            LOG_INFO(Frontend, "nx2 auto input: until album: dropped {} presses that had not started",
+                     dropped);
+        }
     }
     if (g_auto.exit.enabled && !g_auto.exiting) {
         const auto elapsed = AutoSeconds(g_auto.exit.anchor, now);
@@ -633,28 +660,36 @@ static bool RunAutoInput(SdlState& state) {
     if (g_auto.exiting) {
         return true;
     }
-    if (g_auto.next >= g_auto.actions.size()) {
+    const auto pending = [](Anchor clock) {
+        return g_auto.next[size_t(clock)] < g_auto.actions[size_t(clock)].size();
+    };
+    if (std::none_of(Clocks.begin(), Clocks.end(), pending)) {
         return false;
     }
     if (!g_auto.bound) {
         BindAutoInput(state);
     }
     auto* const pad = state.input_subsystem.GetVirtualGamepad();
-    const auto elapsed = AutoSeconds(g_auto.script.anchor, now);
-    while (elapsed && g_auto.next < g_auto.actions.size() &&
-           g_auto.actions[g_auto.next].time <= *elapsed) {
-        const Nx2AutoScript::Action& action = g_auto.actions[g_auto.next++];
-        const Nx2AutoScript::Event& event = g_auto.script.events[action.event];
-        if (event.stick) {
-            const float x = action.down ? event.x : 0.0f;
-            const float y = action.down ? event.y : 0.0f;
-            pad->SetStickPosition(g_auto.port, event.id, x, y);
-            LOG_INFO(Frontend, "nx2 auto input: t={:.2f} s (present #{}) {} {} ({:.2f}, {:.2f})",
-                     *elapsed, presents, event.name, action.down ? "down" : "up", x, y);
-        } else {
-            pad->SetButtonState(g_auto.port, event.id, action.down);
-            LOG_INFO(Frontend, "nx2 auto input: t={:.2f} s (present #{}) {} {}", *elapsed,
-                     presents, event.name, action.down ? "down" : "up");
+    for (const Anchor clock : Clocks) {
+        const auto& actions = g_auto.actions[size_t(clock)];
+        size_t& next = g_auto.next[size_t(clock)];
+        const auto elapsed = AutoSeconds(clock, now);
+        while (elapsed && next < actions.size() && actions[next].time <= *elapsed) {
+            const Nx2AutoScript::Action& action = actions[next++];
+            const Nx2AutoScript::Event& event = g_auto.script.events[action.event];
+            const char* const anchor = Nx2AutoScript::AnchorName(clock);
+            if (event.stick) {
+                const float x = action.down ? event.x : 0.0f;
+                const float y = action.down ? event.y : 0.0f;
+                pad->SetStickPosition(g_auto.port, event.id, x, y);
+                LOG_INFO(Frontend,
+                         "nx2 auto input: t={:.2f} s after {} (present #{}) {} {} ({:.2f}, {:.2f})",
+                         *elapsed, anchor, presents, event.name, action.down ? "down" : "up", x, y);
+            } else {
+                pad->SetButtonState(g_auto.port, event.id, action.down);
+                LOG_INFO(Frontend, "nx2 auto input: t={:.2f} s after {} (present #{}) {} {}",
+                         *elapsed, anchor, presents, event.name, action.down ? "down" : "up");
+            }
         }
     }
     return false;

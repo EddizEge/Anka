@@ -4,6 +4,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -94,12 +95,82 @@ TEST_CASE("Nx2AutoScript: anchors", "[yuzu_cmd]") {
     REQUIRE(bad.errors.size() == 3);
 }
 
+TEST_CASE("Nx2AutoScript: per line anchors and until album", "[yuzu_cmd]") {
+    const Script script = ParseScript("@album 60 stick R 1 0 2\n"
+                                      "4 A 0.3\n"
+                                      "anchor boot\n" // also for the press above
+                                      "@PRESENT 7 A 0.3\n"
+                                      "@boot 1 B 1\n"
+                                      "until Album\n");
+    REQUIRE(script.errors.empty());
+    REQUIRE(script.anchor == Anchor::Boot);
+    REQUIRE(script.until_album);
+    REQUIRE(script.events.size() == 4);
+    REQUIRE((script.events[0].anchor == Anchor::Album && script.events[0].stick &&
+             script.events[0].start == 60.0 && script.events[0].duration == 2.0));
+    REQUIRE((script.events[1].anchor == Anchor::Boot && script.events[1].start == 4.0));
+    REQUIRE((script.events[2].anchor == Anchor::Present && script.events[2].start == 7.0));
+    REQUIRE(script.events[3].anchor == Anchor::Boot);
+    REQUIRE(!ParseScript("1 A 1\n").until_album);
+    REQUIRE(ParseScript("1 A 1\n").events[0].anchor == Anchor::Present);
+
+    const auto boot = Schedule(script, Anchor::Boot);
+    REQUIRE(boot.size() == 4);
+    REQUIRE((boot[0].time == 1.0 && boot[0].down && boot[0].event == 3));
+    REQUIRE((boot[3].time == 4.3 && !boot[3].down && boot[3].event == 1));
+    const auto present = Schedule(script, Anchor::Present);
+    REQUIRE((present.size() == 2 && present[0].event == 2 && present[1].time == 7.3));
+    const auto album = Schedule(script, Anchor::Album);
+    REQUIRE((album.size() == 2 && album[0].event == 0 && album[1].time == 62.0));
+
+    const Script bad = ParseScript("@later 1 A 1\n"
+                                   "@album\n"
+                                   "@ 1 A 1\n"
+                                   "@album anchor boot\n"
+                                   "until\n"
+                                   "until present\n"
+                                   "until album now\n"
+                                   "@album 2 Home 1\n");
+    REQUIRE(bad.events.empty());
+    REQUIRE(!bad.until_album);
+    REQUIRE(bad.errors.size() == 8);
+    REQUIRE(bad.errors[0].rfind("line 1: unknown anchor after '@'", 0) == 0);
+    REQUIRE(bad.errors[1].rfind("line 2: expected a press after the anchor", 0) == 0);
+    REQUIRE(bad.errors[4].rfind("line 5: expected 'until album'", 0) == 0);
+    REQUIRE(bad.errors[7].rfind("line 8: unknown key", 0) == 0);
+}
+
+TEST_CASE("Nx2AutoScript: dropping the presses that have not started", "[yuzu_cmd]") {
+    const Script script = ParseScript("1 A 0.3\n"   // 1..1.3, done
+                                      "2 B 4\n"     // 2..6, down when dropping
+                                      "4 A 0.3\n"   // 4..4.3, not started
+                                      "5 X 0.3\n"); // 5..5.3, not started
+    auto actions = Schedule(script, Anchor::Present);
+    REQUIRE(actions.size() == 8);
+    // At 3 s the first three actions have run: A down, A up, B down.
+    REQUIRE(DropUnstarted(actions, 3) == 2);
+    REQUIRE(actions.size() == 4);
+    REQUIRE((actions[3].time == 6.0 && !actions[3].down && actions[3].event == 1));
+
+    auto all = Schedule(script, Anchor::Present);
+    REQUIRE(DropUnstarted(all, 0) == 4);
+    REQUIRE(all.empty());
+    auto done = Schedule(script, Anchor::Present);
+    REQUIRE(DropUnstarted(done, done.size()) == 0);
+    REQUIRE(done.size() == 8);
+    REQUIRE(DropUnstarted(done, done.size() + 5) == 0);
+    std::vector<Action> none;
+    REQUIRE(DropUnstarted(none, 0) == 0);
+}
+
 TEST_CASE("Nx2AutoScript: schedule order", "[yuzu_cmd]") {
     const Script script = ParseScript("5 B 1\n"
                                       "1 A 1\n" // A 1..2
                                       "2 A 1\n" // A again at 2: released first
                                       "1 stick L 0 1 0.5\n");
-    const auto actions = Schedule(script);
+    REQUIRE(Schedule(script, Anchor::Boot).empty());
+    REQUIRE(Schedule(script, Anchor::Album).empty());
+    const auto actions = Schedule(script, Anchor::Present);
     REQUIRE(actions.size() == 8);
     for (size_t i = 1; i < actions.size(); ++i) {
         REQUIRE(actions[i - 1].time <= actions[i].time);

@@ -17,11 +17,19 @@ namespace Nx2AutoScript {
 //                                                  present (default), or from the game's first
 //                                                  SetAlbumImageOrientation call (Donkey Kong
 //                                                  Bananza: its title menu); one anchor per file
+//   @boot | @present | @album <press line>         this press counts from that anchor instead of
+//                                                  the file's: "@album 60 stick R 1 0 2"
+//   until album                                    at the first album call, the presses on the
+//                                                  boot and present clocks that have not started
+//                                                  are dropped (keys already down are still
+//                                                  released): "A every 3 s until the menu" then
+//                                                  works however slowly the build starts
 // Names are case-insensitive. Bad lines are reported and skipped.
 
 enum class Anchor { Boot, Present, Album };
 
 struct Event {
+    Anchor anchor;   // the clock 'start' is on
     double start;    // seconds after the anchor
     double duration; // seconds held
     bool stick;
@@ -32,22 +40,27 @@ struct Event {
 };
 
 struct Script {
-    Anchor anchor = Anchor::Present;
+    Anchor anchor = Anchor::Present; // the file's, for presses without an '@' anchor
+    bool until_album = false;
     std::vector<Event> events;
     std::vector<std::string> errors; // "line 3: ...", one per skipped line
 };
 
 Script ParseScript(std::string_view text);
 
-// Presses and releases in time order; at the same time releases come first, so back to back
-// presses of one key release it before pressing it again.
+// The presses and releases on one anchor's clock, in time order; at the same time releases come
+// first, so back to back presses of one key release it before pressing it again.
 struct Action {
     double time;
     bool down;
     size_t event;
 };
 
-std::vector<Action> Schedule(const Script& script);
+std::vector<Action> Schedule(const Script& script, Anchor anchor);
+
+// 'until album': removes the presses from actions[next] on and their releases, and returns how
+// many presses it removed. The releases of presses before 'next' stay.
+size_t DropUnstarted(std::vector<Action>& actions, size_t next);
 
 // EDEN_NX2_AUTO_EXIT=<seconds>[@boot|@present|@album]: close the window that many seconds after
 // start-up (or the first present, or the first album orientation call), the same way as closing it
