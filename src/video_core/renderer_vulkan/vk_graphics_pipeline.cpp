@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -20,6 +21,7 @@
 
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/nx2_desc_secondary.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/pipeline_stats.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -285,6 +287,35 @@ bool DescriptorReuseEnabled() {
     }
     return value != 0;
 }
+
+// How many graphics pipelines have secondary texture handles (EDEN_NX2_DESC_SECONDARY): a line
+// for each of the first few, then the totals at every power of two of pipelines built from 256.
+void NoteSecondaryHandleWords(u64 hash, u32 secondary_words, size_t words, bool added) {
+    static std::atomic<u64> pipelines{0};
+    static std::atomic<u64> with_secondary{0};
+    static std::atomic<u64> secondary_total{0};
+    constexpr u64 FIRST_LINES = 8;
+    const u64 built = pipelines.fetch_add(1, std::memory_order_relaxed) + 1;
+    u64 with = with_secondary.load(std::memory_order_relaxed);
+    u64 total = secondary_total.load(std::memory_order_relaxed);
+    if (secondary_words != 0) {
+        with = with_secondary.fetch_add(1, std::memory_order_relaxed) + 1;
+        total = secondary_total.fetch_add(secondary_words, std::memory_order_relaxed) +
+                secondary_words;
+        if (with <= FIRST_LINES) {
+            LOG_INFO(Render_Vulkan,
+                     "nx2 desc secondary: pipeline {:016X} secondary handle words: {} ({} of {} "
+                     "descriptor words, EDEN_NX2_DESC_SECONDARY={})",
+                     hash, secondary_words, added ? secondary_words : 0, words, added ? 1 : 0);
+        }
+    }
+    if (built >= 256 && std::has_single_bit(built)) {
+        LOG_INFO(Render_Vulkan,
+                 "nx2 desc secondary totals: {} of {} pipelines have secondary handle words, {} "
+                 "words in all (EDEN_NX2_DESC_SECONDARY={})",
+                 with, built, total, added ? 1 : 0);
+    }
+}
 } // Anonymous namespace
 
 bool LightDrawOn() {
@@ -336,6 +367,8 @@ GraphicsPipeline::GraphicsPipeline(
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
+    const bool secondary = DescSecondaryOn();
+    u32 secondary_words = 0;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         const Shader::Info* const info{infos[stage]};
         if (!info) {
@@ -369,25 +402,20 @@ GraphicsPipeline::GraphicsPipeline(
                 add_word(desc.cbuf_index, desc.cbuf_offset + word * 4, StorageWords);
             }
         }
+        // A secondary handle's word right after its handle's, as read_handle reads them
+        // (EDEN_NX2_DESC_SECONDARY=0 without them, as before HasSecondaryHandle).
         const auto add_handles = [&](const auto& descriptors) {
-            for (const auto& desc : descriptors) {
-                for (u32 index = 0; index < desc.count; ++index) {
-                    const u32 index_offset = index << desc.size_shift;
-                    add_word(desc.cbuf_index, desc.cbuf_offset + index_offset, HandleWords);
-                    if constexpr (requires { desc.has_secondary; }) {
-                        if (desc.has_secondary) {
-                            add_word(desc.secondary_cbuf_index,
-                                     desc.secondary_cbuf_offset + index_offset, HandleWords);
-                        }
-                    }
-                }
-            }
+            secondary_words += AddHandleWords(descriptors, secondary,
+                                              [&](u32 slot, u32 offset) {
+                                                  add_word(slot, offset, HandleWords);
+                                              });
         };
         add_handles(info->texture_buffer_descriptors);
         add_handles(info->image_buffer_descriptors);
         add_handles(info->texture_descriptors);
         add_handles(info->image_descriptors);
     }
+    NoteSecondaryHandleWords(key.Hash(), secondary_words, descriptor_words.size(), secondary);
     descriptor_values.resize(descriptor_words.size());
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 

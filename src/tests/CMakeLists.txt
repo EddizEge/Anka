@@ -34,6 +34,7 @@ add_executable(tests
     video_core/nx2_record_list.cpp
     video_core/nx2_reg_replica.cpp
     video_core/nx2_root.cpp
+    video_core/nx2_desc_secondary.cpp
     video_core/nx2_stage_bind.cpp
     video_core/nx2_stage_contract.cpp
     video_core/nx2_stage_ring.cpp
