@@ -30,6 +30,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
+#include "core/nx2_host_core.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -693,10 +694,21 @@ struct Memory::Impl {
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
+        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+        // Any other calls threads go to syscore (their id is past the cores: up to 255).
+        const size_t core = Core::HostCoreSlot(system.GetCurrentHostThreadID());
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
-        const size_t core = system.GetCurrentHostThreadID();
+        // Guard on sys_core (its read area and scratch buffer are shared);
+        if (core == sys_core) [[unlikely]] {
+            sys_core_guard.lock();
+        }
+        SCOPE_EXIT {
+            if (core == sys_core) [[unlikely]] {
+                sys_core_guard.unlock();
+            }
+        };
         auto& current_area = rasterizer_read_areas[core];
         gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             const DAddr end_address = address + size;
