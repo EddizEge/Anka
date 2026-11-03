@@ -58,6 +58,10 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
                              op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x092 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xd08 || op == 0x299 || op == 0xc09 || (op == 0x81c && instruction.Bits(67, 1));
     }
+    // HMMA's emulation keeps its f32 accumulators and shuffled A rows in R240-R245, where
+    // UR22-UR27 live (uniform bank programs) or the program's own registers may (without one).
+    bool touches_hmma_scratch = false;
+    u32 hmma_index = ~0U;
     const auto address_of = [](u32 index) { return 0x50U + index * 8 + ((index + 1) / 3) * 8; };
     const auto fail = [&](u32 index, std::string_view reason) {
         result.instructions.clear();
@@ -67,6 +71,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
         return result;
     };
     const auto finish = [&](u32 index) {
+        if (hmma_index != ~0U && touches_hmma_scratch)
+            return fail(hmma_index, "native matrix multiply scratch overlaps R240-R245");
         for (const auto& relocation : relocations) {
             if (relocation.target > index) return fail(index, "native branch or call leaves captured program");
             const u32 target = result.source_instruction_offsets[static_cast<size_t>(relocation.target)];
@@ -102,13 +108,17 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? 216U : 246U) && reg < 255) return fail(index, "native program uses lowering scratch registers");
+            if (reg >= 237 && reg < 246) touches_hmma_scratch = true; // a vector from R237 reaches R240
         }
         // UR0-UR21 live in R216-R237 and UR22-UR27 in R240-R245 (R239 holds the uniform
         // predicates), so even/odd pairs stay adjacent. Sites that still check reg < 16 rely on
         // UR0-UR15 being R216-R231.
         const auto uniform_register = [&](u32 reg) -> u32 {
             if (reg < 22) return 216 + reg;
-            if (reg < 28) return 218 + reg;
+            if (reg < 28) {
+                touches_hmma_scratch = true;
+                return 218 + reg;
+            }
             if (reg == 63) return 255;
             return ~0U;
         };
@@ -1131,7 +1141,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             // Accumulating with HFMA2 instead (a rounding per product) tints Splatoon Raiders' whole
             // scene yellow; the two disagree by more than f16 rounding because the sums sit near the
             // top of the f16 range. Rejecting the program is the escape hatch: a pass that never runs
-            // leaves DK Bananza's scene flat lilac.
+            // leaves DK Bananza's scene flat lilac. A program that also uses R240-R245 is rejected
+            // when it finishes; EDEN_NX2_TENSOR=unguarded emulates it anyway.
             static const char* const mode_env = std::getenv("EDEN_NX2_TENSOR");
             const std::string_view tensor_mode{mode_env ? mode_env : ""};
             if (tensor_mode == "off" || tensor_mode == "0")
@@ -1151,6 +1162,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
                 }
                 break;
             }
+            if (tensor_mode != "unguarded") hmma_index = std::min(hmma_index, index);
             const auto add = [&](u32 target, u32 lhs, u32 rhs) {
                 emit(0x5c10000000000000ULL | predicate | target | (u64{lhs} << 8) | (u64{rhs} << 20));
             };
