@@ -768,10 +768,14 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& pipeline{pair->second};
-    if (!is_new) {
-        return pipeline.get();
+    if (is_new) {
+        pipeline = CreateComputePipeline(key, shader);
     }
-    pipeline = CreateComputePipeline(key, shader);
+    // A program with an emulated HMMA that fails to build (CreateComputePipeline logs why) gets
+    // KeplerCompute's upscale stand-in, which looks for "matrix multiply", as a rejected one does.
+    if (!pipeline && shader->lowered_native && shader->lowered_native->matrix_multiply) {
+        throw Shader::RuntimeError("Native matrix multiply program has no compute pipeline");
+    }
     return pipeline.get();
 }
 

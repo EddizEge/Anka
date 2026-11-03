@@ -524,6 +524,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     auto result = std::make_shared<LoweredNativeCode>();
     result->texture_bound = lowered.required_texture_buffer;
+    result->matrix_multiply = lowered.matrix_multiply;
     result->source_size = native_header_size + lowered.source_size;
     auto& lowered_code = result->code;
     lowered_code.resize(sizeof(sph) / sizeof(u64));
