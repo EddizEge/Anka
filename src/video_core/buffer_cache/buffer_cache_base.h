@@ -483,7 +483,8 @@ public:
 
     /// The guest CPU reads [addr, addr + size) (pages its reads are tracked on): without
     /// AsyncBufferDownloads, GPU writes there are still copied back at fences from now on.
-    void NoteCpuRead(DAddr addr, size_t size);
+    /// Returns whether part of it was not noted before.
+    bool NoteCpuRead(DAddr addr, size_t size);
 
     /// 4 KiB pages in the CPU-read ranges (EDEN_NX2_REACTIVE_STATS; walks them).
     [[nodiscard]] u64 CpuReadPages() const;

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <optional>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -9,6 +11,7 @@
 
 #include "common/nx2_reactive.h"
 #include "core/nx2_host_core.h"
+#include "video_core/nx2_reactive_flush.h"
 
 namespace Reactive = Common::Nx2Reactive;
 
@@ -177,4 +180,117 @@ TEST_CASE("Reactive global counters", "[video_core][nx2_reactive]") {
 
     REQUIRE(Reactive::MicrosecondsSince(Reactive::NowNs() + 1'000'000'000) == 0);
     REQUIRE(Reactive::MicrosecondsSince(Reactive::NowNs() - 2'000'000) >= 2000);
+}
+
+namespace {
+
+constexpr DAddr PAGE = 4096;
+
+bool Same(const VideoCore::RasterizerDownloadArea& a, const VideoCore::RasterizerDownloadArea& b) {
+    return a.start_address == b.start_address && a.end_address == b.end_address &&
+           a.preemtive == b.preemtive;
+}
+
+/// RasterizerVulkan::GetFlushArea's answer before EDEN_NX2_FLUSH_FIRST_READ.
+VideoCore::RasterizerDownloadArea OldFlushArea(
+    const std::optional<VideoCore::RasterizerDownloadArea>& texture_area, DAddr addr, u64 size) {
+    if (texture_area) {
+        return *texture_area;
+    }
+    return VideoCore::RasterizerDownloadArea{
+        .start_address = addr / PAGE * PAGE,
+        .end_address = (addr + size + PAGE - 1) / PAGE * PAGE,
+        .preemtive = true,
+    };
+}
+
+} // Anonymous namespace
+
+TEST_CASE("Reactive first read decision", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    for (int bits = 0; bits < 8; ++bits) {
+        const bool enabled = (bits & 1) != 0;
+        const bool newly = (bits & 2) != 0;
+        const bool modified = (bits & 4) != 0;
+        REQUIRE(Flush::FirstReadFlushes(enabled, newly, modified) == (bits == 7));
+    }
+    static_assert(Flush::FirstReadFlushes(true, true, true));
+    static_assert(!Flush::FirstReadFlushes(false, true, true));
+}
+
+TEST_CASE("Reactive first read area", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // Hand cases.
+    {
+        const auto area = Flush::CombineFlushArea(std::nullopt, 0x10000, 0x12000, false);
+        REQUIRE(area.start_address == 0x10000);
+        REQUIRE(area.end_address == 0x12000);
+        REQUIRE(area.preemtive);
+    }
+    {
+        const auto area = Flush::CombineFlushArea(std::nullopt, 0x10000, 0x12000, true);
+        REQUIRE(area.start_address == 0x10000);
+        REQUIRE(area.end_address == 0x12000);
+        REQUIRE(!area.preemtive);
+    }
+    {
+        // A preemptive texture area (its images forced already) wider than the pages
+        const VideoCore::RasterizerDownloadArea texture{0x8000, 0x40000, true};
+        REQUIRE(Same(Flush::CombineFlushArea(texture, 0x10000, 0x12000, false), texture));
+        const auto area = Flush::CombineFlushArea(texture, 0x10000, 0x12000, true);
+        REQUIRE(area.start_address == 0x8000);
+        REQUIRE(area.end_address == 0x40000);
+        REQUIRE(!area.preemtive);
+    }
+    {
+        // A texture area next to the pages: the flush covers both
+        const VideoCore::RasterizerDownloadArea texture{0x20000, 0x30000, true};
+        const auto area = Flush::CombineFlushArea(texture, 0x10000, 0x12000, true);
+        REQUIRE(area.start_address == 0x10000);
+        REQUIRE(area.end_address == 0x30000);
+        REQUIRE(!area.preemtive);
+        const VideoCore::RasterizerDownloadArea low{0x1000, 0x2000, true};
+        const auto high = Flush::CombineFlushArea(low, 0x10000, 0x12000, true);
+        REQUIRE(high.start_address == 0x1000);
+        REQUIRE(high.end_address == 0x12000);
+    }
+    {
+        // A texture area flushing anyway stays as it is
+        const VideoCore::RasterizerDownloadArea texture{0x10800, 0x11000, false};
+        REQUIRE(Same(Flush::CombineFlushArea(texture, 0x10000, 0x12000, false), texture));
+        const auto area = Flush::CombineFlushArea(texture, 0x10000, 0x12000, true);
+        REQUIRE(area.start_address == 0x10000);
+        REQUIRE(area.end_address == 0x12000);
+        REQUIRE(!area.preemtive);
+    }
+    // Off (no buffer flush): the old answer for any read; on: never preemptive, covers the read
+    // and the texture area.
+    std::mt19937_64 rng{11};
+    for (int i = 0; i < 200000; ++i) {
+        const DAddr addr = rng() % (1ULL << 36);
+        const u64 size = 1 + rng() % (3 * PAGE);
+        const DAddr page_start = addr / PAGE * PAGE;
+        const DAddr page_end = (addr + size + PAGE - 1) / PAGE * PAGE;
+        std::optional<VideoCore::RasterizerDownloadArea> texture;
+        if (rng() % 2 == 0) {
+            const DAddr start = addr - rng() % (64 * PAGE);
+            texture = VideoCore::RasterizerDownloadArea{start, start + 1 + rng() % (128 * PAGE),
+                                                        rng() % 2 == 0};
+        }
+        REQUIRE(Same(Flush::CombineFlushArea(texture, page_start, page_end, false),
+                     OldFlushArea(texture, addr, size)));
+        const auto flushed = Flush::CombineFlushArea(texture, page_start, page_end, true);
+        REQUIRE(!flushed.preemtive);
+        REQUIRE(flushed.start_address <= addr);
+        REQUIRE(flushed.end_address >= addr + size);
+        REQUIRE(flushed.start_address <= page_start);
+        REQUIRE(flushed.end_address >= page_end);
+        if (texture) {
+            REQUIRE(flushed.start_address == (std::min)(texture->start_address, page_start));
+            REQUIRE(flushed.end_address == (std::max)(texture->end_address, page_end));
+        } else {
+            REQUIRE(flushed.start_address == page_start);
+            REQUIRE(flushed.end_address == page_end);
+        }
+    }
 }

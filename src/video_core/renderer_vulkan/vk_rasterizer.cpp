@@ -32,6 +32,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
@@ -2163,6 +2164,10 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
     if (stats) [[unlikely]] {
         Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FlushAreaCalls, 1);
     }
+    const DAddr page_start = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+    // EDEN_NX2_FLUSH_FIRST_READ: newly noted pages the GPU wrote are flushed once (nx2_reactive_flush.h)
+    bool flush_buffer = false;
     {
         // Guest CPU reads of buffer memory decide which GPU-written buffer data is copied back.
         CheckBufferLockOffB("RasterizerVulkan::GetFlushArea");
@@ -2172,9 +2177,15 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
             Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferLockUs,
                                      Common::Nx2Reactive::MicrosecondsSince(lock_ns));
         }
-        buffer_cache.NoteCpuRead(Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
-                                 Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) -
-                                     Common::AlignDown(addr, Core::DEVICE_PAGESIZE));
+        const bool newly_noted = buffer_cache.NoteCpuRead(page_start, page_end - page_start);
+        if (VideoCommon::Nx2Reactive::FlushFirstRead()) [[unlikely]] {
+            flush_buffer = VideoCommon::Nx2Reactive::FirstReadFlushes(
+                true, newly_noted,
+                newly_noted && buffer_cache.IsRegionGpuModified(page_start, page_end - page_start));
+            if (flush_buffer && stats) {
+                Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FirstReadFlushes, 1);
+            }
+        }
     }
     {
         const s64 lock_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
@@ -2183,17 +2194,9 @@ VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64
             Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::TextureLockUs,
                                      Common::Nx2Reactive::MicrosecondsSince(lock_ns));
         }
-        auto area = texture_cache.GetFlushArea(addr, size);
-        if (area) {
-            return *area;
-        }
+        const auto area = texture_cache.GetFlushArea(addr, size);
+        return VideoCommon::Nx2Reactive::CombineFlushArea(area, page_start, page_end, flush_buffer);
     }
-    VideoCore::RasterizerDownloadArea new_area{
-        .start_address = Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
-        .end_address = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE),
-        .preemtive = true,
-    };
-    return new_area;
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {

@@ -897,15 +897,15 @@ bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
 }
 
 template <class P>
-void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
+bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
     if (AsyncBufferDownloads()) {
-        return;
+        return false;
     }
     size_t covered = 0;
     cpu_read_ranges.ForEachInRange(addr, size,
                                    [&](DAddr start, DAddr end) { covered += end - start; });
     if (covered >= size) {
-        return;
+        return false;
     }
     cpu_read_ranges.Add(addr, size);
     if (Nx2Profile::Enabled()) {
@@ -914,6 +914,7 @@ void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
             LOG_INFO(HW_GPU, "CPU-read buffer pages noted: {} (latest {:#x})", noted, addr);
         }
     }
+    return true;
 }
 
 template <class P>
