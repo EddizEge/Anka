@@ -26,6 +26,7 @@ add_executable(tests
     video_core/native_qmd.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp
+    video_core/ampere_hmma.cpp
     video_core/nx2_mode_gov.cpp
     video_core/nx2_mode_pace.cpp
     video_core/nx2_mode_pace21.cpp
@@ -39,6 +40,8 @@ add_executable(tests
     video_core/nx2_stage_contract.cpp
     video_core/nx2_stage_ring.cpp
     video_core/nx2_upscale_pick.cpp
+    video_core/native_macro_fifo.cpp
+    video_core/nx2_write_history.cpp
     input_common/calibration_configuration_job.cpp
     yuzu_cmd/nx2_auto_script.cpp
     ../yuzu_cmd/nx2_auto_script.cpp

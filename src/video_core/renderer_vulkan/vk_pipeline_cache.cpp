@@ -120,7 +120,9 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 18;
+// The disk cache stores lowered native code, so lowering changes need a new version. Ours count
+// from 1000 + upstream's: 2.5.0's 19 is another file layout and must never be read here.
+constexpr u32 CACHE_VERSION = 1018;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -766,10 +768,14 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& pipeline{pair->second};
-    if (!is_new) {
-        return pipeline.get();
+    if (is_new) {
+        pipeline = CreateComputePipeline(key, shader);
     }
-    pipeline = CreateComputePipeline(key, shader);
+    // A program with an emulated HMMA that fails to build (CreateComputePipeline logs why) gets
+    // KeplerCompute's upscale stand-in, which looks for "matrix multiply", as a rejected one does.
+    if (!pipeline && shader->lowered_native && shader->lowered_native->matrix_multiply) {
+        throw Shader::RuntimeError("Native matrix multiply program has no compute pipeline");
+    }
     return pipeline.get();
 }
 

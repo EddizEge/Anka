@@ -41,6 +41,8 @@ struct LoweredNativeCode {
     /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
     /// (the engine's register value is used).
     u32 texture_bound = ~0U;
+    /// The lowering emulates an HMMA (Shader::Ampere::LoweredProgram::matrix_multiply).
+    bool matrix_multiply{};
 };
 
 class GenericEnvironment : public Shader::Environment {

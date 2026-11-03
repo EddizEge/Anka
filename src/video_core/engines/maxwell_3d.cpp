@@ -935,6 +935,10 @@ void Maxwell3D::DumpRecentWrites(u32 method) {
     }
     LOG_ERROR(HW_GPU, "Write to {:#x} while macro {:#x} collects parameters ({} so far); last writes:",
               method, executing_macro, macro_params.size());
+    if (!record_write_history) {
+        LOG_ERROR(HW_GPU, "Register write history disabled; EDEN_NX2_3D_HISTORY=1 enables it");
+        return;
+    }
     for (size_t i = 0; i < recent_writes.size(); ++i) {
         const auto& w = recent_writes[(recent_write_index + i) % recent_writes.size()];
         if (w.amount != 0) {
@@ -1351,7 +1355,6 @@ struct Maxwell3D::FrontState {
     Regs::ShadowRamControl control{};
     u32 executing_macro{};
     std::vector<u32> parameters;
-    std::vector<u32> fifo;
     u64 calls{};
     /// A method the draw manager handles was sent since the back last ran DrawDeferred: only
     /// then can it have a deferred instanced draw to issue at the end of a macro.
@@ -2009,7 +2012,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             jit = engine.native_jit.get();
         }
         jit->Prepare(engine.native_code, engine.native_code_generation);
-        fs.fifo.assign(fs.parameters.begin(), fs.parameters.end());
+        // The macro reads its parameters in place; MME_DMA_READ_FIFOED appends to them
+        // (FrontDmaRead), the JIT reloading them after such a write.
+        const size_t parameter_count = fs.parameters.size();
         if (fs.same.mode != 0) [[unlikely]] {
             // Lean: the gap histogram notes the methods sent, the filter is not disarmed for it.
             fs.same.Begin(fs.same_table.data(), fs.skip_same, static_cast<u32>(fs.control),
@@ -2072,7 +2077,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                     }
                     return ok;
                 };
-                return jit->Execute(start, fs.fifo, data_ram, read, checked, &fs.same.ctx, verify);
+                return jit->Execute(start, fs.parameters, data_ram, read, checked,
+                                    &fs.same.ctx, verify);
             }
             if (fs.same.mode == 3) [[unlikely]] {
                 // The filter in C++, on the JIT without it.
@@ -2083,9 +2089,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                     }
                     return write(address, value);
                 };
-                return jit->Execute(start, fs.fifo, data_ram, read, filtered);
+                return jit->Execute(start, fs.parameters, data_ram, read, filtered);
             }
-            return jit->Execute(start, fs.fifo, data_ram, read, write,
+            return jit->Execute(start, fs.parameters, data_ram, read, write,
                                 fs.same.mode == 1 ? &fs.same.ctx : nullptr);
         }();
         if (fs.same.mode != 0) [[unlikely]] {
@@ -2111,7 +2117,7 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         if (!result.success) {
             engine.native_execution_failed = true;
             LOG_ERROR(HW_GPU, "Native MME (JIT, split front) failed: start={:#x}, consumed={}/{}, error={}",
-                      start, result.consumed, fs.parameters.size(), result.error);
+                      start, result.consumed, parameter_count, result.error);
         }
         if (check != nullptr) {
             const auto expected = IndirectDrawWrites(fs.parameters);
@@ -2179,7 +2185,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
         if (method == 0x158) {
-            fs.fifo.push_back(word);
+            fs.parameters.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
             native_data_ram[ram + i] = word;
         }

@@ -65,6 +65,13 @@ namespace Tegra::Engines {
 
 #define MAXWELL3D_REG_INDEX(field_name) (offsetof(Maxwell3D::Regs, field_name) / sizeof(u32))
 
+/// Whether an EDEN_NX2_3D_HISTORY value asks release builds to keep Maxwell3D's register write
+/// history. A leading '0' leaves it off, as our other switches read it (upstream turns it on for
+/// any value).
+inline bool WriteHistoryRequested(const char* value) noexcept {
+    return value != nullptr && value[0] != '0';
+}
+
 class Maxwell3D final : public EngineInterface {
 public:
     explicit Maxwell3D(MemoryManager& memory_manager);
@@ -3473,7 +3480,17 @@ private:
     };
     std::array<RecentWrite, 48> recent_writes{};
     size_t recent_write_index = 0;
+    const bool record_write_history{
+#ifdef NDEBUG
+        WriteHistoryRequested(std::getenv("EDEN_NX2_3D_HISTORY"))
+#else
+        true
+#endif
+    };
     void RecordWrite(u32 method, u32 argument, u32 amount, u32 pending) {
+        if (!record_write_history) {
+            return;
+        }
         // The index wraps here instead of being taken modulo 48 for each write (a multiply per
         // register write); DumpRecentWrites reads the same slots in the same order.
         recent_writes[recent_write_index] = {method, argument, amount, pending};
