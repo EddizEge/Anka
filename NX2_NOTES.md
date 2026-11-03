@@ -450,3 +450,27 @@ only under `buffer_cache.mutex`, A and C only in joins or a ParkB), none is turn
 UNIFORM_SYNC_SKIP also covers cut c's B uniform light draws (ConfigureUniformsBuffersImpl), and
 USAGE_RESET_SKIP keeps a skipped tracker's generation, which no stream mark memo can hold
 (src/tests/video_core/nx2_stage_costs.cpp).
+
+## up25: picks from 2.5.0 (perf/up25)
+
+Cherry-picked from PokeDinner 2.5.0 (216b5034c) onto perf/tam faddee043; no full merge.
+
+- HMMA is emulated by default (f5e1b2bcd, 55c9b8745: f32 accumulators in R240-R243, F2F after
+  every eight products), which replaces row 64's opt-in. `EDEN_NX2_TENSOR=off` (or `0`) rejects the
+  program as the old default did ("native matrix multiply (EDEN_NX2_TENSOR=off)"), so
+  KeplerCompute's upscale stand-in (`EDEN_NX2_UPSCALE_*`) runs again; `=stub` makes D = C.
+- R240-R245 also hold UR22-UR27 (programs with a uniform bank) or ordinary registers (programs
+  without one, which may use up to R245). A program that both emulates an HMMA and maps UR22-UR27
+  or names R237-R245 is rejected with "native matrix multiply scratch overlaps R240-R245" and gets
+  the stand-in. `EDEN_NX2_TENSOR=unguarded` emulates it anyway (upstream's behaviour), for A/B.
+- FP16 TEX results pack c0 in the low half (ee247a0b6).
+- Pipeline cache versions 1018 (Vulkan) and 1015 (OpenGL): the disk cache holds lowered code. The
+  first session rebuilds every pipeline. 2.5.0's 19 is a different file layout.
+- The 3D register-write history records only with `EDEN_NX2_3D_HISTORY` in release builds
+  (1a346fb3b); RecordWrite is gated itself, so both the K1 (BackLoop) and staged (RunStagedBack)
+  consumers skip it. Native macro parameters run without a second FIFO copy (665938d0b).
+- Invalid sampler / image view index logs are LOG_TRACE (idea from Djihads PR #374).
+- Not taken: b2430b4d9 (needs vk_rasterizer.cpp), ddbd076cf (only for >16 removals at once).
+
+Tests: `src/tests/video_core/ampere_hmma.cpp` (one run per EDEN_NX2_TENSOR mode: the lowering reads
+it once per process), `native_macro_fifo.cpp` (665938d0b).
