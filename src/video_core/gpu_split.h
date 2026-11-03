@@ -160,6 +160,18 @@ public:
         return session;
     }
 
+    /// Front, diagnostics (nx2_front_diag_hooks.h; no side effects): the write position, the
+    /// macro writes held, how far the back ran; the ring's size and the most a batch holds.
+    [[nodiscard]] u64 DiagWritePosition() const {
+        return write_position;
+    }
+    [[nodiscard]] u32 DiagHeldWrites() const {
+        return pending_count;
+    }
+    [[nodiscard]] u64 DiagConsumed() const {
+        return consumed.load(std::memory_order_acquire);
+    }
+
     /// EDEN_NX2_SPLIT_CHECK=1 (debug): reports, with its stack, a thread other than the back
     /// using back-owned state (the Vulkan scheduler) while the back runs entries.
     static inline bool check_owner{};
@@ -210,6 +222,11 @@ private:
     static constexpr size_t PublishEvery = 256;
     static constexpr u32 MaxPending = 64; ///< Macro writes in one Batch entry at most
 
+public:
+    static constexpr size_t DiagRingWords = RingWords;
+    static constexpr u32 DiagMaxHeld = MaxPending;
+
+private:
     template <typename Func>
     static void CallThunk(const u64* payload) {
         (*reinterpret_cast<const Func*>(payload))();

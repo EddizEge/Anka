@@ -15,7 +15,256 @@
 // EDEN_NX2_GPU_PROFILE: what the split GPU thread's front (DmaPusher, the puller, Maxwell3D's
 // front macros) spends its time on, logged per profile window by nx2_front_diag_hooks.h. This
 // header keeps the logic, apart from the emulator so it can be tested.
+//
+// MME DMA reads (Maxwell3D::FrontDmaRead) drain the back first. Whether a read needed it is asked
+// of PendingWrites: the guest memory writes the front sent to the back that may not have run yet
+// (the ring position each entry ends by, SentEndBound, against how far the back ran) and the work
+// sent whose writes the front cannot tell (draws, dispatches, blits). Observes only.
 namespace VideoCommon::Nx2FrontDiag {
+
+/// Writes of guest memory the front sends with the range they write.
+enum class WriteKind : u8 {
+    CbData,   ///< Maxwell3D constant buffer data (CB_DATA)
+    Inline,   ///< Inline to memory: Maxwell3D, KeplerMemory and KeplerCompute uploads
+    Dma,      ///< MaxwellDMA copies and fills into pitch memory
+    Release,  ///< Semaphore releases: the puller's, MaxwellDMA's
+    Report,   ///< Maxwell3D report semaphores (query results, releases)
+    Download, ///< FlushRegion commands (cache data copied back to guest memory)
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(WriteKind::Count)> write_kind_names{
+    "cb data", "inline", "dma", "release", "report", "download",
+};
+
+/// Work sent to the back that may write guest memory where the front cannot tell.
+enum class WorkKind : u8 {
+    Draw,      ///< Maxwell3D draw manager methods: draws, clears (storage and image stores)
+    ResetFix,  ///< Of them: draws with NVN's indirect draw reset program (RESETFIX's records)
+    Compute,   ///< KeplerCompute launches, dispatches, macros, report semaphores, inline QMDs
+    Copy2D,    ///< Fermi2D blits
+    DmaOther,  ///< MaxwellDMA copies into block linear memory
+    Fences,    ///< ReleaseFences sent to the back (fenced query results)
+    Tick,      ///< GPU tick work (presents, CPU flush requests)
+    Run,       ///< Run commands
+    Syncpoint, ///< Syncpoint increments (the syncpoint shim's words change)
+    Unranged,  ///< Writes the diag cannot range: too wide, registers not seen, unbacked sparse
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(WorkKind::Count)> work_kind_names{
+    "draw", "resetfix", "compute", "2d", "dma other", "fences", "tick", "run", "syncpoint", "unranged",
+};
+
+/// The widest write noted page by page; wider ones are work (WorkKind::Unranged).
+inline constexpr u64 MaxNotedBytes = u64{64} << 20;
+
+/// A ring position at or after the end of everything the front sent (GpuSplit): the write
+/// position, or with macro writes held (EDEN_NX2_WRITE_BATCH) the furthest their batch entry can
+/// end. The batch goes at the write position before any other entry, a header and up to
+/// `max_held` writes; at the ring's start if it would cross the end (entries never wrap).
+[[nodiscard]] constexpr u64 SentEndBound(u64 write_position, u32 held, u64 ring_words,
+                                         u32 max_held) noexcept {
+    if (held == 0) {
+        return write_position;
+    }
+    const u64 words = 1 + u64{max_held};
+    const u64 index = write_position & (ring_words - 1);
+    if (index + words <= ring_words) {
+        return write_position + words;
+    }
+    return write_position - index + ring_words + words;
+}
+
+/// The writes and work sent to the back and not known to have run, front thread.
+class PendingWrites {
+public:
+    static constexpr size_t MaxEntries = size_t{1} << 16;
+
+    /// What may still be pending over a range.
+    struct Pending {
+        u32 writes{};     ///< Bit per WriteKind of a pending write intersecting the range
+        u32 work{};       ///< Bit per WorkKind with work pending
+        bool overflow{};  ///< Writes were dropped (list full) that may not have run
+        u32 entries{};    ///< Writes pending in all
+    };
+
+    /// A write of [begin, end) (device addresses) sent to the back, in the ring by `bound`.
+    void NoteWrite(WriteKind kind, u64 begin, u64 end, u64 bound) {
+        if (begin >= end) {
+            return;
+        }
+        bound = std::max(bound, last_bound);
+        last_bound = bound;
+        if (count != 0) {
+            // Touching or overlapping the last write of the kind: one range (runs of CB_DATA).
+            Entry& last = entries[(head + count - 1) % MaxEntries];
+            if (last.kind == kind && begin <= last.end && end >= last.begin) {
+                last.begin = std::min(last.begin, begin);
+                last.end = std::max(last.end, end);
+                last.bound = bound;
+                return;
+            }
+        }
+        if (count == MaxEntries) {
+            overflow_bound = bound;
+            return;
+        }
+        if (entries.size() < MaxEntries) {
+            entries.resize(MaxEntries);
+        }
+        entries[(head + count) % MaxEntries] = {begin, end, bound, kind};
+        ++count;
+    }
+
+    /// Work whose writes the front cannot tell, in the ring by `bound`.
+    void NoteWork(WorkKind kind, u64 bound) {
+        u64& latest = work_bound[static_cast<size_t>(kind)];
+        latest = std::max(latest, bound);
+    }
+
+    /// The back ran the ring up to `consumed`: what was in by then ran.
+    void Retire(u64 consumed) {
+        while (count != 0 && entries[head].bound <= consumed) {
+            head = (head + 1) % MaxEntries;
+            --count;
+        }
+    }
+
+    [[nodiscard]] Pending Query(u64 begin, u64 end, u64 consumed) {
+        Retire(consumed);
+        Pending pending;
+        pending.entries = static_cast<u32>(count);
+        pending.overflow = overflow_bound > consumed;
+        for (size_t i = 0; begin < end && i < count; ++i) {
+            const Entry& entry = entries[(head + i) % MaxEntries];
+            if (entry.begin < end && begin < entry.end) {
+                pending.writes |= 1U << static_cast<u32>(entry.kind);
+            }
+        }
+        for (size_t kind = 0; kind < work_bound.size(); ++kind) {
+            if (work_bound[kind] > consumed) {
+                pending.work |= 1U << kind;
+            }
+        }
+        return pending;
+    }
+
+    [[nodiscard]] size_t Size() const {
+        return count;
+    }
+
+    /// A new split session: ring positions start over.
+    void Reset() {
+        *this = PendingWrites{};
+    }
+
+private:
+    struct Entry {
+        u64 begin;
+        u64 end;
+        u64 bound;
+        WriteKind kind;
+    };
+
+    std::vector<Entry> entries; ///< A ring of MaxEntries, allocated at the first write
+    size_t head{};
+    size_t count{};
+    u64 last_bound{};
+    u64 overflow_bound{};
+    std::array<u64, static_cast<size_t>(WorkKind::Count)> work_bound{};
+};
+
+/// Where an MME DMA read stands, the first that applies.
+enum class ReadClass : u8 {
+    Idle,     ///< The back had run everything sent: the drain would not wait
+    WriteHit, ///< A pending write of a known range intersects it (or writes were dropped)
+    GpuPage,  ///< A page of it was written by the GPU through the buffer cache (ever)
+    Work,     ///< Work whose writes the front cannot tell is pending
+    Free,     ///< None of these
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(ReadClass::Count)> read_class_names{
+    "idle", "write hit", "gpu page", "work", "free",
+};
+
+[[nodiscard]] constexpr ReadClass Classify(bool idle, const PendingWrites::Pending& pending,
+                                           bool gpu_page) noexcept {
+    if (idle) {
+        return ReadClass::Idle;
+    }
+    if (pending.writes != 0 || pending.overflow) {
+        return ReadClass::WriteHit;
+    }
+    if (gpu_page) {
+        return ReadClass::GpuPage;
+    }
+    if (pending.work != 0) {
+        return ReadClass::Work;
+    }
+    return ReadClass::Free;
+}
+
+/// [begin, end) GPU addresses an inline to memory upload (Upload::State) writes. Pitch: its lines;
+/// block linear: the whole surface as Texture::CalculateSize gives it, bytes wide.
+[[nodiscard]] constexpr std::pair<u64, u64> InlineRange(u64 dest, u32 line_length, u32 line_count,
+                                                        u32 pitch, bool linear, u32 width,
+                                                        u32 height, u32 depth, u32 block_height,
+                                                        u32 block_depth) noexcept {
+    if (line_length == 0 || line_count == 0) {
+        return {dest, dest};
+    }
+    if (linear) {
+        return {dest, dest + u64{pitch} * (line_count - 1) + line_length};
+    }
+    const auto align = [](u64 value, u32 shift) {
+        return (value + (u64{1} << shift) - 1) >> shift << shift;
+    };
+    const u64 size =
+        align(width, 6) * align(height, 3 + block_height) * align(std::max(depth, 1U), block_depth);
+    return {dest, dest + size};
+}
+
+/// [begin, end) GPU addresses a MaxwellDMA launch writes into pitch memory, or nothing for a
+/// block linear destination (WorkKind::DmaOther). Multi-line from pitch memory: its lines `pitch`
+/// apart (a negative pitch: unknown). Multi-line from block linear memory (CopyBlockLinearToPitch):
+/// |pitch| bytes a line written back whole, a line up to 16 bytes an element with a remap.
+/// Single line: the bytes (words with a remap), in whole 512-byte blocks (the copy may swizzle
+/// within them).
+struct DmaWrite {
+    u64 begin{};
+    u64 end{};
+    bool known{};
+};
+
+[[nodiscard]] constexpr DmaWrite DmaRange(u64 offset_out, u32 pitch_out, u32 line_length,
+                                          u32 line_count, bool multi_line, bool src_pitch,
+                                          bool dst_pitch, bool remap) noexcept {
+    if (multi_line) {
+        if (!dst_pitch) {
+            return {};
+        }
+        if (line_length == 0 || line_count == 0) {
+            return {offset_out, offset_out, true};
+        }
+        const s32 signed_pitch = static_cast<s32>(pitch_out);
+        if (!src_pitch) {
+            const u64 pitch = signed_pitch < 0 ? u64{0U - pitch_out} : u64{pitch_out};
+            const u64 line = u64{line_length} * (remap ? 16 : 1);
+            const u64 bytes = std::max(pitch * line_count, pitch * (line_count - 1) + line);
+            return {offset_out, offset_out + bytes, true};
+        }
+        if (signed_pitch < 0) {
+            return {};
+        }
+        return {offset_out, offset_out + u64{pitch_out} * (line_count - 1) + line_length, true};
+    }
+    const u64 bytes = u64{line_length} * (remap ? 4 : 1);
+    const u64 begin = offset_out & ~u64{0x1ff};
+    const u64 end = (offset_out + bytes + 0x1ff) & ~u64{0x1ff};
+    return {begin, bytes == 0 ? begin : end, true};
+}
 
 /// Cheap sampling for the timed counters: xorshift32, one call in 2^bits.
 class Sampler {
@@ -217,6 +466,44 @@ public:
 private:
     std::array<u64, Buckets> buckets{};
     u64 calls{};
+};
+
+/// The kind of write the front first saw sent to each device page (WriteKind + 1; 0 none), for
+/// the pages MME DMA reads.
+class FirstWriters {
+public:
+    explicit FirstWriters(u64 pages_) : pages{pages_} {}
+
+    void Note(WriteKind kind, u64 begin, u64 end) {
+        if (begin >= end) {
+            return;
+        }
+        if (first.empty()) {
+            first.resize(pages);
+        }
+        const u64 last = std::min((end - 1) >> PageBits, pages - 1);
+        for (u64 page = begin >> PageBits; page <= last; ++page) {
+            if (first[page] == 0) {
+                first[page] = static_cast<u8>(static_cast<u8>(kind) + 1);
+            }
+        }
+    }
+
+    /// WriteKind + 1 of the page's first write, 0 if none was seen.
+    [[nodiscard]] u8 Of(u64 address) const {
+        const u64 page = address >> PageBits;
+        return first.empty() || page >= pages ? 0 : first[page];
+    }
+
+    void Clear() {
+        std::vector<u8>().swap(first);
+    }
+
+    static constexpr u64 PageBits = 12;
+
+private:
+    u64 pages;
+    std::vector<u8> first;
 };
 
 } // namespace VideoCommon::Nx2FrontDiag

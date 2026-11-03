@@ -1503,6 +1503,74 @@ bool FrontSkipSame() {
     return skip;
 }
 
+// Front diag (EDEN_NX2_GPU_PROFILE, nx2_front_diag_hooks.h): the guest memory a method the front
+// just sent writes on the back, from the front's registers, or the work it starts. `words`: the
+// constant buffer words written; `executable`: in the execution mask; `instance_loop`: a method
+// of an instance loop. Out of line: the front's path keeps a call.
+YUZU_NO_INLINE void FrontDiagNote(const Tegra::MemoryManager& memory,
+                                  const std::array<u32, Maxwell3D::Regs::NUM_REGS>& regs,
+                                  u32 method, u32 words, bool executable, bool instance_loop) {
+    namespace Diag = VideoCommon::Nx2FrontDiag;
+    Diag::NoteDeferredDraw(instance_loop, executable, false);
+    const bool draw_work = executable && !FrontHandledOutsideDrawManager(method);
+    const auto address = [&regs](u32 high, u32 low) {
+        return (GPUVAddr{regs[high]} << 32) | GPUVAddr{regs[low]};
+    };
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    if (method >= cb_data && method < cb_data + 16) {
+        // Written at the offset before the words (the front advanced it already).
+        const GPUVAddr buffer = address(MAXWELL3D_REG_INDEX(const_buffer.address_high),
+                                        MAXWELL3D_REG_INDEX(const_buffer.address_low));
+        const u32 offset = regs[MAXWELL3D_REG_INDEX(const_buffer.offset)] - words * sizeof(u32);
+        Diag::NoteWrite(memory, Diag::WriteKind::CbData, buffer + offset, u64{words} * sizeof(u32));
+        return;
+    }
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(report_semaphore.query): {
+        // Release and report only write (ProcessQueryGet): a short query's word, or 16 bytes.
+        const u32 query = regs[MAXWELL3D_REG_INDEX(report_semaphore.query)];
+        if ((query & 3) == 0 || (query & 3) == 2) {
+            Diag::NoteWrite(memory, Diag::WriteKind::Report,
+                            address(MAXWELL3D_REG_INDEX(report_semaphore.address_high),
+                                    MAXWELL3D_REG_INDEX(report_semaphore.address_low)),
+                            ((query >> 28) & 1) != 0 ? 4 : 16);
+        }
+        return;
+    }
+    case MAXWELL3D_REG_INDEX(sync_info):
+        // The syncpoint shim's word of it changes once the back increments it.
+        Diag::NoteWork(Diag::WorkKind::Syncpoint);
+        return;
+    case MAXWELL3D_REG_INDEX(inline_data): {
+        constexpr u32 dest = MAXWELL3D_REG_INDEX(upload.dest.address_high);
+        const u32 blocks = regs[MAXWELL3D_REG_INDEX(upload.dest.pitch) + 1];
+        const auto [begin, end] = Diag::InlineRange(
+            address(dest, dest + 1), regs[MAXWELL3D_REG_INDEX(upload.line_length_in)],
+            regs[MAXWELL3D_REG_INDEX(upload.line_count)],
+            regs[MAXWELL3D_REG_INDEX(upload.dest.pitch)],
+            (regs[MAXWELL3D_REG_INDEX(launch_dma)] & 1) != 0,
+            regs[MAXWELL3D_REG_INDEX(upload.dest.width)],
+            regs[MAXWELL3D_REG_INDEX(upload.dest.height)],
+            regs[MAXWELL3D_REG_INDEX(upload.dest.depth)], (blocks >> 4) & 0xf, (blocks >> 8) & 0xf);
+        Diag::NoteWrite(memory, Diag::WriteKind::Inline, begin, end - begin);
+        return;
+    }
+    default:
+        break;
+    }
+    if (draw_work) {
+        Diag::NoteWork(Diag::WorkKind::Draw);
+        if (method == MAXWELL3D_REG_INDEX(draw.end)) {
+            // The vertex program's address, as RESETFIX reads it: pipelines[1].reserved[0-1].
+            using Pipeline = Maxwell3D::Regs::Pipeline;
+            constexpr u32 program = MAXWELL3D_REG_INDEX(pipelines) +
+                                    sizeof(Pipeline) / sizeof(u32) +
+                                    offsetof(Pipeline, reserved) / sizeof(u32);
+            Diag::NoteDrawEnd(memory, (GPUVAddr{regs[program] & 0xff} << 32) | regs[program + 1]);
+        }
+    }
+}
+
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
@@ -1625,6 +1693,10 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
     }
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        FrontDiagNote(memory_manager, fs.regs, method, 1, execution_mask[method],
+                      DrawManager::IsInstanceLoopMethod(method));
+    }
 }
 
 void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
@@ -1740,6 +1812,10 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         fs.NoteGapMethod(2, method);
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
+    if (VideoCommon::Nx2FrontDiag::On() && amount != 0) [[unlikely]] {
+        FrontDiagNote(memory_manager, fs.regs, method, amount, execution_mask[method],
+                      DrawManager::IsInstanceLoopMethod(method));
+    }
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
@@ -1843,6 +1919,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         fs.draw_pending = false;
         split.DeferTo<VideoCommon::DeferTarget::OnA>(
             [this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        if (diag) [[unlikely]] {
+            Diag::NoteDeferredDraw(false, false, true);
+        }
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
@@ -1855,17 +1934,24 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
 
 void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
                              u32 count) {
-    // The words may be written by methods still queued for the back (indirect draw arguments
-    // from a culling dispatch), and the caches that may hold newer ones belong to it.
-    VideoCommon::Nx2FrontDiag::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::FrontDmaRead);
+    namespace Diag = VideoCommon::Nx2FrontDiag;
     const GPUVAddr source = (GPUVAddr{fs.regs[0x154] & 0x1ffffff} << 32) | fs.regs[0x155];
     const u32 ram = fs.regs[0x156];
     const u32 words = std::min<u32>(count, 0x1000);
     const size_t read_bytes = size_t{words} * sizeof(u32);
+    // Front diag: what was pending of the words, and the words, before the drain.
+    const bool diag = Diag::On();
+    const Diag::ReadProbe probe =
+        diag ? Diag::DmaReadBefore(memory_manager, source, words) : Diag::ReadProbe{};
+    // The words may be written by methods still queued for the back (indirect draw arguments
+    // from a culling dispatch), and the caches that may hold newer ones belong to it.
+    const bool waited = Diag::CountDrain(split, VideoCommon::Nx2Profile::DrainSite::FrontDmaRead);
     if (VideoCommon::Nx2Profile::Enabled()) {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
     }
-    if (memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
+    const bool gpu_dirty =
+        memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache);
+    if (gpu_dirty) {
         memory_manager.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
     }
     for (u32 i = 0; i < words; ++i) {
@@ -1875,6 +1961,10 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         } else if (ram + i < native_data_ram.size()) {
             native_data_ram[ram + i] = word;
         }
+    }
+    if (diag) [[unlikely]] {
+        Diag::DmaReadAfter(probe, memory_manager, source, words, method == 0x158, waited,
+                           gpu_dirty);
     }
 }
 
@@ -2046,6 +2136,9 @@ void Maxwell3D::FrontIndirectDraw(Core::System& system, VideoCommon::GpuSplit& s
     held = {payload, start, split.WritePosition(), split.Session()};
     fs.indirect_interposer = 0;
     fs.gap_methods = 0;
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        VideoCommon::Nx2FrontDiag::NoteWork(VideoCommon::Nx2FrontDiag::WorkKind::Draw);
+    }
 }
 
 void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record,

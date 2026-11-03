@@ -109,6 +109,11 @@ void DrainBack(VideoCommon::Nx2Profile::DrainSite site) {
 // A release the puller queued for the back (PeekTracking). A 16-byte one also writes a zero
 // word after the payload and the timestamp after that.
 void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool timestamp) {
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        VideoCommon::Nx2FrontDiag::NoteWrite(dma_pusher.memory_manager,
+                                             VideoCommon::Nx2FrontDiag::WriteKind::Release,
+                                             address, timestamp ? 16 : 4);
+    }
     if (!PeekTracking()) {
         return;
     }
@@ -471,11 +476,17 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
         // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
         // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
         OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+            VideoCommon::Nx2FrontDiag::NoteWork(VideoCommon::Nx2FrontDiag::WorkKind::Fences);
+        }
         break;
     case Puller::FenceOperation::Increment:
         OnBack([rasterizer = dma_pusher.rasterizer, id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
             rasterizer->SignalSyncPoint(id);
         });
+        if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+            VideoCommon::Nx2FrontDiag::NoteWork(VideoCommon::Nx2FrontDiag::WorkKind::Syncpoint);
+        }
         break;
     default:
         UNIMPLEMENTED_MSG("Unimplemented operation {}", regs.fence_action.op.Value());
@@ -617,6 +628,11 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
         rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
                           VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
     });
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        VideoCommon::Nx2FrontDiag::NoteWrite(dma_pusher.memory_manager,
+                                             VideoCommon::Nx2FrontDiag::WriteKind::Release,
+                                             sequence_address, 4);
+    }
 }
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
@@ -675,6 +691,9 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
                 rasterizer->ReleaseFences();
                 CheckSemExecute(operation, address, memory_manager->Read<u32>(address), payload);
             });
+            if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+                VideoCommon::Nx2FrontDiag::NoteWork(VideoCommon::Nx2FrontDiag::WorkKind::Fences);
+            }
             return;
         }
     }

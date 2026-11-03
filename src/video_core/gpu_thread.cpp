@@ -106,6 +106,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 // in order, and so does the signal that the command ran.
                 auto* const rasterizer_ptr = renderer.ReadRasterizer();
                 namespace Diag = VideoCommon::Nx2FrontDiag;
+                const bool diag = Diag::On();
                 if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                     Profile::Scope scope{Profile::Zone::Push};
                     // Held-back guest CPU writes first (see the single-thread path below).
@@ -117,13 +118,22 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     }
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                     split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
+                    if (diag) [[unlikely]] {
+                        Diag::NoteWork(Diag::WorkKind::Tick);
+                    }
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     // Unknown work: on A with the back stages parked (nx2_stages.h).
                     split.DeferFunctionTo<VideoCommon::DeferTarget::Join>(std::move(run->func));
+                    if (diag) [[unlikely]] {
+                        Diag::NoteWork(Diag::WorkKind::Run);
+                    }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
                         rasterizer_ptr->FlushRegion(addr, size);
                     });
+                    if (diag) [[unlikely]] {
+                        Diag::NoteDeviceWrite(Diag::WriteKind::Download, flush->addr, flush->size);
+                    }
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
                         rasterizer_ptr->OnCacheInvalidation(addr, size);

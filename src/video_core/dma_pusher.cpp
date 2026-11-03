@@ -32,6 +32,27 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+namespace {
+
+// Front diag (EDEN_NX2_GPU_PROFILE): what methods just sent to an engine other than Maxwell3D's
+// front write (nx2_front_diag_hooks.h), out of line.
+YUZU_NO_INLINE void DiagNoteEngineSlow(const MemoryManager& memory,
+                                       const Engines::EngineInterface* engine,
+                                       Engines::EngineTypes type, u32 method, const u32* arguments,
+                                       u32 count) {
+    VideoCommon::Nx2FrontDiag::NoteEngineMethod(memory, engine, type, method, arguments, count,
+                                                engine->execution_mask[method]);
+}
+
+void DiagNoteEngine(const MemoryManager& memory, const Engines::EngineInterface* engine,
+                    Engines::EngineTypes type, u32 method, const u32* arguments, u32 count) {
+    if (VideoCommon::Nx2FrontDiag::On()) [[unlikely]] {
+        DiagNoteEngineSlow(memory, engine, type, method, arguments, count);
+    }
+}
+
+} // Anonymous namespace
+
 void Nx2CheckMarkWord(u64 index, u64 mask, u64 pages) {
     static std::atomic<u64> checked{};
     static std::atomic<u64> differed{};
@@ -512,12 +533,16 @@ void DmaPusher::CallMethod(u32 argument) {
                         Diag::SetSendKind(Diag::SendKind::FrontCompute);
                         compute->FrontCallMethod(system, split, dma_state.method, argument,
                                                  dma_state.is_last_call, &segment);
+                        DiagNoteEngine(memory_manager, subchannel, type, dma_state.method,
+                                       &argument, 1);
                         return;
                     }
                 }
             }
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr);
+            DiagNoteEngine(memory_manager, subchannel, subchannel_type[dma_state.subchannel],
+                           dma_state.method, &argument, 1);
             return;
         }
         Diag::SetSendKind(Diag::SendKind::Direct);
@@ -567,12 +592,16 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                         Diag::SetSendKind(Diag::SendKind::FrontCompute);
                         compute->FrontCallMultiMethod(system, split, dma_state.method, base_start,
                                                       num_methods, dma_state.method_count, &segment);
+                        DiagNoteEngine(memory_manager, subchannel, type, dma_state.method,
+                                       base_start, num_methods);
                         return;
                     }
                 }
             }
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr);
+            DiagNoteEngine(memory_manager, subchannel, subchannel_type[dma_state.subchannel],
+                           dma_state.method, base_start, num_methods);
             return;
         }
         Diag::SetSendKind(Diag::SendKind::Direct);
