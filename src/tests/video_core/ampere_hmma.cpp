@@ -21,6 +21,13 @@ constexpr Instruction HMMA_16816{{0x102c723c, 0x00000030, 0x000008ff, 0x04aff000
 constexpr Instruction UMOV_UR22{{0x00047c82, 22, 0x08000000, 0}};
 constexpr Instruction UMOV_UR21{{0x00047c82, 21, 0x08000000, 0}};
 
+// No lowering for opcode 0xfff.
+constexpr Instruction UNSUPPORTED{{0x00007fff, 0, 0, 0}};
+// IMAD.WIDE.U32 R238:R239, R0, R1, RZ: an aligned pair ending at R239.
+constexpr Instruction IMAD_WIDE_R238{{0x00ee7225, 1, 0x078e00ff, 0}};
+// LDSM.16.M88.4 R238, [R0]: four registers from R238, so R240 and R241 too.
+constexpr Instruction LDSM_X4_R238{{0x00ee783b, 0, 0x00000200, 0}};
+
 constexpr std::string_view OVERLAP = "native matrix multiply scratch overlaps R240-R245";
 
 // The lowering reads EDEN_NX2_TENSOR once per process, so each mode needs its own run.
@@ -120,5 +127,48 @@ TEST_CASE("Ampere HMMA is not emulated next to native R240-R245", "[video_core][
     const auto lowered = LowerToMaxwell(low);
     CheckMode(lowered, false, 0);
     if (Emulates()) CheckExpansion(lowered, 236, 64, 8);
+}
+
+TEST_CASE("Ampere HMMA programs rejected later still name the matrix multiply", "[video_core][ampere]") {
+    // Before the emulation the HMMA itself rejected the program, so KeplerCompute always stood in
+    // with its upscale; a later rejection must keep "matrix multiply" in its reason.
+    const std::array<Instruction, 3> later{HMMA_16816, UNSUPPORTED, EXIT};
+    const auto lowered = LowerToMaxwell(later);
+    REQUIRE(!static_cast<bool>(lowered));
+    const auto mode = TensorMode();
+    if (mode == "off" || mode == "0") {
+        REQUIRE(lowered.error == "native matrix multiply (EDEN_NX2_TENSOR=off)");
+        REQUIRE(lowered.error_offset == 0);
+    } else if (mode == "stub" || mode == "unguarded") {
+        REQUIRE(lowered.error == "unsupported native opcode");
+        REQUIRE(lowered.error_offset == 16);
+    } else {
+        REQUIRE(lowered.error == "native matrix multiply program: unsupported native opcode");
+        REQUIRE(lowered.error_offset == 16);
+    }
+    // A rejection before the HMMA is reached keeps its own reason, as before.
+    const std::array<Instruction, 3> earlier{UNSUPPORTED, HMMA_16816, EXIT};
+    REQUIRE(LowerToMaxwell(earlier).error == "unsupported native opcode");
+}
+
+TEST_CASE("Ampere HMMA programs flag the KeplerCompute fallback", "[video_core][ampere]") {
+    const std::array<Instruction, 2> code{HMMA_16816, EXIT};
+    const auto lowered = LowerToMaxwell(code);
+    const auto mode = TensorMode();
+    // Only the guarded emulation stands in when the pipeline fails to build.
+    REQUIRE(lowered.matrix_multiply == (Emulates() && mode != "unguarded"));
+    const std::array<Instruction, 1> plain{EXIT};
+    REQUIRE(!LowerToMaxwell(plain).matrix_multiply);
+}
+
+TEST_CASE("Ampere HMMA scratch check counts R237-R239 only for unaligned lists", "[video_core][ampere]") {
+    // An aligned pair at R238:R239 cannot reach R240, nor can an HMMA writing R238 and R239.
+    const std::array<Instruction, 3> pair{IMAD_WIDE_R238, HMMA_16816, EXIT};
+    CheckMode(LowerToMaxwell(pair), false, 16);
+    const std::array<Instruction, 2> dest_r238{WithDest(HMMA_16816, 238), EXIT};
+    CheckMode(LowerToMaxwell(dest_r238), false, 0);
+    // LDSM.x4 from R238 writes R238-R241.
+    const std::array<Instruction, 3> ldsm{LDSM_X4_R238, HMMA_16816, EXIT};
+    CheckMode(LowerToMaxwell(ldsm), true, 16);
 }
 } // namespace

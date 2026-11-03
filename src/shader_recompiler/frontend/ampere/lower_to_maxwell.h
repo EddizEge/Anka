@@ -9,6 +9,7 @@
 #include <array>
 #include <bit>
 #include <span>
+#include <string>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -35,7 +36,10 @@ struct LoweredProgram {
     u32 source_size{};
     u32 required_texture_buffer = ~0U;
     u32 error_offset{};
-    std::string_view error;
+    std::string error;
+    /// An HMMA was emulated (not stubbed, not EDEN_NX2_TENSOR=unguarded): if the program fails to
+    /// build later, KeplerCompute stands in with its upscale as for a rejected one.
+    bool matrix_multiply{};
 
     explicit operator bool() const { return error.empty(); }
 };
@@ -67,7 +71,13 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
         result.instructions.clear();
         result.source_instruction_offsets.clear();
         result.error_offset = index * sizeof(Instruction);
-        result.error = reason;
+        // Before the HMMA emulation the first HMMA rejected the program, so KeplerCompute always
+        // stood in with its upscale ("matrix multiply" in the reason): keep that for any later
+        // rejection of a program whose HMMA is emulated.
+        if (hmma_index != ~0U && reason.find("matrix multiply") == std::string_view::npos)
+            result.error = std::string{"native matrix multiply program: "}.append(reason);
+        else
+            result.error = reason;
         return result;
     };
     const auto finish = [&](u32 index) {
@@ -81,6 +91,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             result.instructions[relocation.output_index] |= (static_cast<u64>(relative) & 0xffffff) << 20;
         }
         result.source_size = (index + 1) * sizeof(Instruction);
+        result.matrix_multiply = hmma_index != ~0U;
         return result;
     };
     if (code.empty() || code.size() > 65536) return fail(0, "invalid native program size");
@@ -102,13 +113,23 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             if (active_link && opcode != 0x950 && insn.Bits(16, 8) == *active_link)
                 return fail(index, "native callee overwrites link register");
         }
+        // R237-R239 reach HMMA's R240-R245 only as the base of a list of up to four registers that
+        // need not be aligned, which these lowerings accept: texture and surface ops (TEX, TLD,
+        // TLD4 including its .PTP source pairs, TMML, TXD, SULD, SUST), LDSM and ALD / AST. 64- and
+        // 128-bit memory and arithmetic operands are aligned to their size and stop at R239.
+        const bool unaligned_list = opcode == 0xb60 || opcode == 0xb66 || opcode == 0xb63 ||
+                                    opcode == 0xb69 || opcode == 0xb6c || opcode == 0xb97 ||
+                                    opcode == 0xb9b || opcode == 0x83b || opcode == 0x321 ||
+                                    opcode == 0x322;
         // Scratch values and emulated uniform state occupy reserved high GPRs.
         // Reject native accesses that could alias that state.
         for (u32 bit : {16U, 24U, 32U, 64U}) {
+            if (unaligned_list && insn.Bits(bit, 8) >= 237 && insn.Bits(bit, 8) < 240)
+                touches_hmma_scratch = true;
             if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? 216U : 246U) && reg < 255) return fail(index, "native program uses lowering scratch registers");
-            if (reg >= 237 && reg < 246) touches_hmma_scratch = true; // a vector from R237 reaches R240
+            if (reg >= 240 && reg < 246) touches_hmma_scratch = true;
         }
         // UR0-UR21 live in R216-R237 and UR22-UR27 in R240-R245 (R239 holds the uniform
         // predicates), so even/odd pairs stay adjacent. Sites that still check reg < 16 rely on
