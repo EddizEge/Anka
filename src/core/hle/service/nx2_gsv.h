@@ -1021,7 +1021,8 @@ public:
                 RegisterHandlersTipc(vrr);
             } else {
                 LOG_WARNING(Service, "nx2:vi2 EDEN_NX2_DK_DYN: 107 answers from the reply table "
-                                     "(EDEN_NX2_VI2_REPLY), not with VRR support");
+                                     "(EDEN_NX2_VI2_REPLY), not with VRR support; presents are "
+                                     "still paced to every vblank");
             }
         }
     }
@@ -1180,8 +1181,11 @@ private:
             if (!m_pace_one_logged) {
                 m_pace_one_logged = true;
                 LOG_INFO(Service, "nx2:vi2 dynamic FPS (EDEN_NX2_DK_DYN): presents paced to every "
-                                  "vblank; EDEN_NX2_MODE_PACE, EDEN_NX2_MODE_GOV and the present "
-                                  "interval set aside");
+                                  "vblank; EDEN_NX2_MODE_PACE and the present interval set aside");
+                if (VideoCommon::Nx2ModeGov::Enabled()) {
+                    LOG_WARNING(Service, "nx2:vi2 EDEN_NX2_MODE_GOV stays on with EDEN_NX2_DK_DYN: "
+                                         "its GPU timer steers the patched game too");
+                }
             }
             PaceToVblank(1, 0);
         } else {
@@ -1200,7 +1204,7 @@ private:
         if (m_vrr_present_timer) {
             PresentVrrVsync();
         }
-        if (!m_pace_one && VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
+        if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
         }
         if (!m_pace_one && VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {

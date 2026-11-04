@@ -25,9 +25,10 @@ constexpr bool ReportVrr(bool applied, u64 application) {
 }
 
 /// Presents paced to every vblank (60 Hz at most) instead of the 2 or 3 the game asks for, and
-/// EDEN_NX2_MODE_PACE / EDEN_NX2_MODE_GOV set aside: holding a frame for its interval stretched
-/// the whole frame time the patched game measures and kept it at 20-30 fps (ZendNevs's pace_one).
-/// EDEN_NX2_PACE_ONE=0 keeps the interval.
+/// EDEN_NX2_MODE_PACE set aside: holding a frame for its interval stretched the whole frame time
+/// the patched game measures and kept it at 20-30 fps (ZendNevs's pace_one). EDEN_NX2_PACE_ONE=0
+/// keeps the interval. EDEN_NX2_MODE_GOV (off with EDEN_NX2_MODE_PACE) is left as it is: it also
+/// drives the GPU timer.
 constexpr bool PaceOne(bool applied, u64 application, const char* pace_one) {
     return ReportVrr(applied, application) && !(pace_one != nullptr && pace_one[0] == '0');
 }
