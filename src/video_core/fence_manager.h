@@ -26,6 +26,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/nx2_stages.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -126,7 +127,8 @@ public:
             func();
         }
         fences.push(std::move(new_fence));
-        if (should_flush) {
+        // A real fence's Queue submitted already (EDEN_NX2_RX_ONE_SUBMIT, nx2_reactive_flush.h).
+        if (should_flush && !(real_fence && one_submit)) {
             rasterizer.FlushCommands();
             if (stats) [[unlikely]] {
                 Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FenceExtraFlushes,
@@ -438,6 +440,8 @@ private:
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
+    /// EDEN_NX2_RX_ONE_SUBMIT: no FlushCommands after a real fence's own submission
+    const bool one_submit = Nx2Reactive::OneSubmit();
 
     std::mutex guard;
     std::mutex ring_guard;

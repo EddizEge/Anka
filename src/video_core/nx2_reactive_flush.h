@@ -165,6 +165,17 @@ private:
     std::vector<Id> ids;
 };
 
+/// EDEN_NX2_RX_ONE_SUBMIT=1: a fence with downloads to wait for is made real, and a real fence's
+/// Queue submits the command buffer (InnerFence::Queue: scheduler.Flush); SignalFence then called
+/// FlushCommands, which submits again whenever the rasterizer drew since its last own flush: an
+/// empty submission (and state invalidation) per such fence. With the switch the second one is
+/// left out; nothing was recorded between the two.
+[[nodiscard]] inline bool OneSubmit() noexcept {
+    static const bool enabled =
+        Common::Nx2Reactive::ParseFlag(Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_ONE_SUBMIT"));
+    return enabled;
+}
+
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads
 /// note no buffer page (NoteCpuRead), so nothing the GPU writes to buffers is copied back at
 /// fences; reads still trap and images still latch.
