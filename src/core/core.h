@@ -123,6 +123,9 @@ extern std::atomic<u64> g_nx2_present_count;
 extern std::atomic<u64> g_nx2_album_count;
 /// Emulation sessions started in this process (nvdrv's Module counts them).
 extern std::atomic<u32> g_nx2_session;
+/// EDEN_NX2_DK_DYN: Donkey Kong Bananza's dynamic frame rate patch went into its main module as it
+/// loaded (core/loader/nx2_dk_dynamic_fps.h); vi2 then reports VRR and paces every vblank.
+extern std::atomic<bool> g_nx2_dk_dyn_applied;
 
 class CpuManager;
 class Debugger;

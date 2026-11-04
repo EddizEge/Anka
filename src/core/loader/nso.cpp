@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/loader/nso.h"
+#include "core/loader/nx2_dk_dynamic_fps.h"
 #include "core/memory.h"
 
 #ifdef HAS_NCE
@@ -174,6 +176,36 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         pi_header = pm->PatchNSO(pi_header, name);
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
+    }
+
+    // EDEN_NX2_DK_DYN=1 (off by default): Donkey Kong Bananza's dynamic frame rate
+    // (nx2_dk_dynamic_fps.h). Off, no module is touched.
+    static const char* const dk_dyn_switch = std::getenv("EDEN_NX2_DK_DYN");
+    {
+        const auto& text = nso_header.segments[0];
+        const size_t text_start = module_start + text.location;
+        const std::span<u8> image{codeset.memory};
+        const auto dk_dyn = Nx2DkDynamicFps::ApplyIfEnabled(
+            dk_dyn_switch, process.GetProgramId(), name,
+            text_start <= image.size() ? image.subspan(text_start) : std::span<u8>{}, text.size,
+            PageAlignSize(text.size));
+        if (dk_dyn) {
+            Core::g_nx2_dk_dyn_applied.store(dk_dyn->applied, std::memory_order_relaxed);
+            if (dk_dyn->applied) {
+                LOG_INFO(Loader,
+                         "Donkey Kong Bananza: dynamic FPS on (main+{:#x}, main+{:#x}, main+{:#x}; "
+                         "EDEN_NX2_DK_DYN)",
+                         text.location + dk_dyn->controller * sizeof(u32),
+                         text.location + dk_dyn->sleep * sizeof(u32),
+                         text.location + dk_dyn->step * sizeof(u32));
+            } else {
+                LOG_WARNING(Loader,
+                            "Donkey Kong Bananza: dynamic FPS not applied ({}, {}, {} matches; "
+                            "EDEN_NX2_DK_DYN)",
+                            dk_dyn->controller_matches, dk_dyn->sleep_matches,
+                            dk_dyn->step_matches);
+            }
+        }
     }
 
 #ifdef HAS_NCE
