@@ -18,6 +18,7 @@ add_executable(tests
     common/unique_function.cpp
     core/core_timing.cpp
     core/internal_network/network.cpp
+    core/nx2_dk_dyn_pace.cpp
     core/nx2_dk_dynamic_fps.cpp
     core/nx2_ipc_trace.cpp
     core/nx2_present_rate.cpp

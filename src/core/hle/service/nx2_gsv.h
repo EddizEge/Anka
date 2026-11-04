@@ -69,6 +69,7 @@
 #include "core/arm/debug.h"
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/nx2_event_diag.h"
+#include "core/hle/service/nx2_dk_dyn_pace.h"
 #include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
@@ -1005,6 +1006,20 @@ public:
             RegisterReplies();
         } else {
             static_cast<void>(ReplyOwnCommands()); // its "needs the table" warning
+        }
+        // EDEN_NX2_DK_DYN applied (nx2_dk_dyn_pace.h): 107 reports VRR.
+        const bool dk_dyn = Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed);
+        const u64 application = system.GetApplicationProcessProgramID();
+        if (Nx2DkDynPace::ReportVrr(dk_dyn, application)) {
+            if (GetReplies() == nullptr) {
+                static const FunctionInfo vrr[] = {
+                    {107, &INx2Vi2Session::ReportVrrSupported, "ReportVrrSupported (EDEN_NX2_DK_DYN)"},
+                };
+                RegisterHandlersTipc(vrr);
+            } else {
+                LOG_WARNING(Service, "nx2:vi2 EDEN_NX2_DK_DYN: 107 answers from the reply table "
+                                     "(EDEN_NX2_VI2_REPLY), not with VRR support");
+            }
         }
     }
 
@@ -1976,6 +1991,20 @@ private:
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
+
+    // 107 with EDEN_NX2_DK_DYN applied: VRR supported (Nx2DkDynPace::VrrReply). Auto-stubbed (an
+    // empty success: no VRR) otherwise.
+    void ReportVrrSupported(HLERequestContext& ctx) {
+        if (!m_vrr_reported) {
+            m_vrr_reported = true;
+            LOG_INFO(Service, "nx2:vi2 107: VRR supported, reply {} (EDEN_NX2_DK_DYN applied)",
+                     Nx2Vi2Reply::FormatWords(std::vector<u32>(Nx2DkDynPace::VrrReply.begin(),
+                                                               Nx2DkDynPace::VrrReply.end())));
+        }
+        TipcReplyWords(ctx, Nx2DkDynPace::VrrReply);
+    }
+
+    bool m_vrr_reported{};
 
     // EDEN_NX2_VI2_REPLY_FILE / EDEN_NX2_VI2_REPLY (off by default): replies from a table that may
     // change while the game runs (nx2_vi2_reply.h), shared by every vi2 session. Null when off.
