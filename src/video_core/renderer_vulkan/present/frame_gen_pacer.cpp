@@ -55,6 +55,7 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
 
     const Clock::time_point now = Clock::now();
     const size_t previous_generations = std::exchange(issued_generations, 0);
+    last_interval = 0.0f;
     if (!last_frame) {
         last_frame = now;
         return {};
@@ -88,6 +89,7 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
         return {};
     }
 
+    last_interval = interval_seconds;
     smoothed_interval = smoothed_interval > 0.0f
                             ? smoothed_interval +
                                   (interval_seconds - smoothed_interval) * INTERVAL_SMOOTHING
@@ -228,6 +230,7 @@ void FrameGenPacer::Reset() {
     next_probe.reset();
     deficit_since.reset();
     smoothed_interval = 0.0f;
+    last_interval = 0.0f;
     output_credit = 0.0f;
     probe_base_rate = 0.0f;
     unloaded_base_rate = 0.0f;

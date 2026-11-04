@@ -177,7 +177,7 @@ try
                   PresentFiltersForAppletCapture)
     , rasterizer(render_window, gpu, device_memory, device, memory_allocator, state_tracker, scheduler)
 #ifdef HAS_LSFG
-    , frame_gen(memory_allocator, scheduler)
+    , frame_gen(memory_allocator, scheduler, render_window.GetWindowInfo().render_surface)
 #endif
 {
 

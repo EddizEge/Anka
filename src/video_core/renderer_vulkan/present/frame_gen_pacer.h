@@ -21,6 +21,13 @@ public:
 
     void Reset();
 
+    /// The interval between this real frame and the one before it in seconds, as the last Plan
+    /// measured it (0 when that call did not get to measure it: first frame, stall, burst);
+    /// for EDEN_NX2_FG_TIMED, read on the thread that calls Plan.
+    [[nodiscard]] f32 LastInterval() const {
+        return last_interval;
+    }
+
 private:
     using Clock = std::chrono::steady_clock;
 
@@ -34,6 +41,7 @@ private:
     std::optional<Clock::time_point> next_probe;
     std::optional<Clock::time_point> deficit_since;
     f32 smoothed_interval{};
+    f32 last_interval{};
     f32 output_credit{};
     f32 probe_base_rate{};
     f32 unloaded_base_rate{};

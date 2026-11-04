@@ -318,6 +318,9 @@ if (ENABLE_LSFG)
         renderer_vulkan/present/fsr3_frame_gen.h
         renderer_vulkan/present/frame_gen_pacer.cpp
         renderer_vulkan/present/frame_gen_pacer.h
+        renderer_vulkan/present/nx2_fg_refresh.cpp
+        renderer_vulkan/present/nx2_fg_refresh.h
+        renderer_vulkan/present/nx2_fg_timing.h
         renderer_vulkan/present/lsfg_alpha.cpp
         renderer_vulkan/present/lsfg_alpha.h
         renderer_vulkan/present/lsfg_beta.cpp

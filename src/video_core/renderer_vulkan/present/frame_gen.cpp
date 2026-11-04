@@ -6,6 +6,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,8 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
+#include "video_core/renderer_vulkan/present/nx2_fg_refresh.h"
+#include "video_core/renderer_vulkan/present/nx2_fg_timing.h"
 #include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -27,6 +30,8 @@ namespace {
 constexpr size_t COLOR_CHANNELS = 4;
 constexpr u64 LSFG_REQUIRED_FRAMES = 2;
 constexpr u32 LSFG_RECURRENCE_FRAMES = 2;
+constexpr u32 TIMING_DIAG_FRAMES = 600;
+constexpr auto DISPLAY_REFRESH_RECHECK = std::chrono::seconds(2);
 
 [[nodiscard]] f32 ManualFlowScale() {
     return static_cast<f32>(Settings::values.frame_gen_flow_scale.GetValue()) / 100.0f;
@@ -194,8 +199,30 @@ void CopyPresentedFrame(vk::CommandBuffer cmdbuf, VkImage source, LsfgImage& des
 
 } // Anonymous namespace
 
-FrameGen::FrameGen(MemoryAllocator& memory_allocator_, Scheduler& scheduler_)
-    : memory_allocator{memory_allocator_}, scheduler{scheduler_} {}
+FrameGen::FrameGen(MemoryAllocator& memory_allocator_, Scheduler& scheduler_,
+                   void* native_window_)
+    : memory_allocator{memory_allocator_}, scheduler{scheduler_}, native_window{native_window_} {
+    timing.timed = Nx2FgTiming::SwitchOn(std::getenv("EDEN_NX2_FG_TIMED"));
+    const char* present_diag = std::getenv("EDEN_NX2_PRESENT_DIAG");
+    timing.diag = Nx2FgTiming::SwitchOn(std::getenv("EDEN_NX2_FG_DIAG")) ||
+                  (timing.timed && present_diag != nullptr && present_diag[0] != '0');
+    if (!timing.timed && !timing.diag) {
+        return;
+    }
+    bool invalid = false;
+    timing.override_hz =
+        Nx2FgTiming::ParseRefreshHz(std::getenv("EDEN_NX2_FG_REFRESH_HZ"), &invalid);
+    if (invalid) {
+        LOG_WARNING(Render_Vulkan, "nx2:fg EDEN_NX2_FG_REFRESH_HZ is not a refresh of 20-1000 Hz, "
+                                   "the display's refresh is used");
+    }
+    LOG_INFO(Render_Vulkan,
+             "nx2:fg timed generated frames {} (EDEN_NX2_FG_TIMED, FSR3 only), refresh {}",
+             timing.timed ? "on" : "off",
+             timing.override_hz
+                 ? fmt::format("{:.2f} Hz (EDEN_NX2_FG_REFRESH_HZ)", *timing.override_hz)
+                 : std::string{"from the display"});
+}
 
 FrameGen::~FrameGen() = default;
 
@@ -248,6 +275,10 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
 
+    if (timing.timed || timing.diag) {
+        UpdateTiming(use_fsr3 && fsr3_chain);
+    }
+
     if (use_fsr3 && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
         fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, frame->index,
@@ -294,7 +325,11 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
     }
 
     if (use_fsr3 && fsr3_chain) {
-        const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
+        const f32 blend =
+            timing.applies
+                ? Nx2FgTiming::TimedBlend(generation, last_generations, timing.interval,
+                                          timing.period)
+                : static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
 
         scheduler.RequestOutsideRenderPassOperationContext();
         fsr3_chain->Generate(device, scheduler, *destination->storage_view, destination->index,
@@ -313,6 +348,106 @@ void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t gen
                                       extent);
         });
     }
+}
+
+f32 FrameGen::RefreshPeriod() {
+    if (timing.override_hz) {
+        return 1.0f / *timing.override_hz;
+    }
+    // Read again now and then: the window can move to another display, the mode can change
+    const auto now = std::chrono::steady_clock::now();
+    if (!timing.display_read || now - *timing.display_read >= DISPLAY_REFRESH_RECHECK) {
+        timing.display_read = now;
+        const f32 hz =
+            Nx2FgTiming::UsableDisplayHz(Nx2FgTiming::QueryDisplayRefreshHz(native_window))
+                .value_or(0.0f);
+        if (hz != timing.display_hz) {
+            LOG_INFO(Render_Vulkan, "nx2:fg display refresh {} Hz{}", hz,
+                     hz > 0.0f ? "" : " (unknown: generated frames keep the even weights)");
+            timing.display_hz = hz;
+        }
+    }
+    return timing.display_hz > 0.0f ? 1.0f / timing.display_hz : 0.0f;
+}
+
+// Before GenerateInto of this frame: B and V of its burst, whether the burst takes the timed
+// weights, and the EDEN_NX2_FG_DIAG line. B is this frame's own interval, not the pacer's smoothed
+// one: N - 1 went out that long before N, and a smoothed B lags each 60 <-> 30 change by several
+// frames (on 30 -> 60 with three generated frames it would even time a burst that no longer
+// drains).
+void FrameGen::UpdateTiming(bool use_fsr3) {
+    const size_t count = generated ? last_generations : 0;
+    // frame_pacing_mode Target_30..120 holds every present (generated ones too) to its own rate
+    // (Swapchain::AcquireNextImage): they no longer go out one refresh apart
+    const bool display_paced =
+        Settings::values.frame_pacing_mode.GetValue() == Settings::FramePacingMode::Target_Auto ||
+        !Settings::values.use_speed_limit.GetValue();
+    timing.interval = pacer.LastInterval();
+    timing.period = RefreshPeriod();
+    timing.applies = timing.timed && use_fsr3 && display_paced &&
+                     Nx2FgTiming::TimedApplies(count, timing.interval, timing.period);
+    if (!timing.diag) {
+        return;
+    }
+
+    auto& stats = timing.stats;
+    ++stats.bursts[std::min<size_t>(count, stats.bursts.size() - 1)];
+    if (count > 0) {
+        if (timing.applies) {
+            ++stats.timed_bursts;
+        }
+        stats.interval_min = stats.interval_count == 0
+                                 ? timing.interval
+                                 : std::min(stats.interval_min, timing.interval);
+        stats.interval_max = std::max(stats.interval_max, timing.interval);
+        stats.interval_sum += timing.interval;
+        ++stats.interval_count;
+        // The sample: the last burst with the most generated frames
+        if (count >= stats.sample_count && count <= stats.sample_blend.size()) {
+            stats.sample_count = count;
+            for (size_t i = 0; i < count; ++i) {
+                stats.sample_blend[i] =
+                    timing.applies
+                        ? Nx2FgTiming::TimedBlend(i, count, timing.interval, timing.period)
+                        : Nx2FgTiming::EvenBlend(i, count);
+            }
+        }
+    }
+    if (++stats.frames < TIMING_DIAG_FRAMES) {
+        return;
+    }
+
+    std::string bursts;
+    for (size_t i = 0; i < stats.bursts.size(); ++i) {
+        if (stats.bursts[i] != 0) {
+            bursts += fmt::format("{}{}{}:{}", bursts.empty() ? "" : " ", i,
+                                  i + 1 == stats.bursts.size() ? "+" : "", stats.bursts[i]);
+        }
+    }
+    std::string sample;
+    std::string even;
+    for (size_t i = 0; i < stats.sample_count; ++i) {
+        sample += fmt::format("{}{:.2f}", i == 0 ? "" : " ", stats.sample_blend[i]);
+        even += fmt::format("{}{:.2f}", i == 0 ? "" : " ",
+                            Nx2FgTiming::EvenBlend(i, stats.sample_count));
+    }
+    const f32 average = stats.interval_count > 0
+                            ? stats.interval_sum / static_cast<f32>(stats.interval_count)
+                            : 0.0f;
+    // Its own line: "nx2:vi2 last 600 presents" is read by the measuring tools
+    LOG_INFO(Render_Vulkan,
+             "nx2:fg timing last {} frames ({}{}): generated per frame {}; frame interval {:.1f} ms "
+             "(min {:.1f}, max {:.1f}); refresh {:.2f} ms ({}); timed weights in {} of {} bursts; "
+             "sample n={} t {} (even {})",
+             stats.frames, use_fsr3 ? "FSR3" : "not FSR3, weights fixed",
+             display_paced ? "" : ", presents held by frame_pacing_mode, weights even", bursts,
+             average * 1000.0f, stats.interval_min * 1000.0f, stats.interval_max * 1000.0f,
+             timing.period * 1000.0f,
+             timing.override_hz ? "EDEN_NX2_FG_REFRESH_HZ"
+                                : (timing.display_hz > 0.0f ? "display" : "unknown"),
+             stats.timed_bursts, stats.interval_count, stats.sample_count,
+             sample.empty() ? "-" : sample, even.empty() ? "-" : even);
+    stats = {};
 }
 
 void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format, f32 flow_scale) {
