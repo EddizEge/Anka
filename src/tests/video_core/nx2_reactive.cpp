@@ -14,6 +14,7 @@
 
 #include "common/nx2_reactive.h"
 #include "core/nx2_host_core.h"
+#include "video_core/nx2_pitch_forced.h"
 #include "video_core/nx2_reactive_flush.h"
 
 namespace Reactive = Common::Nx2Reactive;
@@ -575,4 +576,19 @@ TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
                            "modified 18 alias 19"));
     // Appended: the older part ends as before.
     REQUIRE(Contains(line, "latched images 0; fences 101"));
+}
+
+TEST_CASE("Reactive pitch linear forced", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // Reactive flushing off: pitch linear images forced, switch or not (as before); on: only with
+    // EDEN_NX2_RX_PITCH_FORCED.
+    static_assert(Flush::PitchLinearForced(false, false));
+    static_assert(Flush::PitchLinearForced(false, true));
+    static_assert(!Flush::PitchLinearForced(true, false));
+    static_assert(Flush::PitchLinearForced(true, true));
+    for (int bits = 0; bits < 4; ++bits) {
+        const bool reactive = (bits & 1) != 0;
+        const bool forced = (bits & 2) != 0;
+        REQUIRE(Flush::PitchLinearForced(reactive, forced) == (!reactive || forced));
+    }
 }
