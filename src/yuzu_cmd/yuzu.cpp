@@ -103,6 +103,8 @@ static void PrintCodeAddress(const char* label, const void* address) {
 }
 
 static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
+    // EDEN_NX2_OSD: no frozen text left in RTSS's overlay (nothing if it never started).
+    Nx2Osd::ReleaseSlotNow();
     static std::atomic<bool> written{};
     const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
     if (directory == nullptr || written.exchange(true)) {
@@ -426,9 +428,14 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     });
 
     void(state->system.Run());
-    state->osd = Nx2Osd::StartFromEnvironment([&system = state->system]() -> s64 {
-        return system.CoreTiming().GetGlobalTimeUs().count();
-    });
+    // The emulated clock as the OSD's speed fallback only single core: multicore it is the wall
+    // clock (the title's percentage reads ~100% whatever the game does).
+    state->osd = Nx2Osd::StartFromEnvironment(
+        Settings::values.use_multi_core.GetValue()
+            ? std::function<s64()>{}
+            : std::function<s64()>{[&system = state->system]() -> s64 {
+                  return system.CoreTiming().GetGlobalTimeUs().count();
+              }});
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;

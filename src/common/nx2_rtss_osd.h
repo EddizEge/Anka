@@ -255,8 +255,9 @@ struct Rates {
 };
 
 /// Rates over two samples (`from` the older): frames per second, and the speed from the game
-/// time the presents stepped when there were any (`stepped`: Nx2OsdSpeed counts them), else the
-/// emulated clock against the wall clock, as the title bar's percentage.
+/// time the presents stepped (Nx2OsdSpeed). Once they have timed the game, a window without a
+/// present is a game standing still: 0 (its interval is counted at the present that ends it).
+/// Never timed by them: the emulated clock against the wall clock (single core), else none.
 constexpr Rates Compute(const Sample& from, const Sample& to) {
     Rates rates{};
     const double seconds = to.seconds - from.seconds;
@@ -269,6 +270,8 @@ constexpr Rates Compute(const Sample& from, const Sample& to) {
     if (frame_us > 0) {
         rates.speed = static_cast<double>(to.speed_game_us - from.speed_game_us) /
                       static_cast<double>(frame_us);
+    } else if (to.speed_frame_us > 0) {
+        rates.speed = 0.0;
     } else if (to.system_us != 0 || from.system_us != 0) {
         rates.speed = static_cast<double>(to.system_us - from.system_us) / (seconds * 1e6);
     }

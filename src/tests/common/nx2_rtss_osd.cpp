@@ -295,16 +295,24 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     REQUIRE(r.display_fps == 120.0);
     REQUIRE(r.speed.has_value());
     REQUIRE(*r.speed > 0.9799 && *r.speed < 0.9801);
-    // No present stepped meanwhile: the emulated clock against the wall clock (title bar's %).
+    // No present meanwhile, after presents timed the game: it stood still (a stall), 0, whatever
+    // the clock says.
     Sample c = b;
     c.speed_frame_us = a.speed_frame_us;
     c.speed_game_us = a.speed_game_us;
     c.system_us = 7'500'000;
-    REQUIRE(*Compute(a, c).speed == 0.5);
-    // No clock either.
-    Sample d = c, e = a;
+    REQUIRE(Compute(a, c).speed.has_value());
+    REQUIRE(*Compute(a, c).speed == 0.0);
+    REQUIRE(Format(Compute(a, c)).find("<C=FF5050>Hiz %0<C>") != std::string::npos);
+    // The presents never timed the game: the emulated clock against the wall clock (single core).
+    Sample f = a, g = c;
+    f.speed_frame_us = f.speed_game_us = g.speed_frame_us = g.speed_game_us = 0;
+    REQUIRE(*Compute(f, g).speed == 0.5);
+    // No clock either (multicore passes none): no speed.
+    Sample d = g, e = f;
     d.system_us = e.system_us = 0;
     REQUIRE_FALSE(Compute(e, d).speed.has_value());
+    REQUIRE(Format(Compute(e, d)).find("Hiz -") != std::string::npos);
     // No time passed: nothing.
     const Rates z = Compute(a, a);
     REQUIRE(z.game_fps == 0.0);

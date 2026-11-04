@@ -1014,6 +1014,7 @@ public:
         const bool dk_dyn = Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed);
         const u64 application = system.GetApplicationProcessProgramID();
         m_pace_one = Nx2DkDynPace::PaceOne(dk_dyn, application, std::getenv("EDEN_NX2_PACE_ONE"));
+        m_dk_dyn_applied = Nx2DkDynPace::ReportVrr(dk_dyn, application);
         if (Nx2DkDynPace::ReportVrr(dk_dyn, application)) {
             if (GetReplies() == nullptr) {
                 static const FunctionInfo vrr[] = {
@@ -1250,11 +1251,17 @@ private:
                     m_stats.dyn_step.Add(frame);
                 }
                 // EDEN_NX2_OSD: the game time this interval stepped, for the on-screen speed.
+                // The patched game's clock steps by its frame whatever the pacing (EDEN_NX2_PACE_ONE);
+                // unpatched, by the interval its word asks for (not EDEN_NX2_PRESENT_INTERVAL's
+                // minimum, which only holds the presents).
                 if (Nx2OsdSpeed::Enabled()) [[unlikely]] {
+                    const IntervalSource& source = PresentIntervalSource();
                     const u32 interval =
-                        !m_pace_one && PresentIntervalSource().word != 0 ? PresentInterval(w) : 0;
-                    Nx2OsdSpeed::g_counter.Add(frame,
-                                               Nx2OsdSpeed::GameUs(m_pace_one, interval, frame));
+                        !m_dk_dyn_applied && source.word != 0
+                            ? std::clamp((w[source.word] >> source.shift) & source.mask, 1U, 4U)
+                            : 0;
+                    Nx2OsdSpeed::g_counter.Add(
+                        frame, Nx2OsdSpeed::GameUs(m_dk_dyn_applied, interval, frame));
                 }
                 if (m_stats.samples < m_frame_samples.size()) {
                     m_frame_samples[m_stats.samples++] =
@@ -2065,6 +2072,8 @@ private:
 
     // EDEN_NX2_DK_DYN applied (Nx2DkDynPace::PaceOne): set as the session opens.
     bool m_pace_one{};
+    // The patch applied to the application (Nx2DkDynPace::ReportVrr): EDEN_NX2_OSD's speed model.
+    bool m_dk_dyn_applied{};
     bool m_pace_one_logged{};
     bool m_vrr_reported{};
 

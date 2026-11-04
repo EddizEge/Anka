@@ -76,13 +76,63 @@ std::optional<Access> WithSharedMemory(F&& access) {
     return result;
 }
 
+// Our slot is emptied once per writer: at its stop, or earlier from ReleaseSlotNow (exit(),
+// the console closing, a crash), after which the writer writes no more. The mutex keeps a write
+// and the clearing apart.
+std::mutex g_slot_mutex;
+bool g_slot_closed{};           // under g_slot_mutex
+std::atomic<bool> g_slot_used{}; // a writer was started
+
+// Empty our slot: under the lock if RTSS lets go of it within ~20 ms, else without it, as the
+// sample does.
+void ClearSlot() {
+    const auto give_up = Clock::now() + 20ms;
+    for (bool force = false;; force = Clock::now() >= give_up) {
+        const auto access = WithSharedMemory(
+            [force](std::span<u8> memory) { return Osd::Release(memory, force); });
+        if (!access || access->status != Osd::Status::Busy) {
+            return;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+}
+
+BOOL WINAPI ConsoleEvent(DWORD) {
+    // Closing the console window ends the process without SDL_AppQuit; Ctrl+C may too.
+    ReleaseSlotNow();
+    return FALSE; // the next handler (or the default) as before
+}
+
 } // Anonymous namespace
+
+void ReleaseSlotNow() {
+    if (!g_slot_used.load(std::memory_order_acquire)) {
+        return;
+    }
+    // Bounded: a crash on the writer thread may hold the mutex for good.
+    std::unique_lock lock{g_slot_mutex, std::defer_lock};
+    const auto give_up = Clock::now() + 50ms;
+    while (!lock.try_lock() && Clock::now() < give_up) {
+        std::this_thread::sleep_for(1ms);
+    }
+    if (g_slot_closed) {
+        return;
+    }
+    g_slot_closed = true;
+    ClearSlot();
+}
 
 class Writer {
 public:
     explicit Writer(std::function<s64()> system_time_us_)
-        : system_time_us{std::move(system_time_us_)},
-          thread{[this](std::stop_token stop) { Run(stop); }} {}
+        : system_time_us{std::move(system_time_us_)}, thread{[this](std::stop_token stop) {
+              {
+                  std::scoped_lock lock{g_slot_mutex};
+                  g_slot_closed = false;
+              }
+              g_slot_used.store(true, std::memory_order_release);
+              Run(stop);
+          }} {}
 
     // jthread's destructor asks the thread to stop (waking the wait) and joins it; the thread
     // empties our slot on its way out.
@@ -129,8 +179,15 @@ private:
                 continue;
             }
             const std::string text = Osd::Format(Osd::Compute(samples[0], samples[count - 1]));
-            const auto access = WithSharedMemory(
-                [&text](std::span<u8> memory) { return Osd::Update(memory, text); });
+            std::optional<Access> access;
+            {
+                std::scoped_lock lock{g_slot_mutex};
+                if (g_slot_closed) {
+                    break; // emptied by ReleaseSlotNow: the process is ending
+                }
+                access = WithSharedMemory(
+                    [&text](std::span<u8> memory) { return Osd::Update(memory, text); });
+            }
             if (!access) {
                 if (connected) {
                     LOG_INFO(Frontend, "nx2 osd: RTSS's shared memory is gone (RTSS closed?); "
@@ -168,17 +225,7 @@ private:
                 break;
             }
         }
-        // Empty our slot: under the lock if RTSS lets go of it within ~20 ms, else without it,
-        // as the sample does.
-        const auto give_up = Clock::now() + 20ms;
-        for (bool force = false;; force = Clock::now() >= give_up) {
-            const auto access = WithSharedMemory(
-                [force](std::span<u8> memory) { return Osd::Release(memory, force); });
-            if (!access || access->status != Osd::Status::Busy) {
-                break;
-            }
-            std::this_thread::sleep_for(1ms);
-        }
+        ReleaseSlotNow();
     }
 
     std::function<s64()> system_time_us;
@@ -195,10 +242,18 @@ WriterPtr StartFromEnvironment(std::function<s64()> system_time_us) {
     if (!Osd::Enabled(std::getenv("EDEN_NX2_OSD"))) {
         return nullptr;
     }
+    // The ends that skip SDL_AppQuit: exit() (e.g. a network error) and the console closing.
+    static std::once_flag handlers;
+    std::call_once(handlers, [] {
+        std::atexit(ReleaseSlotNow);
+        SetConsoleCtrlHandler(ConsoleEvent, TRUE);
+    });
     return WriterPtr{new Writer(std::move(system_time_us))};
 }
 
 #else
+
+void ReleaseSlotNow() {}
 
 class Writer {};
 

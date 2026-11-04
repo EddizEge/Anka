@@ -29,14 +29,16 @@ constexpr bool Enabled(const char* value) {
 constexpr size_t CaveWords = 19;
 
 // EDEN_NX2_DK_DYN_MIN_FPS=<n> (unset: the game's 40): the controller drops to a whole interval
-// (30, then 20 fps) when its new target is below 40 fps:
+// when its new target is below 40 fps (patched, always interval 2 in the logs: word 12 0x2003c,
+// never 0x3003c; its free targets come in steps of 2, 0x10028-0x1003c):
 //   controller + 59: movz w14, #40
 //   controller + 60: ccmp w1, w14, #0, eq   ; w1 the new target, eq: [fw+0x1cb] clear
 //   controller + 61: movz w14, #5
 //   controller + 62: csel w14, w14, wzr, lt
 // With the switch, 40 becomes n: targets n-40 run free like those above 40, sleeping to the
-// target and stepping by the frame (up to 2.5 vblanks, 24 fps); below n the whole interval as
-// before.
+// target instead of to 30 fps; below n the whole interval as before. Both step the clock by the
+// frame up to 2.5 vblanks (24 fps), so the game's speed is the same; what changes is a frame
+// rate of 30-40 no longer held at 30.
 constexpr size_t LowTargetOffset = 59;
 constexpr u32 LowTargetWord = 0x5280050EU;  // movz w14, #40
 constexpr u32 LowTargetCheck = 0x7A4E0020U; // ccmp w1, w14, #0, eq
