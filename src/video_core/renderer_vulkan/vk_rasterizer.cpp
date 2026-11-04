@@ -2624,6 +2624,7 @@ void RasterizerVulkan::ReportReactiveStats() {
     {
         std::scoped_lock lock{texture_cache.mutex};
         Reactive::SetGauge(Reactive::Gauge::LatchedImages, texture_cache.ReadLatchedImages());
+        texture_cache.Nx2ReportTop();
     }
     const u64 download_bytes = staging_pool.CachedBytes(MemoryUsage::Download);
     Reactive::SetGauge(Reactive::Gauge::StagingDownloadBytes, download_bytes);

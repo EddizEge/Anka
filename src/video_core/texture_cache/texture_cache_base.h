@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <span>
+#include <string>
 #include <type_traits>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
@@ -316,6 +317,11 @@ public:
     /// above answered yes) and logs the first images (an empty id: a feedback loop).
     void Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const;
 
+    /// EDEN_NX2_REACTIVE_STATS: logs the images that kept draws off the light way most and the
+    /// alias pairs synchronized most since the last call, then forgets them (the rasterizer's
+    /// report, every ~10 s).
+    void Nx2ReportTop();
+
     /// EDEN_NX2_LIGHT_UNIFORM: how many times a memory write found an image (WriteMemory) so far.
     [[nodiscard]] u64 WriteHits() const noexcept {
         return write_hits.load(std::memory_order_relaxed);
@@ -613,6 +619,21 @@ private:
     const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
     /// EDEN_NX2_RX_NO_RT_LATCH (diagnostic: CPU reads latch no image)
     const bool no_rt_latch = Nx2Reactive::NoRtLatch();
+    /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
+    /// per (image, alias) pair, synchronizations (Nx2ReportTop)
+    struct Nx2RepeatCount {
+        u64 count{};
+        u32 reason{};
+        std::string text; ///< The image as first seen in the window (it may be deleted since)
+    };
+    struct Nx2PairCount {
+        u64 count{};
+        std::string text;
+    };
+    mutable std::mutex nx2_top_mutex;
+    mutable std::unordered_map<u32, Nx2RepeatCount> nx2_repeat_top;
+    std::unordered_map<u64, Nx2PairCount> nx2_alias_pairs;
+    [[nodiscard]] std::string Nx2ImageText(ImageId image_id) const;
     /// The images GetFlushArea latched (nx2_read_latched), kept with the switch or the stats
     const bool track_read_latches =
         read_latch_age != 0 || ::Common::Nx2Reactive::StatsEnabled();

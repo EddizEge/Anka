@@ -576,6 +576,13 @@ TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
                            "modified 18 alias 19"));
     // Appended: the older part ends as before.
     REQUIRE(Contains(line, "latched images 0; fences 101"));
+    // The first MAX_IMAGE_LOGS images keeping draws off the light way get a line, no more.
+    Reactive::GetState().repeat_logs = 0;
+    for (u32 i = 0; i < Reactive::MAX_IMAGE_LOGS; ++i) {
+        REQUIRE(Reactive::TakeRepeatLog());
+    }
+    REQUIRE(!Reactive::TakeRepeatLog());
+    REQUIRE(!Reactive::TakeRepeatLog());
 }
 
 TEST_CASE("Reactive pitch linear forced", "[video_core][nx2_reactive]") {

@@ -1384,6 +1384,14 @@ template <class P>
 void TextureCache<P>::Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const {
     namespace Reactive = Common::Nx2Reactive;
     Reactive::Add(reason, 1);
+    if (image_id) {
+        std::scoped_lock lock{nx2_top_mutex};
+        Nx2RepeatCount& entry = nx2_repeat_top[image_id.index];
+        if (entry.count++ == 0) {
+            entry.text = Nx2ImageText(image_id);
+        }
+        entry.reason = static_cast<u32>(reason);
+    }
     if (!image_id || !Reactive::TakeRepeatLog()) {
         return;
     }
@@ -1404,6 +1412,49 @@ void TextureCache<P>::Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId
              image.info.format, image.info.resources.levels, image.info.resources.layers,
              static_cast<u32>(image.flags), image.info.forced_flushed, image.nx2_read_latched,
              image.modification_tick, image.aliased_images.size(), aliases);
+}
+
+template <class P>
+std::string TextureCache<P>::Nx2ImageText(ImageId image_id) const {
+    const ImageBase& image = slot_images[image_id];
+    return fmt::format("image {} gpu {:#x} cpu {:#x} {}x{}x{} format {} type {} {} levels {} "
+                       "layers flags {:#x} forced {} latched {} tick {} aliases {}",
+                       image_id.index, image.gpu_addr, image.cpu_addr, image.info.size.width,
+                       image.info.size.height, image.info.size.depth, image.info.format,
+                       static_cast<u32>(image.info.type), image.info.resources.levels,
+                       image.info.resources.layers, static_cast<u32>(image.flags),
+                       image.info.forced_flushed, image.nx2_read_latched, image.modification_tick,
+                       image.aliased_images.size());
+}
+
+template <class P>
+void TextureCache<P>::Nx2ReportTop() {
+    std::vector<std::pair<u64, std::string>> repeats;
+    std::vector<std::pair<u64, std::string>> pairs;
+    {
+        std::scoped_lock lock{nx2_top_mutex};
+        for (auto& [index, entry] : nx2_repeat_top) {
+            repeats.emplace_back(entry.count,
+                                 fmt::format("reason {}, {}", entry.reason, std::move(entry.text)));
+        }
+        for (auto& [key, entry] : nx2_alias_pairs) {
+            pairs.emplace_back(entry.count, std::move(entry.text));
+        }
+        nx2_repeat_top.clear();
+        nx2_alias_pairs.clear();
+    }
+    constexpr size_t TOP = 4;
+    const auto by_count = [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; };
+    std::ranges::sort(repeats, by_count);
+    std::ranges::sort(pairs, by_count);
+    for (size_t i = 0; i < (std::min)(TOP, repeats.size()); ++i) {
+        LOG_INFO(HW_GPU, "nx2 reactive: top light refusal {}: {} draws, {}", i, repeats[i].first,
+                 repeats[i].second);
+    }
+    for (size_t i = 0; i < (std::min)(TOP, pairs.size()); ++i) {
+        LOG_INFO(HW_GPU, "nx2 reactive: top alias sync {}: {} copies {}", i, pairs[i].first,
+                 pairs[i].second);
+    }
 }
 
 template <class P>
@@ -3513,6 +3564,16 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         return lhs_image.modification_tick < rhs_image.modification_tick;
     });
     const auto& resolution = Settings::values.resolution_info;
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        std::scoped_lock lock{nx2_top_mutex};
+        for (const AliasedImage* const aliased : aliased_images) {
+            Nx2PairCount& entry = nx2_alias_pairs[(u64{image_id.index} << 32) | aliased->id.index];
+            if (entry.count++ == 0) {
+                entry.text = fmt::format("to {} from {}", Nx2ImageText(image_id),
+                                         Nx2ImageText(aliased->id));
+            }
+        }
+    }
     for (const AliasedImage* const aliased : aliased_images) {
         if (!resolution.active || !any_rescaled) {
             CopyImage(image_id, aliased->id, aliased->copies);
