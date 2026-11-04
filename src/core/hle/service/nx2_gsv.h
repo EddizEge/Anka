@@ -70,6 +70,7 @@
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/nx2_event_diag.h"
 #include "core/hle/service/nx2_dk_dyn_pace.h"
+#include "core/hle/service/nx2_frame_stats.h"
 #include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
@@ -1238,6 +1239,10 @@ private:
                 if (m_pace_one) {
                     m_stats.dyn_step.Add(frame);
                 }
+                if (m_stats.samples < m_frame_samples.size()) {
+                    m_frame_samples[m_stats.samples++] =
+                        static_cast<u32>((std::min<long long>)(frame, 0xffffffffLL));
+                }
             } else {
                 m_stats.output_frames = Core::g_output_frames.load(std::memory_order_relaxed);
             }
@@ -1275,6 +1280,9 @@ private:
                                          "estimate {:.3f}x",
                                          m_stats.dyn_step.capped, m_stats.dyn_step.Speed());
                 }
+                const u32 p95 =
+                    Nx2FrameStats::P95(std::span{m_frame_samples}.first(m_stats.samples));
+                extra += fmt::format(", p95 frame {} us", p95);
                 // Images sent to the screen meanwhile, frame generation's included: the display
                 // rate is the game's (from the frame time) times this.
                 const u64 output_frames = Core::g_output_frames.load(std::memory_order_relaxed);
@@ -1310,7 +1318,9 @@ private:
         std::chrono::steady_clock::time_point last_present{};
         Nx2DkDynPace::StepEstimate dyn_step{}; // EDEN_NX2_DK_DYN applied
         u64 output_frames{}; // Core::g_output_frames at the start
+        u32 samples{};       // frame times in m_frame_samples
     } m_stats{};
+    std::array<u32, 600> m_frame_samples{}; // this block's frame times, us
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
     u32 m_rate{};       // EDEN_NX2_PRESENT_RATE: the last present's rate, 0: 60 Hz
