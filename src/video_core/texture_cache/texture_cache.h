@@ -42,6 +42,14 @@ using VideoCore::Surface::PixelFormat;
 using VideoCore::Surface::SurfaceType;
 using namespace Common::Literals;
 
+// Diagnostic counters deliberately live outside TextureCache: changing that class layout makes
+// incremental builds made with older dependency data ABI-incompatible.
+inline u64 texture_cache_3d_uploads{};
+inline u64 texture_cache_3d_uploaded_bytes{};
+inline u64 texture_cache_largest_3d_upload{};
+inline u64 texture_cache_3d_partial_uploads{};
+inline u64 texture_cache_3d_partial_uploaded_bytes{};
+
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : runtime{runtime_}, device_memory{device_memory_} {
@@ -419,7 +427,16 @@ void TextureCache<P>::TickFrame() {
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+        LOG_INFO(HW_GPU,
+                 "Texture cache last 600 frames: {} full 3D uploads, {} MiB (largest {} MiB); "
+                 "{} partial 3D uploads, {} MiB",
+                 texture_cache_3d_uploads, texture_cache_3d_uploaded_bytes >> 20,
+                 texture_cache_largest_3d_upload >> 20, texture_cache_3d_partial_uploads,
+                 texture_cache_3d_partial_uploaded_bytes >> 20);
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
+        texture_cache_3d_uploads = texture_cache_3d_uploaded_bytes =
+            texture_cache_largest_3d_upload = 0;
+        texture_cache_3d_partial_uploads = texture_cache_3d_partial_uploaded_bytes = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
         for (const auto& [key, value] : created_shapes) shapes.emplace_back(value.first, key);
@@ -580,17 +597,18 @@ template <class P>
 SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
     auto& table = compute ? channel_state->compute_sampler_table : channel_state->graphics_sampler_table;
     if (index > table.current_limit) {
-        LOG_DEBUG(HW_GPU, "Invalid sampler index={}", index);
+        LOG_TRACE(HW_GPU, "Invalid sampler index={}", index);
         return NULL_SAMPLER_ID;
     }
     auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
         auto const id = FindSampler(descriptor, compute);
+        table.SetCachedId(index, id.index);
         channel_state->sampler_ids.insert_or_assign(map_index, id);
         return id;
     }
-    return channel_state->sampler_ids.find(map_index)->second;
+    return SamplerId{table.CachedId(index)};
 }
 
 template <class P>
@@ -812,7 +830,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     index = Tegra::Texture::TextureHeaderIndex(index, table.current_limit,
                                                gpu_memory->UsesNativeTiling());
     if (index > table.current_limit) {
-        LOG_DEBUG(HW_GPU, "Invalid image view index={}", index);
+        LOG_TRACE(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
     auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
@@ -830,16 +848,18 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                 }
             }
             PrepareImageView(pair->second, false, false);
+            table.SetCachedId(index, pair->second.index);
             channel_state->image_view_ids.insert_or_assign(map_index, pair->second);
             return pair->second;
         }
+        table.SetCachedId(index, NULL_IMAGE_VIEW_ID.index);
         channel_state->image_view_ids.insert_or_assign(map_index, NULL_IMAGE_VIEW_ID);
         return NULL_IMAGE_VIEW_ID;
     }
-    auto const it = channel_state->image_view_ids.find(map_index);
-    if (it->second != NULL_IMAGE_VIEW_ID)
-        PrepareImageView(it->second, false, false);
-    return it->second;
+    const ImageViewId cached_id{table.CachedId(index)};
+    if (cached_id != NULL_IMAGE_VIEW_ID)
+        PrepareImageView(cached_id, false, false);
+    return cached_id;
 }
 
 template <class P>
@@ -1586,6 +1606,12 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
+    if (image.info.type == ImageType::e3D) {
+        ++texture_cache_3d_uploads;
+        texture_cache_3d_uploaded_bytes += image.guest_size_bytes;
+        texture_cache_largest_3d_upload =
+            (std::max<u64>)(texture_cache_largest_3d_upload, image.guest_size_bytes);
+    }
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         UploadImageContents(image, staging);
@@ -2040,8 +2066,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
             for (auto& e : channel_info.image_view_ids)
                 e.second = CORRUPT_ID;
 #endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
+        channel_info.graphics_image_table.InvalidateCachedIds(image_view_ids);
+        channel_info.compute_image_table.InvalidateCachedIds(image_view_ids);
     }
     has_deleted_images = true;
 }
@@ -3121,12 +3147,13 @@ template <class P>
 bool TextureCache<P>::MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t size) {
     // Games stream small updates into very large textures (lookup tables, virtual texture pages)
     // every frame; re-uploading the whole image for each costs hundreds of milliseconds.
-    constexpr size_t min_size = 16_MiB;
+    const size_t min_size = image.info.type == ImageType::e3D ? 64_KiB : 16_MiB;
     constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
                                        ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
                                        ImageFlagBits::TrimmedLevels | ImageFlagBits::AsynchronousDecode;
     if (False(image.flags & ImageFlagBits::Tracked) || True(image.flags & excluded) ||
-        image.info.type != ImageType::e2D || image.guest_size_bytes < min_size ||
+        (image.info.type != ImageType::e2D && image.info.type != ImageType::e3D) ||
+        image.guest_size_bytes < min_size ||
         image.cpu_addr >= ~(1ULL << 40) ||
         (True(image.flags & ImageFlagBits::CpuModified) && image.partial_dirty_pages.empty() &&
          image.partial_remapped.empty())) {
@@ -3155,7 +3182,10 @@ bool TextureCache<P>::MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t 
                                              Core::DEVICE_PAGESIZE, -1);
     }
     image.flags |= ImageFlagBits::CpuModified;
-    if (pages.size() > total_pages / 4) {
+    const u32 full_upload_threshold = image.info.type == ImageType::e3D
+                                          ? (total_pages * 3) / 4
+                                          : total_pages / 4;
+    if (pages.size() > full_upload_threshold) {
         // Most of the image changed: untrack it whole and upload it whole.
         UntrackImage(image, ImageId{});
     }
@@ -3273,7 +3303,10 @@ bool TextureCache<P>::RefreshPartialContents(Image& image) {
         ranges = std::move(merged);
     }
     std::vector<u8> data;
-    auto copies = UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, ranges, data);
+    auto copies = image.info.type == ImageType::e3D
+                      ? UnswizzleImageDepthGroups(*gpu_memory, image.gpu_addr, image.info, ranges,
+                                                  data)
+                      : UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, ranges, data);
     if (copies.empty()) {
         return false;
     }
@@ -3281,6 +3314,10 @@ bool TextureCache<P>::RefreshPartialContents(Image& image) {
     std::memcpy(staging.mapped_span.data(), data.data(), data.size());
     image.UploadMemory(staging, copies);
     runtime.InsertUploadMemoryBarrier();
+    if (image.info.type == ImageType::e3D) {
+        ++texture_cache_3d_partial_uploads;
+        texture_cache_3d_partial_uploaded_bytes += data.size();
+    }
     return true;
 }
 
@@ -3417,8 +3454,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
             for (auto& e : channel_info.image_view_ids)
                 e.second = CORRUPT_ID;
 #endif
-        channel_info.graphics_image_table.Invalidate();
-        channel_info.compute_image_table.Invalidate();
+        channel_info.graphics_image_table.InvalidateCachedIds(image_view_ids);
+        channel_info.compute_image_table.InvalidateCachedIds(image_view_ids);
     }
     has_deleted_images = true;
 }

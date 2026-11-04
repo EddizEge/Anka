@@ -943,7 +943,6 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
     const LevelInfo level_info = MakeLevelInfo(info);
     const s32 num_levels = info.resources.levels;
     const std::array level_sizes = CalculateLevelSizes(level_info, num_levels);
-    const Extent2D gob = GobSize(bpp_log2, info.block.height, info.tile_width_spacing);
     const u32 layer_size = CalculateLevelBytes(level_sizes, num_levels);
     const u32 layer_stride = AlignLayerSize(layer_size, info.size, level_info.block, tile_size.height,
                                             info.tile_width_spacing);
@@ -1044,6 +1043,98 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
             }
         }
         level_offset += level_sizes[level];
+    }
+    return copies;
+}
+
+boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageDepthGroups(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output) {
+    boost::container::small_vector<BufferImageCopy, 16> copies;
+    if (info.type != ImageType::e3D || info.resources.levels != 1 ||
+        info.resources.layers != 1 || info.num_samples != 1 || dirty_ranges.empty()) {
+        return copies;
+    }
+
+    const u32 bpp_log2 = BytesPerBlockLog2(info.format);
+    const u32 bytes_per_block = 1U << bpp_log2;
+    const Extent2D tile_size = DefaultBlockSize(info.format);
+    const LevelInfo level_info = MakeLevelInfo(info);
+    const Extent3D num_tiles = AdjustTileSize(info.size, tile_size);
+    const Extent3D block =
+        AdjustMipBlockSize(num_tiles, level_info.block, 0, level_info.num_levels);
+    const Extent2D gob = GobSize(bpp_log2, info.block.height, info.tile_width_spacing);
+    const u32 stride = StrideAlignment(num_tiles, info.block, gob, bpp_log2);
+    const u32 gobs_in_x = Common::DivCeilLog2(stride, GOB_SIZE_X_SHIFT);
+    const u32 block_size = gobs_in_x << (GOB_SIZE_SHIFT + block.height + block.depth);
+    const u32 group_bytes =
+        Common::DivCeilLog2(num_tiles.height, block.height + GOB_SIZE_Y_SHIFT) * block_size;
+    const u32 group_depth = 1U << (GOB_SIZE_Z_SHIFT + block.depth);
+    const u32 aligned_depth =
+        Common::AlignUpLog2(num_tiles.depth, GOB_SIZE_Z_SHIFT + block.depth);
+    const u32 num_groups = aligned_depth / group_depth;
+    const u64 level_bytes = CalculateLevelSize(level_info, 0);
+    if (group_bytes == 0 || num_groups == 0 || u64{group_bytes} * num_groups != level_bytes) {
+        return {};
+    }
+
+    std::vector<bool> dirty_groups(num_groups, false);
+    for (const auto& [begin, end] : dirty_ranges) {
+        const u64 low = (std::min)(begin, level_bytes);
+        const u64 high = (std::min)(end, level_bytes);
+        if (low >= high) {
+            continue;
+        }
+        const u32 first = static_cast<u32>(low / group_bytes);
+        const u32 last = static_cast<u32>(Common::DivCeil(high, u64{group_bytes}));
+        for (u32 group = first; group < (std::min)(last, num_groups); ++group) {
+            dirty_groups[group] = true;
+        }
+    }
+
+    std::vector<u8> swizzled;
+    for (u32 first = 0; first < num_groups;) {
+        if (!dirty_groups[first]) {
+            ++first;
+            continue;
+        }
+        u32 last = first + 1;
+        while (last < num_groups && dirty_groups[last]) {
+            ++last;
+        }
+        const u32 z_start = first * group_depth;
+        if (z_start >= num_tiles.depth) {
+            break;
+        }
+        const u32 padded_depth = (last - first) * group_depth;
+        const u32 copy_depth = (std::min)(padded_depth, num_tiles.depth - z_start);
+        const size_t guest_bytes = size_t{last - first} * group_bytes;
+        swizzled.resize(guest_bytes);
+        gpu_memory.ReadBlockUnsafe(gpu_addr + u64{first} * group_bytes, swizzled.data(),
+                                   guest_bytes);
+
+        const size_t host_offset = output.size();
+        const size_t host_bytes = size_t{num_tiles.width} * num_tiles.height * padded_depth *
+                                  bytes_per_block;
+        output.resize(host_offset + host_bytes);
+        UnswizzleTexture(std::span<u8>{output}.subspan(host_offset, host_bytes), swizzled,
+                         bytes_per_block, num_tiles.width, num_tiles.height, padded_depth,
+                         block.height, block.depth, stride, gpu_memory.UsesNativeTiling());
+        copies.push_back(BufferImageCopy{
+            .buffer_offset = host_offset,
+            .buffer_size = host_bytes,
+            .buffer_row_length = Common::AlignUp(info.size.width, tile_size.width),
+            .buffer_image_height = Common::AlignUp(info.size.height, tile_size.height),
+            .image_subresource =
+                {
+                    .base_level = 0,
+                    .base_layer = 0,
+                    .num_layers = 1,
+                },
+            .image_offset = {0, 0, static_cast<s32>(z_start)},
+            .image_extent = {info.size.width, info.size.height, copy_depth},
+        });
+        first = last;
     }
     return copies;
 }

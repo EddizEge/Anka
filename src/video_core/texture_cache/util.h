@@ -80,6 +80,13 @@ struct OverlapResult {
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
     std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output);
+
+/// Unswizzles only the block-depth groups of a single-level 3D block-linear image touched by
+/// `dirty_ranges`. Each returned copy replaces complete Z groups so unchanged groups stay on the
+/// host GPU. Returns no copies when the layout is not supported.
+[[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageDepthGroups(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output);
 /// For a single-layer 2D block-linear image of 1x1-texel blocks: the host sparse blocks
 /// (tile_width x tile_height texels) that the guest byte ranges (offset, size) touch, merged into
 /// runs along x. Levels from tail_level on (the host's mip tail) come whole.
