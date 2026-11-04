@@ -28,6 +28,50 @@ constexpr bool Enabled(const char* value) {
 /// Words of free space the patch needs past the end of the text segment.
 constexpr size_t CaveWords = 19;
 
+// EDEN_NX2_DK_DYN_MIN_FPS=<n> (unset: the game's 40): the controller drops to a whole interval
+// (30, then 20 fps) when its new target is below 40 fps:
+//   controller + 59: movz w14, #40
+//   controller + 60: ccmp w1, w14, #0, eq   ; w1 the new target, eq: [fw+0x1cb] clear
+//   controller + 61: movz w14, #5
+//   controller + 62: csel w14, w14, wzr, lt
+// With the switch, 40 becomes n: targets n-40 run free like those above 40, sleeping to the
+// target and stepping by the frame (up to 2.5 vblanks, 24 fps); below n the whole interval as
+// before.
+constexpr size_t LowTargetOffset = 59;
+constexpr u32 LowTargetWord = 0x5280050EU;  // movz w14, #40
+constexpr u32 LowTargetCheck = 0x7A4E0020U; // ccmp w1, w14, #0, eq
+constexpr u32 MinFpsLowest = 1;
+constexpr u32 MinFpsHighest = 60;
+
+/// `movz w14, #fps`.
+constexpr u32 LowTargetMovz(u32 fps) {
+    return 0x5280000EU | (fps << 5);
+}
+
+struct MinFps {
+    u32 fps{};      // 0: unset or refused, the game's 40
+    bool refused{}; // set but not a whole number of 1-60
+};
+
+/// EDEN_NX2_DK_DYN_MIN_FPS's value: a whole number of 1-60, nothing else around it.
+constexpr MinFps ParseMinFps(const char* value) {
+    if (value == nullptr || value[0] == '\0') {
+        return {};
+    }
+    u32 fps = 0;
+    size_t i = 0;
+    for (; value[i] != '\0'; ++i) {
+        if (value[i] < '0' || value[i] > '9' || i >= 3) {
+            return {.refused = true};
+        }
+        fps = fps * 10 + static_cast<u32>(value[i] - '0');
+    }
+    if (fps < MinFpsLowest || fps > MinFpsHighest) {
+        return {.refused = true};
+    }
+    return {.fps = fps};
+}
+
 struct Result {
     bool applied{};
     size_t controller{};
@@ -36,6 +80,8 @@ struct Result {
     size_t controller_matches{};
     size_t sleep_matches{};
     size_t step_matches{};
+    u32 min_fps{};       // EDEN_NX2_DK_DYN_MIN_FPS put in (0: the game's 40 kept)
+    bool min_fps_missed{}; // asked for, but controller + 59 / + 60 were not the words above
 };
 
 // Donkey Kong Bananza picks its frame rate target from the time of a frame: above 40 fps it
@@ -55,7 +101,9 @@ struct Result {
 // `text` starts at the text segment and holds at least `aligned_size` bytes, the segment's size
 // rounded up to whole pages (the free space at its end is the cave); `text_size` is its size in
 // the NSO header. Changes nothing unless all three patterns match once and the checks hold.
-inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size) {
+// `min_fps` (1-60, ParseMinFps; 0: none) replaces the 40 at controller + 59 when the patch
+// applies and the two words there are as expected; otherwise that word is left alone.
+inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size, u32 min_fps = 0) {
     Result result{};
     if (text.size() < aligned_size || aligned_size < text_size) {
         return result;
@@ -137,6 +185,16 @@ inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size) {
     put(step + 6, 0xD503201F);                     // nop, done in the cave
     put(step + 7, 0xD503201F);                     // nop, done in the cave
     result.applied = true;
+    if (min_fps >= MinFpsLowest && min_fps <= MinFpsHighest) {
+        const size_t low_target = controller + LowTargetOffset;
+        if (low_target + 1 < count && word(low_target) == LowTargetWord &&
+            word(low_target + 1) == LowTargetCheck) {
+            put(low_target, LowTargetMovz(min_fps));
+            result.min_fps = min_fps;
+        } else {
+            result.min_fps_missed = true;
+        }
+    }
     return result;
 }
 
@@ -144,11 +202,11 @@ inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size) {
 /// Bananza's main module.
 inline std::optional<Result> ApplyIfEnabled(const char* switch_value, u64 program_id,
                                             std::string_view module_name, std::span<u8> text,
-                                            u32 text_size, u32 aligned_size) {
+                                            u32 text_size, u32 aligned_size, u32 min_fps = 0) {
     if (!Enabled(switch_value) || module_name != "main" || program_id != ProgramId) {
         return std::nullopt;
     }
-    return Apply(text, text_size, aligned_size);
+    return Apply(text, text_size, aligned_size, min_fps);
 }
 
 } // namespace Loader::Nx2DkDynamicFps

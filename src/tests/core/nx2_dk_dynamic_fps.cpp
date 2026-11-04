@@ -77,6 +77,12 @@ struct Text {
         PutSleep(Sleep);
         PutStep(Step);
     }
+
+    // The 40 fps check (EDEN_NX2_DK_DYN_MIN_FPS): movz w14, #40; ccmp w1, w14, #0, eq.
+    void PutLowTarget(size_t controller) {
+        words[controller + 59] = 0x5280050E;
+        words[controller + 60] = 0x7A4E0020;
+    }
 };
 
 // An unconditional branch's target, decoded on its own (sign-extended imm26).
@@ -299,4 +305,156 @@ TEST_CASE("Nx2DkDynamicFps: the switch, the title and the module", "[core]") {
     REQUIRE(result.has_value());
     REQUIRE(result->applied);
     REQUIRE(text.words[Controller] == 0xF9407429);
+}
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS's value", "[core]") {
+    const auto none = [](const char* value) {
+        const MinFps parsed = ParseMinFps(value);
+        REQUIRE(parsed.fps == 0);
+        REQUIRE(!parsed.refused);
+    };
+    const auto refused = [](const char* value) {
+        const MinFps parsed = ParseMinFps(value);
+        REQUIRE(parsed.fps == 0);
+        REQUIRE(parsed.refused);
+    };
+    const auto fps = [](const char* value, u32 expected) {
+        const MinFps parsed = ParseMinFps(value);
+        REQUIRE(parsed.fps == expected);
+        REQUIRE(!parsed.refused);
+    };
+    none(nullptr);
+    none("");
+    fps("1", 1);
+    fps("24", 24);
+    fps("25", 25);
+    fps("30", 30);
+    fps("40", 40);
+    fps("60", 60);
+    fps("060", 60);
+    for (const char* value : {"0", "00", "61", "100", "1000", "0030", "-5", "+30", " 30", "30 ",
+                              "30x", "3.5", "abc", "x"}) {
+        refused(value);
+    }
+    // movz w14, #fps: the game's word for 40, imm16 at bits 5-20, rd 14.
+    REQUIRE(LowTargetMovz(40) == LowTargetWord);
+    for (u32 value = MinFpsLowest; value <= MinFpsHighest; ++value) {
+        const u32 insn = LowTargetMovz(value);
+        REQUIRE((insn & 0xFFE00000U) == 0x52800000U); // movz, 32-bit, hw 0
+        REQUIRE(((insn >> 5) & 0xFFFF) == value);
+        REQUIRE((insn & 31) == 14);
+    }
+}
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS: one word, nothing else", "[core]") {
+    // Unset (0): the text exactly as before the switch existed (the 40 kept).
+    Text plain;
+    plain.PutAll();
+    plain.PutLowTarget(Controller);
+    Text unset = plain;
+    const Result old_result = Apply(plain.Bytes(), TextSize, AlignedSize);
+    const Result unset_result = Apply(unset.Bytes(), TextSize, AlignedSize, 0);
+    REQUIRE(old_result.applied);
+    REQUIRE(unset.words == plain.words);
+    REQUIRE(unset_result.min_fps == 0);
+    REQUIRE(!unset_result.min_fps_missed);
+    REQUIRE(plain.words[Controller + 59] == 0x5280050E);
+    for (const u32 value : {30U, 25U, 24U, 1U, 60U}) {
+        Text text;
+        text.PutAll();
+        text.PutLowTarget(Controller);
+        const Result result = Apply(text.Bytes(), TextSize, AlignedSize, value);
+        REQUIRE(result.applied);
+        REQUIRE(result.min_fps == value);
+        REQUIRE(!result.min_fps_missed);
+        REQUIRE(text.words[Controller + 59] == LowTargetMovz(value));
+        for (size_t i = 0; i < text.words.size(); ++i) {
+            if (i != Controller + 59) {
+                CHECK(text.words[i] == plain.words[i]);
+            }
+        }
+    }
+    REQUIRE(LowTargetMovz(30) == 0x528003CE);
+    REQUIRE(LowTargetMovz(25) == 0x5280032E);
+    // Out of range values reaching Apply are ignored.
+    for (const u32 value : {0U, 61U, 0xFFFFU, 0xFFFFFFFFU}) {
+        Text text;
+        text.PutAll();
+        text.PutLowTarget(Controller);
+        const Result result = Apply(text.Bytes(), TextSize, AlignedSize, value);
+        REQUIRE(result.applied);
+        REQUIRE(result.min_fps == 0);
+        REQUIRE(text.words == plain.words);
+    }
+}
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS where the words differ", "[core]") {
+    Text reference;
+    reference.PutAll();
+    reference.PutLowTarget(Controller);
+    REQUIRE(Apply(reference.Bytes(), TextSize, AlignedSize).applied);
+    const auto missed = [&](auto change) {
+        Text text;
+        text.PutAll();
+        text.PutLowTarget(Controller);
+        change(text);
+        Text expected = text;
+        REQUIRE(Apply(expected.Bytes(), TextSize, AlignedSize).applied);
+        const Result result = Apply(text.Bytes(), TextSize, AlignedSize, 30);
+        REQUIRE(result.applied); // the dynamic FPS patch itself still goes in
+        REQUIRE(result.min_fps == 0);
+        REQUIRE(result.min_fps_missed);
+        REQUIRE(text.words == expected.words);
+    };
+    missed([](Text& t) { t.words[Controller + 59] = 0x528003CE; }); // another value there
+    missed([](Text& t) { t.words[Controller + 59] = 0x5280050D; }); // another register
+    missed([](Text& t) { t.words[Controller + 60] = 0x7A4E0021; }); // another ccmp
+    missed([](Text& t) { t.words[Controller + 60] = Filler; });
+    // Past the end of the text (the controller near its end): refused, no read past it.
+    {
+        Text text;
+        text.PutController(0xbc1 - 60);
+        text.PutSleep(Sleep);
+        text.PutStep(Step);
+        text.words[0xbc1 - 1] = 0x5280050E; // + 59, but + 60 is past the text
+        const Result result = Apply(text.Bytes(), TextSize, AlignedSize, 30);
+        REQUIRE(result.applied);
+        REQUIRE(result.min_fps_missed);
+        REQUIRE(text.words[0xbc1 - 1] == 0x5280050E);
+    }
+    // Not applied: the switch changes nothing either.
+    {
+        Text text;
+        text.PutController(Controller);
+        text.PutSleep(Sleep);
+        text.PutLowTarget(Controller);
+        const std::vector<u32> before = text.words;
+        const Result result = Apply(text.Bytes(), TextSize, AlignedSize, 30);
+        RequireUntouched(result, before, text);
+        REQUIRE(result.min_fps == 0);
+        REQUIRE(!result.min_fps_missed);
+    }
+}
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS through the loader's entry", "[core]") {
+    {
+        Text text;
+        text.PutAll();
+        text.PutLowTarget(Controller);
+        const auto result =
+            ApplyIfEnabled("1", ProgramId, "main", text.Bytes(), TextSize, AlignedSize, 25);
+        REQUIRE(result.has_value());
+        REQUIRE(result->min_fps == 25);
+        REQUIRE(text.words[Controller + 59] == 0x5280032E);
+    }
+    {
+        // DK-DYN off: the threshold alone does nothing.
+        Text text;
+        text.PutAll();
+        text.PutLowTarget(Controller);
+        const std::vector<u32> before = text.words;
+        REQUIRE(!ApplyIfEnabled(nullptr, ProgramId, "main", text.Bytes(), TextSize, AlignedSize, 25)
+                     .has_value());
+        REQUIRE(text.words == before);
+    }
 }
