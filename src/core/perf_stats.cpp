@@ -109,9 +109,11 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
     const auto system_us_per_second = (current_system_time_us - reset_point_system_us) / interval;
     const auto current_frames = static_cast<double>(game_frames.load(std::memory_order_relaxed));
     const auto current_fps = current_frames / interval;
+    const u64 output_frames = g_output_frames.load(std::memory_order_relaxed);
     const PerfStatsResults results{
         .system_fps = static_cast<double>(system_frames) / interval,
         .average_game_fps = (current_fps + previous_fps) / 2.0,
+        .output_fps = static_cast<double>(output_frames - reset_output_frames) / interval,
         .frametime = duration_cast<DoubleSecs>(accumulated_frametime).count() /
                      static_cast<double>(system_frames),
         .emulation_speed = system_us_per_second.count() / 1'000'000.0,
@@ -119,6 +121,7 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
 
     // Reset counters
     reset_point = now;
+    reset_output_frames = output_frames;
     reset_point_system_us = current_system_time_us;
     accumulated_frametime = Clock::duration::zero();
     system_frames = 0;

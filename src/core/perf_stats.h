@@ -12,11 +12,16 @@
 
 namespace Core {
 
+/// Images the renderer has sent to the screen, frame generation's included.
+inline std::atomic<u64> g_output_frames{};
+
 struct PerfStatsResults {
     /// System FPS (LCD VBlanks) in Hz
     double system_fps;
     /// Average game FPS (GPU frame renders) in Hz
     double average_game_fps;
+    /// Images sent to the screen per second, generated ones included
+    double output_fps;
     /// Walltime per system frame, in seconds, excluding any waits
     double frametime;
     /// Ratio of walltime / emulated time elapsed
@@ -82,6 +87,9 @@ private:
     Clock::duration previous_frame_length = Clock::duration::zero();
     /// Previously computed fps
     double previous_fps = 0;
+
+    /// g_output_frames at the last GetAndResetStats
+    u64 reset_output_frames = 0;
 };
 
 class SpeedLimiter {

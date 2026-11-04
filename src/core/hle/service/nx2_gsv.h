@@ -1238,6 +1238,8 @@ private:
                 if (m_pace_one) {
                     m_stats.dyn_step.Add(frame);
                 }
+            } else {
+                m_stats.output_frames = Core::g_output_frames.load(std::memory_order_relaxed);
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
@@ -1273,6 +1275,12 @@ private:
                                          "estimate {:.3f}x",
                                          m_stats.dyn_step.capped, m_stats.dyn_step.Speed());
                 }
+                // Images sent to the screen meanwhile, frame generation's included: the display
+                // rate is the game's (from the frame time) times this.
+                const u64 output_frames = Core::g_output_frames.load(std::memory_order_relaxed);
+                const u64 shown = output_frames - m_stats.output_frames;
+                extra += fmt::format(", {} images shown ({:.2f} per present)", shown,
+                                     static_cast<double>(shown) / 600);
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
@@ -1280,7 +1288,7 @@ private:
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
                          m_stats.pace_us / 600, extra);
-                m_stats = {.last_present = entered};
+                m_stats = {.last_present = entered, .output_frames = output_frames};
             }
         }
         constexpr u64 AvailableSlots = 0x7fff;
@@ -1301,6 +1309,7 @@ private:
         u32 rate_presents{}; // EDEN_NX2_PRESENT_RATE: paced at a rate other than 60 Hz
         std::chrono::steady_clock::time_point last_present{};
         Nx2DkDynPace::StepEstimate dyn_step{}; // EDEN_NX2_DK_DYN applied
+        u64 output_frames{}; // Core::g_output_frames at the start
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};

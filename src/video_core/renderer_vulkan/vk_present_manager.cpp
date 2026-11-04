@@ -7,6 +7,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
+#include "core/perf_stats.h"
 #ifdef HAS_LSFG
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
@@ -583,6 +584,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Present
     swapchain.Present(render_semaphore);
+    Core::g_output_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace Vulkan
