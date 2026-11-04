@@ -2789,10 +2789,12 @@ ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_ad
     u32 fit_width = info.size.width;
     ForEachImageInRegion(*cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
         // Same address and format, narrower, the whole surface clip inside it, and the same
-        // block linear layout (a relaxed size subresource at level 0, layer 0): the target's
-        // memory as the guest renders it.
+        // block linear layout (same blocks and tile spacing, a relaxed size subresource at
+        // level 0, layer 0): the target's memory as the guest renders it.
         if (True(image.flags & ImageFlagBits::Remapped) || image.gpu_addr != gpu_addr ||
             image.info.type != info.type || image.info.format != info.format ||
+            image.info.block != info.block ||
+            image.info.tile_width_spacing != info.tile_width_spacing ||
             !Nx2Reactive::FitsTarget(clip.x, clip.width, clip.y, clip.height,
                                      image.info.size.width, image.info.size.height, fit_width,
                                      info.size.height)) {
