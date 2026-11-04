@@ -100,7 +100,7 @@ void main() {
     // ΓöÇΓöÇ Anti-flicker: blend with un-warped centre pixel ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
     float motion_magnitude = length(motion * render_size);
     float direct_weight = exp(-motion_magnitude * 0.5);
-    vec4 center_color = mix(texture(CurrentFrame, uv), texture(PreviousFrame, uv), blend_factor);
+    vec4 center_color = mix(texture(PreviousFrame, uv), texture(CurrentFrame, uv), blend_factor);
     interpolated = mix(interpolated, center_color, direct_weight * 0.3);
 
     imageStore(OutGeneratedFrame, pixel_coord, interpolated);

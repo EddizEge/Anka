@@ -37,10 +37,10 @@ VkImageMemoryBarrier MakeBarrier(VkImage image, VkAccessFlags src_access,
     };
 }
 
+// Stays in GENERAL: the interpolation's descriptor and the next flow pass take it that way.
 void BarrierComputeWriteToRead(vk::CommandBuffer cmdbuf, VkImage image) {
     const auto barrier = MakeBarrier(image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                                     VK_IMAGE_LAYOUT_GENERAL,
-                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, {}, {}, barrier);
 }
