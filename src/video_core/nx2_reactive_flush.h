@@ -165,6 +165,37 @@ private:
     std::vector<Id> ids;
 };
 
+/// A count switch; 0 (off) when unset or not a number.
+[[nodiscard]] inline u64 ReadCount(const char* name) noexcept {
+    return Common::Nx2Reactive::ParseFrames(Common::Nx2Reactive::GetEnv(name));
+}
+
+/// EDEN_NX2_RX_COALESCE=<fences> (0 / 1 / unset: off). With reactive flushing the buffer cache
+/// copies back, at every fence, what the GPU wrote to pages the guest CPU read. Switch 2 titles
+/// signal a fence per compute dispatch, which the fence manager skips when it has nothing to
+/// download (SkipEmptyFence): a copy back turns each into a real fence, that is a submission (the
+/// fence's own Queue) with the render pass ended and the command buffer state invalidated, plus a
+/// pipeline barrier pair around the copies. Here a fence that would be skipped but for the buffer
+/// copy back leaves it uncommitted (the GPU-written ranges keep accumulating) for at most
+/// <fences> - 1 fences; the copy back rides along with the next fence made anyway (texture or
+/// query downloads, queued operations, the skip limit), the <fences>th one, or the first one
+/// after a frame ended. Only without delayed fences (GPU accuracy not high, fence behavior
+/// default / immediate): there a fence's operations (syncpoint, semaphore) run when it is signaled,
+/// before the GPU even ran, so the copy back is not ordered with them anyway; with delayed fences
+/// it is (data before the syncpoint), and every fence commits as before.
+[[nodiscard]] inline u64 CoalesceFences() noexcept {
+    static const u64 fences = ReadCount("EDEN_NX2_RX_COALESCE");
+    return fences;
+}
+
+/// Whether a fence commits the buffer cache's pending copy backs now (CoalesceFences): `deferred`
+/// fences already left them, `made_anyway` when the fence is made with or without them, `force`
+/// after a frame ended.
+[[nodiscard]] constexpr bool CommitBufferCopyBack(u64 limit, bool delay_fence, bool made_anyway,
+                                                  bool force, u64 deferred) noexcept {
+    return limit <= 1 || delay_fence || made_anyway || force || deferred + 1 >= limit;
+}
+
 /// EDEN_NX2_RX_ONE_SUBMIT=1: a fence with downloads to wait for is made real, and a real fence's
 /// Queue submits the command buffer (InnerFence::Queue: scheduler.Flush); SignalFence then called
 /// FlushCommands, which submits again whenever the rasterizer drew since its last own flush: an

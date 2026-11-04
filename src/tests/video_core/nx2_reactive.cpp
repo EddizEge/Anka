@@ -465,6 +465,84 @@ TEST_CASE("Reactive latch age model", "[video_core][nx2_reactive]") {
     }
 }
 
+TEST_CASE("Reactive fence coalescing decision", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // Off (0 or 1), delayed fences, a fence made anyway or a frame end commit at once.
+    for (const u64 limit : {u64{0}, u64{1}, u64{2}, u64{3}, u64{16}, u64{64}}) {
+        for (u64 deferred = 0; deferred < 100; ++deferred) {
+            for (int bits = 0; bits < 8; ++bits) {
+                const bool delay = (bits & 1) != 0;
+                const bool made = (bits & 2) != 0;
+                const bool force = (bits & 4) != 0;
+                const bool expected = limit <= 1 || delay || made || force || deferred + 1 >= limit;
+                REQUIRE(Flush::CommitBufferCopyBack(limit, delay, made, force, deferred) ==
+                        expected);
+            }
+        }
+    }
+    REQUIRE(Flush::CommitBufferCopyBack(0, false, false, false, 0));
+    REQUIRE(Flush::CommitBufferCopyBack(1, false, false, false, 0));
+    REQUIRE(!Flush::CommitBufferCopyBack(2, false, false, false, 0));
+    REQUIRE(Flush::CommitBufferCopyBack(2, false, false, false, 1));
+    REQUIRE(!Flush::CommitBufferCopyBack(64, false, false, false, 62));
+    REQUIRE(Flush::CommitBufferCopyBack(64, false, false, false, 63));
+    REQUIRE(Flush::CommitBufferCopyBack(64, true, false, false, 0));
+    REQUIRE(Flush::CommitBufferCopyBack(64, false, true, false, 0));
+    REQUIRE(Flush::CommitBufferCopyBack(64, false, false, true, 0));
+    REQUIRE(Flush::ReadCount("EDEN_NX2_RX_TEST_UNSET_SWITCH") == 0);
+}
+
+TEST_CASE("Reactive fence coalescing model", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // FenceManager::CommitBufferNow's bookkeeping around the decision: per fence with copy backs
+    // pending, a commit resets the deferred count; a frame end forces the next one. Every copy
+    // back reaches a commit within `limit` fences and by the first fence after a frame end; a
+    // made fence always takes it; off, every fence commits.
+    std::mt19937_64 rng{0x5eed};
+    for (const u64 limit : {u64{0}, u64{1}, u64{2}, u64{8}, u64{64}}) {
+        u64 deferred = 0;
+        bool force = false;
+        u64 since_commit = 0;   // fences with pending copy backs since the last commit
+        bool frame_ended = false;
+        u64 commits = 0;
+        u64 fences = 0;
+        for (int step = 0; step < 200'000; ++step) {
+            if (rng() % 50 == 0) {
+                force = limit > 1;
+                frame_ended = true;
+                continue;
+            }
+            const bool made = rng() % 64 == 0;
+            ++fences;
+            const bool taken = force;
+            force = false;
+            const bool commit = Flush::CommitBufferCopyBack(limit, false, made, taken, deferred);
+            if (commit) {
+                deferred = 0;
+                ++commits;
+                since_commit = 0;
+                frame_ended = false;
+            } else {
+                ++deferred;
+                ++since_commit;
+                REQUIRE(!made);
+                REQUIRE(!frame_ended);
+                REQUIRE(since_commit < limit);
+            }
+            if (limit <= 1) {
+                REQUIRE(commit);
+            }
+        }
+        if (limit <= 1) {
+            REQUIRE(commits == fences);
+        } else {
+            // At least one commit per `limit` fences, and far fewer than one per fence.
+            REQUIRE(commits * limit >= fences);
+            REQUIRE(commits < fences);
+        }
+    }
+}
+
 TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
     Reactive::Window window;
     const auto set = [&](Reactive::Counter counter, u64 value) {

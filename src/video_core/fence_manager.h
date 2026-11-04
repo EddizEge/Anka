@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +58,10 @@ public:
     void TickFrame() {
         std::unique_lock lock(ring_guard);
         delayed_destruction_ring.Tick();
+        // EDEN_NX2_RX_COALESCE: copy backs left uncommitted go with the frame's next fence.
+        if (coalesce_fences > 1) [[unlikely]] {
+            coalesce_force.store(true, std::memory_order_relaxed);
+        }
     }
 
     // Unlike other fences, this one doesn't
@@ -90,7 +95,7 @@ public:
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
-        auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        auto [should_flush, committed_flushes] = CommitCacheFlushes(delay_fence);
         if (stats) [[unlikely]] {
             CountCommit(start_ns, committed_flushes);
         }
@@ -369,7 +374,7 @@ private:
     /// lock is taken once, alone, and the fencing thread later takes only the lock of the cache
     /// with work, instead of holding both while it copies (the GPU thread's draws and uploads
     /// waited for it).
-    CacheFlushes CommitCacheFlushes() {
+    CacheFlushes CommitCacheFlushes(bool delay_fence) {
         CacheFlushes flushes{};
         {
             std::scoped_lock lock{texture_cache.mutex};
@@ -384,12 +389,41 @@ private:
             Nx2Stages::CheckBufferLock("FenceManager::CommitCacheFlushes");
             std::scoped_lock lock{buffer_cache.mutex};
             if (buffer_cache.HasUncommittedFlushes()) {
+                if (coalesce_fences > 1 && !CommitBufferNow(delay_fence, flushes)) [[unlikely]] {
+                    return flushes;
+                }
                 buffer_cache.CommitAsyncFlushes();
                 flushes.should_flush = true;
                 flushes.committed |= BufferFlushes;
             }
         }
         return flushes;
+    }
+
+    /// EDEN_NX2_RX_COALESCE: whether this fence commits the buffer cache's copy backs, else it
+    /// leaves them for a later one (nx2_reactive_flush.h). A fence made anyway (another cache's
+    /// downloads, query work or queued operations, the skip limit) takes them along.
+    bool CommitBufferNow(bool delay_fence, const CacheFlushes& flushes) {
+        bool made_anyway = flushes.should_flush || flushes.committed != 0 ||
+                           query_cache.HasUncommittedFlushes() || skipped_fences >= 64;
+        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
+            made_anyway = made_anyway || query_cache.HasPendingFenceWork();
+        }
+        if (!made_anyway) {
+            std::scoped_lock lock{uncommitted_guard};
+            made_anyway = !uncommitted_operations.empty();
+        }
+        const bool force = coalesce_force.exchange(false, std::memory_order_relaxed);
+        if (Nx2Reactive::CommitBufferCopyBack(coalesce_fences, delay_fence, made_anyway, force,
+                                              deferred_fences)) {
+            deferred_fences = 0;
+            return true;
+        }
+        ++deferred_fences;
+        if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FencesBufferDeferred, 1);
+        }
+        return false;
     }
 
     /// EDEN_NX2_REACTIVE_STATS: CommitCacheFlushes' time and what it committed.
@@ -442,6 +476,10 @@ private:
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
     /// EDEN_NX2_RX_ONE_SUBMIT: no FlushCommands after a real fence's own submission
     const bool one_submit = Nx2Reactive::OneSubmit();
+    /// EDEN_NX2_RX_COALESCE (<= 1: off): fences that may leave the buffer copy backs uncommitted
+    const u64 coalesce_fences = Nx2Reactive::CoalesceFences();
+    u64 deferred_fences{}; ///< Fences that left them since the last commit (GPU thread only)
+    std::atomic<bool> coalesce_force{}; ///< A frame ended since (TickFrame): the next one commits
 
     std::mutex guard;
     std::mutex ring_guard;
