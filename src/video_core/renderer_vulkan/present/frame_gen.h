@@ -49,6 +49,7 @@ private:
     f32 built_flow_scale{};
     u64 frame_count{};
     u64 last_count{};
+    u64 generated_total{};
     size_t last_generations{};
     u32 warm_streak{};
     bool generated{};

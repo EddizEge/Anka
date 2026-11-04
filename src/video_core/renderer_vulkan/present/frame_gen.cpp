@@ -12,6 +12,7 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -202,10 +203,6 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                        VkExtent2D guest_extent) {
     generated = false;
 
-    if (!shaders) {
-        shaders.emplace(device);
-    }
-
     if (unavailable || !Settings::values.frame_gen.GetValue()) {
         if (chain || fsr3_chain) {
             scheduler.Finish();
@@ -216,7 +213,12 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         return;
     }
 
+    if (!shaders) {
+        shaders.emplace(device);
+    }
+
     if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
+        LOG_WARNING(Render_Vulkan, "Frame gen off: LSFG shaders could not be loaded");
         unavailable = true;
         return;
     }
@@ -248,7 +250,8 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     if (use_fsr3 && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
+        fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, frame->index,
+                            count);
     } else if (chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([this, source = *frame->image, extent, count,
@@ -285,12 +288,17 @@ size_t FrameGen::GeneratedFrameCount() const {
 void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
     const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
 
+    if (++generated_total % 3000 == 1) {
+        LOG_INFO(Render_Vulkan, "Frame gen: {} frames generated so far ({})", generated_total,
+                 use_fsr3 ? "FSR3" : "LSFG");
+    }
+
     if (use_fsr3 && fsr3_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
-        const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, built_extent);
 
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Generate(device, scheduler, *destination->storage_view, blend, flow_scale);
+        fsr3_chain->Generate(device, scheduler, *destination->storage_view, destination->index,
+                             blend);
     } else if (chain) {
         chain->SetTarget(device, last_generations, generation, destination->index,
                          *destination->storage_view);

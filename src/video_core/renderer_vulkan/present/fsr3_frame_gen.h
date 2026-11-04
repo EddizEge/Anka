@@ -25,7 +25,6 @@ class Scheduler;
 ///  - Early-out for static pixels (skip diamond search)
 ///  - Duplicate-frame detection (skip optical flow entirely)
 ///  - Precise pipeline barriers instead of full-pipeline TransitionImageLayout
-///  - Descriptor-write caching (only update when image views change)
 class Fsr3FrameGen {
 public:
     explicit Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocator,
@@ -33,10 +32,10 @@ public:
     ~Fsr3FrameGen();
 
     void Process(const Device& device, Scheduler& scheduler, VkImage current_frame,
-                 VkImageView current_view, u64 frame_count);
+                 VkImageView current_view, u32 frame_index, u64 frame_count);
 
     void Generate(const Device& device, Scheduler& scheduler, VkImageView destination_storage_view,
-                  float blend_factor, float flow_scale);
+                  u32 destination_index, float blend_factor);
 
     [[nodiscard]] bool IsReady() const {
         return m_initialized && m_has_history;
@@ -68,16 +67,13 @@ private:
     vk::DescriptorSets m_flow_desc_sets;
     vk::DescriptorSets m_interp_desc_sets;
 
-    // History and motion vector images
-    vk::Image m_history_image;
-    vk::ImageView m_history_view;
+    // Frames N (m_newest) and N-1: each new frame overwrites the older one
+    std::array<vk::Image, 2> m_frame_images;
+    std::array<vk::ImageView, 2> m_frame_views;
+    size_t m_newest{};
 
     vk::Image m_motion_image;
     vk::ImageView m_motion_view;
-
-    // Store the last current-frame view for descriptor caching
-    vk::Image m_current_image;
-    vk::ImageView m_current_view;
 
     bool m_initialized{};
     bool m_has_history{};
@@ -85,10 +81,6 @@ private:
     // Duplicate-frame detection: skip optical flow when the frame hasn't changed
     u64 m_last_frame_count{};
     bool m_flow_valid{};
-
-    // Descriptor caching: only update when views change
-    VkImageView m_cached_flow_current_view{VK_NULL_HANDLE};
-    VkImageView m_cached_interp_dest_view{VK_NULL_HANDLE};
 };
 
 } // namespace Vulkan
