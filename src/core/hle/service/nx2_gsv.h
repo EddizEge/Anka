@@ -1235,6 +1235,11 @@ private:
             m_stats.composite_us += to_us(composited - waited);
             m_stats.pace_us += to_us(paced - composited);
             m_stats.max_fence_us = (std::max<long long>)(m_stats.max_fence_us, static_cast<long long>(to_us(waited - entered)));
+            // Counted at the reply: the game gets its buffers back with this frame unfinished.
+            if (const u32 fence_id = ~w[22]; fence_id < 192 &&
+                !system.Host1x().GetSyncpointManager().IsReadyGuest(fence_id, w[24])) {
+                ++m_stats.ran_ahead;
+            }
             if (m_stats.last_present != std::chrono::steady_clock::time_point{}) {
                 const long long frame = to_us(entered - m_stats.last_present);
                 m_stats.frame_us += frame;
@@ -1293,6 +1298,8 @@ private:
                 const u64 shown = output_frames - m_stats.output_frames;
                 extra += fmt::format(", {} images shown ({:.2f} per present)", shown,
                                      static_cast<double>(shown) / 600);
+                // Presents whose frame was still unfinished at the reply (EDEN_NX2_FRAMES_AHEAD).
+                extra += fmt::format(", ran ahead {}", m_stats.ran_ahead);
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
@@ -1317,7 +1324,7 @@ private:
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
-        u32 presents{};
+        u32 presents{}, ran_ahead{};
         u32 rate_presents{}; // EDEN_NX2_PRESENT_RATE: paced at a rate other than 60 Hz
         std::chrono::steady_clock::time_point last_present{};
         Nx2DkDynPace::StepEstimate dyn_step{}; // EDEN_NX2_DK_DYN applied
