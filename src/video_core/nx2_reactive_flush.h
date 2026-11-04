@@ -207,6 +207,30 @@ private:
     return enabled;
 }
 
+/// EDEN_NX2_RX_MASKED_TARGETS=1: a draw marks only the render targets it can write as modified
+/// (TextureCache::UpdateRenderTargets): not a color target whose color mask has no channel on, not
+/// the depth target with depth and stencil writes off. Each modification makes the target newer
+/// than its aliases, so an alias sampled by the next draw is copied from it again: Donkey Kong
+/// Bananza's opening scene samples a 2095x1179 R16_FLOAT image whose 2112x1179 alias (same
+/// memory, same block linear layout) stays bound as a render target, and every such draw copied
+/// the whole image (~27k copies a second). Clears mark their targets as before. Off by default.
+[[nodiscard]] inline bool MaskedTargets() noexcept {
+    static const bool enabled = Common::Nx2Reactive::ParseFlag(
+        Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_MASKED_TARGETS"));
+    return enabled;
+}
+
+/// Whether a color target's mask lets a draw write it (any of the R, G, B, A bits).
+[[nodiscard]] constexpr bool ColorMaskWrites(u32 r, u32 g, u32 b, u32 a) noexcept {
+    return (r | g | b | a) != 0;
+}
+
+/// Whether a draw marks a render target modified (MaskedTargets): always without the switch or
+/// for a clear, else only when it can write it.
+[[nodiscard]] constexpr bool MarksTarget(bool enabled, bool is_clear, bool can_write) noexcept {
+    return !enabled || is_clear || can_write;
+}
+
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads
 /// note no buffer page (NoteCpuRead), so nothing the GPU writes to buffers is copied back at
 /// fences; reads still trap and images still latch.

@@ -568,12 +568,14 @@ TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
     set(Reactive::Counter::RepeatRtAlias, 17);
     set(Reactive::Counter::RepeatViewCpuModified, 18);
     set(Reactive::Counter::RepeatViewAlias, 19);
+    set(Reactive::Counter::MaskedColorTargets, 20);
+    set(Reactive::Counter::MaskedDepthTargets, 21);
     const std::string line = Reactive::FormatWindow(window);
     REQUIRE(Contains(line, "; fences 101 (skipped 2, real 3, buffer commits 4, texture commits 5, "
                            "buffer deferred 6, extra flushes 7) 8 us (commit 9 us, submit 10 us); "
                            "submits 11; copy back pops 12 us (lock wait 13 us); light refusals: "
                            "feedback 14, target cpu modified 15 sparse 16 alias 17, image cpu "
-                           "modified 18 alias 19"));
+                           "modified 18 alias 19; masked targets color 20 depth 21"));
     // Appended: the older part ends as before.
     REQUIRE(Contains(line, "latched images 0; fences 101"));
     // The first MAX_IMAGE_LOGS images keeping draws off the light way get a line, no more.
@@ -598,4 +600,25 @@ TEST_CASE("Reactive pitch linear forced", "[video_core][nx2_reactive]") {
         const bool forced = (bits & 2) != 0;
         REQUIRE(Flush::PitchLinearForced(reactive, forced) == (!reactive || forced));
     }
+}
+
+TEST_CASE("Reactive masked targets", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // A color target is written when any channel of its mask is on.
+    for (u32 bits = 0; bits < 16; ++bits) {
+        REQUIRE(Flush::ColorMaskWrites(bits & 1, (bits >> 1) & 1, (bits >> 2) & 1,
+                                       (bits >> 3) & 1) == (bits != 0));
+    }
+    static_assert(!Flush::ColorMaskWrites(0, 0, 0, 0));
+    static_assert(Flush::ColorMaskWrites(0, 0, 0, 1));
+    // Off: every target marked (as before); on: clears and writable targets only.
+    for (int bits = 0; bits < 8; ++bits) {
+        const bool enabled = (bits & 1) != 0;
+        const bool clear = (bits & 2) != 0;
+        const bool writes = (bits & 4) != 0;
+        REQUIRE(Flush::MarksTarget(enabled, clear, writes) == (!enabled || clear || writes));
+    }
+    static_assert(Flush::MarksTarget(false, false, false));
+    static_assert(!Flush::MarksTarget(true, false, false));
+    static_assert(Flush::MarksTarget(true, true, false));
 }

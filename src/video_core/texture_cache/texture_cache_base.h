@@ -619,6 +619,8 @@ private:
     const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
     /// EDEN_NX2_RX_NO_RT_LATCH (diagnostic: CPU reads latch no image)
     const bool no_rt_latch = Nx2Reactive::NoRtLatch();
+    /// EDEN_NX2_RX_MASKED_TARGETS: a draw marks only the render targets it can write
+    const bool masked_targets = Nx2Reactive::MaskedTargets();
     /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
     /// per (image, alias) pair, synchronizations (Nx2ReportTop)
     struct Nx2RepeatCount {

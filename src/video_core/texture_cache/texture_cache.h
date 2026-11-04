@@ -734,13 +734,42 @@ template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
     auto& flags = maxwell3d->dirty.flags;
+    // EDEN_NX2_RX_MASKED_TARGETS: only the targets this draw can write are modified by it.
+    const auto& regs = maxwell3d->regs;
+    const auto color_marked = [&](size_t index) {
+        if (!masked_targets) {
+            return true;
+        }
+        const auto& mask = regs.color_mask[regs.color_mask_common ? 0 : index];
+        const bool marked = Nx2Reactive::MarksTarget(
+            true, is_clear, Nx2Reactive::ColorMaskWrites(mask.R, mask.G, mask.B, mask.A));
+        if (!marked && render_targets.color_buffer_ids[index] &&
+            ::Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::MaskedColorTargets, 1);
+        }
+        return marked;
+    };
+    const auto depth_marked = [&] {
+        if (!masked_targets) {
+            return true;
+        }
+        const bool marked = Nx2Reactive::MarksTarget(
+            true, is_clear, regs.depth_write_enabled != 0 || regs.stencil_enable != 0);
+        if (!marked && render_targets.depth_buffer_id && ::Common::Nx2Reactive::StatsEnabled())
+            [[unlikely]] {
+            ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::MaskedDepthTargets, 1);
+        }
+        return marked;
+    };
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+            PrepareImageView(color_buffer_id, color_marked(index),
+                             is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        PrepareImageView(depth_buffer_id, depth_marked(),
+                         is_clear && IsFullClear(depth_buffer_id));
         return;
     }
 
@@ -754,11 +783,12 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
 
     for (size_t index = 0; index < NUM_RT; ++index) {
         ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-        PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+        PrepareImageView(color_buffer_id, color_marked(index),
+                         is_clear && IsFullClear(color_buffer_id));
     }
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
 
-    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+    PrepareImageView(depth_buffer_id, depth_marked(), is_clear && IsFullClear(depth_buffer_id));
 
     rt_active_mask = 0;
     rt_image_id = {};

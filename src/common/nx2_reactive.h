@@ -98,6 +98,8 @@ enum class Counter : u32 {
     RepeatRtAlias,          ///< A render target with an alias written after it
     RepeatViewCpuModified,  ///< A sampled or stored image the CPU modified
     RepeatViewAlias,        ///< A sampled or stored image with an alias written after it
+    MaskedColorTargets,     ///< EDEN_NX2_RX_MASKED_TARGETS: color targets a draw left unmodified
+    MaskedDepthTargets,     ///< EDEN_NX2_RX_MASKED_TARGETS: depth targets a draw left unmodified
     Count,
 };
 
@@ -259,7 +261,7 @@ struct Window {
                        "buffer deferred {}, extra flushes {}) {} us (commit {} us, submit {} us); "
                        "submits {}; copy back pops {} us (lock wait {} us); light refusals: "
                        "feedback {}, target cpu modified {} sparse {} alias {}, image cpu modified "
-                       "{} alias {}",
+                       "{} alias {}; masked targets color {} depth {}",
                        w.Get(C::Fences), w.Get(C::FencesSkipped), w.Get(C::FencesReal),
                        w.Get(C::FencesBufferCommit), w.Get(C::FencesTextureCommit),
                        w.Get(C::FencesBufferDeferred), w.Get(C::FenceExtraFlushes),
@@ -267,7 +269,8 @@ struct Window {
                        w.Get(C::Submits), us(C::PopBufferNs), us(C::PopBufferWaitNs),
                        w.Get(C::RepeatFeedback), w.Get(C::RepeatRtCpuModified),
                        w.Get(C::RepeatRtSparse), w.Get(C::RepeatRtAlias),
-                       w.Get(C::RepeatViewCpuModified), w.Get(C::RepeatViewAlias));
+                       w.Get(C::RepeatViewCpuModified), w.Get(C::RepeatViewAlias),
+                       w.Get(C::MaskedColorTargets), w.Get(C::MaskedDepthTargets));
 }
 
 [[nodiscard]] inline std::string FormatWindow(const Window& w) {
