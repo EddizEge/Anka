@@ -70,6 +70,7 @@
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/nx2_event_diag.h"
 #include "core/hle/service/nx2_dk_dyn_pace.h"
+#include "core/hle/service/nx2_osd_speed.h"
 #include "core/hle/service/nx2_frame_stats.h"
 #include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_rate.h"
@@ -1247,6 +1248,13 @@ private:
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
                 if (m_pace_one) {
                     m_stats.dyn_step.Add(frame);
+                }
+                // EDEN_NX2_OSD: the game time this interval stepped, for the on-screen speed.
+                if (Nx2OsdSpeed::Enabled()) [[unlikely]] {
+                    const u32 interval =
+                        !m_pace_one && PresentIntervalSource().word != 0 ? PresentInterval(w) : 0;
+                    Nx2OsdSpeed::g_counter.Add(frame,
+                                               Nx2OsdSpeed::GameUs(m_pace_one, interval, frame));
                 }
                 if (m_stats.samples < m_frame_samples.size()) {
                     m_frame_samples[m_stats.samples++] =

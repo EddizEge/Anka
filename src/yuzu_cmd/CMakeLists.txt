@@ -33,6 +33,8 @@ add_executable(yuzu-cmd
     emu_window/emu_window_sdl3_vk.h
     nx2_auto_script.cpp
     nx2_auto_script.h
+    nx2_osd.cpp
+    nx2_osd.h
     nx2_sampler.cpp
     nx2_sampler.h
     sdl_config.cpp

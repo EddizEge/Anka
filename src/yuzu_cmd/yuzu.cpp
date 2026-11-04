@@ -63,6 +63,7 @@
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
 #include "yuzu_cmd/nx2_auto_script.h"
+#include "yuzu_cmd/nx2_osd.h"
 #include "yuzu_cmd/nx2_sampler.h"
 
 #ifdef _WIN32
@@ -255,6 +256,8 @@ struct SdlState {
     // Must outlive emu_window, which keeps a pointer to it.
     InputCommon::InputSubsystem input_subsystem{};
     std::unique_ptr<EmuWindow_SDL3> emu_window;
+    // EDEN_NX2_OSD (yuzu_cmd/nx2_osd.h): reads the system's clock, stopped before it shuts down.
+    Nx2Osd::WriterPtr osd;
 };
 
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
@@ -423,6 +426,9 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     });
 
     void(state->system.Run());
+    state->osd = Nx2Osd::StartFromEnvironment([&system = state->system]() -> s64 {
+        return system.CoreTiming().GetGlobalTimeUs().count();
+    });
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;
@@ -714,6 +720,7 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     if (!state) {
         return;
     }
+    state->osd.reset();
     state->system.DetachDebugger();
     // SDL calls this even when SDL_AppInit never powered the system on (no ROM given, --help or
     // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would

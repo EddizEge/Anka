@@ -14,6 +14,9 @@ namespace Core {
 
 /// Images the renderer has sent to the screen, frame generation's included.
 inline std::atomic<u64> g_output_frames{};
+/// Game frames (PerfStats::EndGameFrame), never reset: GetAndResetStats' game_frames is the title
+/// bar's (EDEN_NX2_OSD reads this one, yuzu_cmd/nx2_osd.cpp).
+inline std::atomic<u64> g_game_frames{};
 
 struct PerfStatsResults {
     /// System FPS (LCD VBlanks) in Hz
