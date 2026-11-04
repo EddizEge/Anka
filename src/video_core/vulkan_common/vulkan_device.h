@@ -431,6 +431,11 @@ FN_MAX_LIMIT_LIST
 
     /// Returns true if the device supports float16 natively.
     bool IsFloat16Supported() const {
+        return features.shader_float16_int8.shaderFloat16 && !has_broken_float16_math;
+    }
+
+    /// Returns true if float16 shaders can run at all, even where game shaders must avoid them.
+    bool IsFloat16Enabled() const {
         return features.shader_float16_int8.shaderFloat16;
     }
 
@@ -1240,6 +1245,7 @@ private:
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.
     bool supports_d24_depth{};                 ///< Supports D24 depth buffers.
     bool must_emulate_scaled_formats{};        ///< Requires scaled vertex format emulation
+    bool has_broken_float16_math{};            ///< Game and filter shaders must avoid float16
     bool dynamic_state3_blending{};            ///< Has blending features of dynamic_state3.
     bool dynamic_state3_enables{};             ///< Has at least one enable feature of dynamic_state3.
     bool dynamic_state3_depth_clamp_enable{};

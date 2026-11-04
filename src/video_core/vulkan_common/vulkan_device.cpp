@@ -588,7 +588,18 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         const auto arch = GetNvidiaArch();
         if (arch >= NvidiaArchitecture::Arch_AmpereOrNewer) {
             LOG_WARNING(Render_Vulkan, "Ampere and newer have broken float16 math");
-            features.shader_float16_int8.shaderFloat16 = false;
+            has_broken_float16_math = true;
+            // The LSFG shaders cannot be created without float16 on the device: it stays there
+            // when frame generation starts with LSFG, the game and filter shaders still avoid it
+            // (IsFloat16Supported). Otherwise the device is made without it, as before.
+            const bool lsfg = Settings::values.frame_gen.GetValue() &&
+                              Settings::values.frame_gen_type.GetValue() ==
+                                  Settings::FrameGenType::Lsfg;
+            if (lsfg) {
+                LOG_INFO(Render_Vulkan, "float16 kept on the device for LSFG frame generation");
+            } else {
+                features.shader_float16_int8.shaderFloat16 = false;
+            }
         }
 
         // Use hardware depth/stencil blits instead when available
@@ -610,12 +621,16 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     }
 
     sets_per_pool = 64;
+    // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
+    // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
+    // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
+    const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
         sets_per_pool = 96;
 
         // Disable VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT on AMD GCN4 and lower as it is broken.
-        if (!features.shader_float16_int8.shaderFloat16) {
+        if (amd_gcn4_or_older) {
             LOG_WARNING(Render_Vulkan,
                         "AMD GCN4 and earlier have broken VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT");
             has_broken_cube_compatibility = true;
@@ -631,7 +646,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     if (extensions.sampler_filter_minmax && is_amd) {
         // Disable ext_sampler_filter_minmax on AMD GCN4 and lower as it is broken.
-        if (!features.shader_float16_int8.shaderFloat16) {
+        if (amd_gcn4_or_older) {
             LOG_WARNING(Render_Vulkan,
                         "AMD GCN4 and earlier have broken VK_EXT_sampler_filter_minmax");
             RemoveExtension(extensions.sampler_filter_minmax,
