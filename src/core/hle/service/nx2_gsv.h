@@ -1007,9 +1007,11 @@ public:
         } else {
             static_cast<void>(ReplyOwnCommands()); // its "needs the table" warning
         }
-        // EDEN_NX2_DK_DYN applied (nx2_dk_dyn_pace.h): 107 reports VRR.
+        // EDEN_NX2_DK_DYN applied (nx2_dk_dyn_pace.h): 107 reports VRR, presents are paced to
+        // every vblank.
         const bool dk_dyn = Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed);
         const u64 application = system.GetApplicationProcessProgramID();
+        m_pace_one = Nx2DkDynPace::PaceOne(dk_dyn, application, std::getenv("EDEN_NX2_PACE_ONE"));
         if (Nx2DkDynPace::ReportVrr(dk_dyn, application)) {
             if (GetReplies() == nullptr) {
                 static const FunctionInfo vrr[] = {
@@ -1173,8 +1175,18 @@ private:
         const auto waited = std::chrono::steady_clock::now();
         Composite(w[5], ~w[22], w[24]);
         const auto composited = std::chrono::steady_clock::now();
-        PaceToVblank(PresentInterval(w), PresentRate(w));
-        if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
+        if (m_pace_one) [[unlikely]] {
+            if (!m_pace_one_logged) {
+                m_pace_one_logged = true;
+                LOG_INFO(Service, "nx2:vi2 dynamic FPS (EDEN_NX2_DK_DYN): presents paced to every "
+                                  "vblank; EDEN_NX2_MODE_PACE, EDEN_NX2_MODE_GOV and the present "
+                                  "interval set aside");
+            }
+            PaceToVblank(1, 0);
+        } else {
+            PaceToVblank(PresentInterval(w), PresentRate(w));
+        }
+        if (!m_pace_one && VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
             if (VideoCommon::Nx2ModePace::Hold(PresentInterval(w), GuestSleeperOrNull()) &&
                 VblankGridMode() == 0) {
                 // The vblank pacing starts over from the held present: no short frames after it.
@@ -1187,10 +1199,10 @@ private:
         if (m_vrr_present_timer) {
             PresentVrrVsync();
         }
-        if (VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
+        if (!m_pace_one && VideoCommon::Nx2ModeGov::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModeGov::Present(PresentInterval(w), composited, paced);
         }
-        if (VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
+        if (!m_pace_one && VideoCommon::Nx2ModePace::Enabled()) [[unlikely]] {
             VideoCommon::Nx2ModePace::Present(PresentInterval(w), entered, composited, paced);
             // EDEN_NX2_MODE_PACE=2: a released present lets the next one come early (a fast frame
             // to the game, which is what takes it up); 0 with =1.
@@ -1223,6 +1235,9 @@ private:
                 m_stats.frame_us += frame;
                 m_stats.max_frame_us = (std::max)(m_stats.max_frame_us, frame);
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
+                if (m_pace_one) {
+                    m_stats.dyn_step.Add(frame);
+                }
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
@@ -1253,6 +1268,11 @@ private:
                     m_vsync->vrr_delayed = 0;
                     m_vsync->vrr_bottom = 0;
                 }
+                if (m_pace_one) {
+                    extra += fmt::format(", dynamic FPS: {} frames over 2.5 vblanks, speed "
+                                         "estimate {:.3f}x",
+                                         m_stats.dyn_step.capped, m_stats.dyn_step.Speed());
+                }
                 LOG_INFO(Service,
                          "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
@@ -1280,6 +1300,7 @@ private:
         u32 presents{};
         u32 rate_presents{}; // EDEN_NX2_PRESENT_RATE: paced at a rate other than 60 Hz
         std::chrono::steady_clock::time_point last_present{};
+        Nx2DkDynPace::StepEstimate dyn_step{}; // EDEN_NX2_DK_DYN applied
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
@@ -2004,6 +2025,9 @@ private:
         TipcReplyWords(ctx, Nx2DkDynPace::VrrReply);
     }
 
+    // EDEN_NX2_DK_DYN applied (Nx2DkDynPace::PaceOne): set as the session opens.
+    bool m_pace_one{};
+    bool m_pace_one_logged{};
     bool m_vrr_reported{};
 
     // EDEN_NX2_VI2_REPLY_FILE / EDEN_NX2_VI2_REPLY (off by default): replies from a table that may

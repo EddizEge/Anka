@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 
 #include "common/common_types.h"
@@ -22,5 +23,34 @@ constexpr std::array<u32, 2> VrrReply{0x0, 0x80000000};
 constexpr bool ReportVrr(bool applied, u64 application) {
     return applied && application == ProgramId;
 }
+
+/// Presents paced to every vblank (60 Hz at most) instead of the 2 or 3 the game asks for, and
+/// EDEN_NX2_MODE_PACE / EDEN_NX2_MODE_GOV set aside: holding a frame for its interval stretched
+/// the whole frame time the patched game measures and kept it at 20-30 fps (ZendNevs's pace_one).
+/// EDEN_NX2_PACE_ONE=0 keeps the interval.
+constexpr bool PaceOne(bool applied, u64 application, const char* pace_one) {
+    return ReportVrr(applied, application) && !(pace_one != nullptr && pace_one[0] == '0');
+}
+
+/// The patched clock steps by the frame's time up to 2.5 vblanks (24 fps): a guess at the game's
+/// speed from the presents' intervals, for the 600 present stats line. A guess only: the step is
+/// the game's own, from its frame time.
+struct StepEstimate {
+    static constexpr long long CapUs = 41'667;
+
+    long long frame_us{};
+    long long stepped_us{};
+    u32 capped{};
+
+    constexpr void Add(long long us) {
+        frame_us += us;
+        stepped_us += (std::min)(us, CapUs);
+        capped += us > CapUs ? 1 : 0;
+    }
+
+    constexpr double Speed() const {
+        return frame_us > 0 ? static_cast<double>(stepped_us) / static_cast<double>(frame_us) : 1.0;
+    }
+};
 
 } // namespace Service::Nx2DkDynPace

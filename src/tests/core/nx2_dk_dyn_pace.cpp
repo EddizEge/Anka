@@ -15,8 +15,38 @@ TEST_CASE("Nx2DkDynPace: only once the patch went in, only for Bananza", "[core]
     REQUIRE(!ReportVrr(false, ProgramId));
     REQUIRE(!ReportVrr(true, Mkw));
     REQUIRE(!ReportVrr(true, 0));
+    REQUIRE(PaceOne(true, ProgramId, nullptr));
+    REQUIRE(PaceOne(true, ProgramId, "1"));
+    REQUIRE(PaceOne(true, ProgramId, ""));
+    REQUIRE(!PaceOne(true, ProgramId, "0"));
+    REQUIRE(!PaceOne(false, ProgramId, nullptr));
+    REQUIRE(!PaceOne(false, ProgramId, "1"));
+    REQUIRE(!PaceOne(true, Mkw, nullptr));
     // Bit 63 of the first u64, the second word's top bit (E-2).
     REQUIRE(VrrReply[0] == 0);
     REQUIRE(VrrReply[1] == 0x80000000U);
     REQUIRE(((u64{VrrReply[1]} << 32 | VrrReply[0]) >> 63) == 1);
+}
+
+TEST_CASE("Nx2DkDynPace: the step estimate", "[core]") {
+    StepEstimate none;
+    REQUIRE(none.Speed() == 1.0);
+    StepEstimate even;
+    for (int i = 0; i < 600; ++i) {
+        even.Add(i % 2 == 0 ? 20'000 : 33'000); // 20 and 33 ms: under the cap
+    }
+    REQUIRE(even.capped == 0);
+    REQUIRE(even.Speed() == 1.0);
+    StepEstimate slow;
+    slow.Add(16'667);
+    slow.Add(83'333); // 2.5 vblanks of it count
+    REQUIRE(slow.capped == 1);
+    REQUIRE(slow.frame_us == 100'000);
+    REQUIRE(slow.stepped_us == 16'667 + 41'667);
+    REQUIRE(slow.Speed() > 0.5833);
+    REQUIRE(slow.Speed() < 0.5834);
+    StepEstimate edge;
+    edge.Add(41'667);
+    REQUIRE(edge.capped == 0);
+    REQUIRE(edge.Speed() == 1.0);
 }
