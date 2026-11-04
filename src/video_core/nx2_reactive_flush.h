@@ -165,4 +165,23 @@ private:
     std::vector<Id> ids;
 };
 
+/// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads
+/// note no buffer page (NoteCpuRead), so nothing the GPU writes to buffers is copied back at
+/// fences; reads still trap and images still latch.
+[[nodiscard]] inline bool NoCopyBack() noexcept {
+    static const bool enabled =
+        Common::Nx2Reactive::ParseFlag(Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_NO_COPYBACK"));
+    return enabled;
+}
+
+/// EDEN_NX2_RX_NO_RT_LATCH=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point for images): a
+/// guest CPU read of a GPU-modified image latches nothing (no forced_flushed, no
+/// PreemtiveDownload on its views) and is answered preemptive: the image is never downloaded for
+/// it, the guest reads what its memory last held.
+[[nodiscard]] inline bool NoRtLatch() noexcept {
+    static const bool enabled =
+        Common::Nx2Reactive::ParseFlag(Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_NO_RT_LATCH"));
+    return enabled;
+}
+
 } // namespace VideoCommon::Nx2Reactive

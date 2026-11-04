@@ -955,6 +955,9 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
         }
         area->start_address = (std::min)(area->start_address, image.cpu_addr);
         area->end_address = (std::max)(area->end_address, image.cpu_addr_end);
+        if (no_rt_latch) [[unlikely]] {
+            return;
+        }
         for (auto image_view_id : image.image_view_ids) {
             auto& image_view = slot_image_views[image_view_id];
             image_view.flags |= ImageViewFlagBits::PreemtiveDownload;
@@ -1378,8 +1381,37 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
 }
 
 template <class P>
+void TextureCache<P>::Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const {
+    namespace Reactive = Common::Nx2Reactive;
+    Reactive::Add(reason, 1);
+    if (!image_id || !Reactive::TakeRepeatLog()) {
+        return;
+    }
+    const ImageBase& image = slot_images[image_id];
+    std::string aliases;
+    for (const AliasedImage& alias : image.aliased_images) {
+        const ImageBase& other = slot_images[alias.id];
+        aliases += fmt::format(" [{}x{} format {} gpu {:#x} tick {}]", other.info.size.width,
+                               other.info.size.height, other.info.format, other.gpu_addr,
+                               other.modification_tick);
+    }
+    LOG_INFO(HW_GPU,
+             "nx2 reactive: light refusal {}: image {} gpu {:#x} cpu {:#x}, {}x{}x{} format {}, "
+             "{} levels {} layers, flags {:#x}, forced flushed {}, read latched {}, tick {}, {} "
+             "aliases{}",
+             static_cast<u32>(reason), image_id.index, image.gpu_addr, image.cpu_addr,
+             image.info.size.width, image.info.size.height, image.info.size.depth,
+             image.info.format, image.info.resources.levels, image.info.resources.layers,
+             static_cast<u32>(image.flags), image.info.forced_flushed, image.nx2_read_latched,
+             image.modification_tick, image.aliased_images.size(), aliases);
+}
+
+template <class P>
 bool TextureCache<P>::RenderTargetsNeedRepeat() const {
     if (Settings::values.barrier_feedback_loops.GetValue() && last_feedback_loop_result) {
+        if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatFeedback, ImageId{});
+        }
         return true;
     }
     // An alias with an older tick is left alone (SynchronizeAliases copies newer ones only), and
@@ -1388,11 +1420,22 @@ bool TextureCache<P>::RenderTargetsNeedRepeat() const {
         const ImageBase& image = slot_images[image_id];
         if (True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::SparseLayers |
                                 ImageFlagBits::UnwrittenSparse))) {
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                Nx2NoteRepeat(True(image.flags & ImageFlagBits::CpuModified)
+                                  ? Common::Nx2Reactive::Counter::RepeatRtCpuModified
+                                  : Common::Nx2Reactive::Counter::RepeatRtSparse,
+                              image_id);
+            }
             return true;
         }
-        return std::ranges::any_of(image.aliased_images, [&](const AliasedImage& alias) {
-            return slot_images[alias.id].modification_tick > image.modification_tick;
-        });
+        const bool newer_alias =
+            std::ranges::any_of(image.aliased_images, [&](const AliasedImage& alias) {
+                return slot_images[alias.id].modification_tick > image.modification_tick;
+            });
+        if (newer_alias && Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatRtAlias, image_id);
+        }
+        return newer_alias;
     };
     for (size_t index = 0; index < NUM_RT; ++index) {
         if ((rt_active_mask & (1u << index)) != 0 && repeats(rt_image_id[index])) {
@@ -1414,10 +1457,18 @@ bool TextureCache<P>::ViewsNeedRepeat(std::span<const ImageViewInOut> views) con
         }
         const ImageBase& image = slot_images[image_view.image_id];
         if (True(image.flags & ImageFlagBits::CpuModified)) {
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatViewCpuModified,
+                              image_view.image_id);
+            }
             return true;
         }
         for (const AliasedImage& alias : image.aliased_images) {
             if (slot_images[alias.id].modification_tick > image.modification_tick) {
+                if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                    Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatViewAlias,
+                                  image_view.image_id);
+                }
                 return true;
             }
         }

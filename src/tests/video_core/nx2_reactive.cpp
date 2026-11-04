@@ -464,3 +464,37 @@ TEST_CASE("Reactive latch age model", "[video_core][nx2_reactive]") {
         }
     }
 }
+
+TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
+    Reactive::Window window;
+    const auto set = [&](Reactive::Counter counter, u64 value) {
+        window.counters[static_cast<std::size_t>(counter)] = value;
+    };
+    set(Reactive::Counter::Fences, 101);
+    set(Reactive::Counter::FencesSkipped, 2);
+    set(Reactive::Counter::FencesReal, 3);
+    set(Reactive::Counter::FencesBufferCommit, 4);
+    set(Reactive::Counter::FencesTextureCommit, 5);
+    set(Reactive::Counter::FencesBufferDeferred, 6);
+    set(Reactive::Counter::FenceExtraFlushes, 7);
+    set(Reactive::Counter::FenceNs, 8'999);
+    set(Reactive::Counter::FenceCommitNs, 9'000);
+    set(Reactive::Counter::FenceSubmitNs, 10'500);
+    set(Reactive::Counter::Submits, 11);
+    set(Reactive::Counter::PopBufferNs, 12'000);
+    set(Reactive::Counter::PopBufferWaitNs, 13'000);
+    set(Reactive::Counter::RepeatFeedback, 14);
+    set(Reactive::Counter::RepeatRtCpuModified, 15);
+    set(Reactive::Counter::RepeatRtSparse, 16);
+    set(Reactive::Counter::RepeatRtAlias, 17);
+    set(Reactive::Counter::RepeatViewCpuModified, 18);
+    set(Reactive::Counter::RepeatViewAlias, 19);
+    const std::string line = Reactive::FormatWindow(window);
+    REQUIRE(Contains(line, "; fences 101 (skipped 2, real 3, buffer commits 4, texture commits 5, "
+                           "buffer deferred 6, extra flushes 7) 8 us (commit 9 us, submit 10 us); "
+                           "submits 11; copy back pops 12 us (lock wait 13 us); light refusals: "
+                           "feedback 14, target cpu modified 15 sparse 16 alias 17, image cpu "
+                           "modified 18 alias 19"));
+    // Appended: the older part ends as before.
+    REQUIRE(Contains(line, "latched images 0; fences 101"));
+}

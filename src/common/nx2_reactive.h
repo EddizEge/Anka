@@ -76,6 +76,28 @@ enum class Counter : u32 {
     LatchPagesDropped,      ///< EDEN_NX2_READ_LATCH_AGE: CPU-read buffer pages dropped
     LatchImagesCleared,     ///< EDEN_NX2_READ_LATCH_AGE: images whose read latch was cleared
     Frames,                 ///< Rasterizer TickFrame calls
+    // Fences (FenceManager::SignalFence) and what they cost the thread signaling them:
+    Fences,                 ///< SignalFence calls
+    FencesSkipped,          ///< Of them, empty fences not made (SkipEmptyFence)
+    FencesReal,             ///< Made with a backend fence (not stubbed): each one a submission
+    FencesBufferCommit,     ///< That committed the buffer cache's copy backs
+    FencesTextureCommit,    ///< That committed the texture cache's downloads
+    FencesBufferDeferred,   ///< EDEN_NX2_RX_COALESCE: buffer copy backs left for a later fence
+    FenceExtraFlushes,      ///< FlushCommands after a real fence's own submission
+    FenceNs,                ///< Time in SignalFence (all of it), nanoseconds
+    FenceCommitNs,          ///< Of it, CommitCacheFlushes (locks, copy recording)
+    FenceSubmitNs,          ///< Of it, the fence's queueing and FlushCommands (submissions)
+    Submits,                ///< Vulkan scheduler submissions (SubmitExecution), all callers
+    PopBufferNs,            ///< Fence thread: buffer cache copy backs to guest memory, lock held
+    PopBufferWaitNs,        ///< Fence thread: its wait for BufferCache::mutex
+    // Why a draw's render targets or images kept it off the light way (EDEN_NX2_LIGHT_DRAW;
+    // TextureCache::RenderTargetsNeedRepeat / ViewsNeedRepeat answered yes):
+    RepeatFeedback,         ///< A feedback loop barrier
+    RepeatRtCpuModified,    ///< A render target the CPU modified
+    RepeatRtSparse,         ///< A sparse render target
+    RepeatRtAlias,          ///< A render target with an alias written after it
+    RepeatViewCpuModified,  ///< A sampled or stored image the CPU modified
+    RepeatViewAlias,        ///< A sampled or stored image with an alias written after it
     Count,
 };
 
@@ -111,6 +133,8 @@ struct State {
     u64 fastmem_fallbacks_logged{};
     /// Render target images logged at their first queued download (at most MAX_IMAGE_LOGS)
     std::atomic<u32> image_logs{};
+    /// Images logged as keeping draws off the light way (at most MAX_IMAGE_LOGS)
+    std::atomic<u32> repeat_logs{};
     /// steady_clock time (ns) of the next line; 0 before the first call
     std::atomic<s64> next_report_ns{};
     s64 window_start_ns{};
@@ -172,6 +196,11 @@ inline void BumpReadAreaEpoch() noexcept {
     return GetState().image_logs.fetch_add(1, std::memory_order_relaxed) < MAX_IMAGE_LOGS;
 }
 
+/// Whether this image keeping draws off the light way gets a log line (the first MAX_IMAGE_LOGS).
+[[nodiscard]] inline bool TakeRepeatLog() noexcept {
+    return GetState().repeat_logs.fetch_add(1, std::memory_order_relaxed) < MAX_IMAGE_LOGS;
+}
+
 [[nodiscard]] inline s64 NowNs() noexcept {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -222,6 +251,25 @@ struct Window {
     return window;
 }
 
+/// The line's fence part (appended, so older parsers keep reading the rest).
+[[nodiscard]] inline std::string FormatFences(const Window& w) {
+    using C = Counter;
+    const auto us = [&](C counter) { return w.Get(counter) / 1000; };
+    return fmt::format("; fences {} (skipped {}, real {}, buffer commits {}, texture commits {}, "
+                       "buffer deferred {}, extra flushes {}) {} us (commit {} us, submit {} us); "
+                       "submits {}; copy back pops {} us (lock wait {} us); light refusals: "
+                       "feedback {}, target cpu modified {} sparse {} alias {}, image cpu modified "
+                       "{} alias {}",
+                       w.Get(C::Fences), w.Get(C::FencesSkipped), w.Get(C::FencesReal),
+                       w.Get(C::FencesBufferCommit), w.Get(C::FencesTextureCommit),
+                       w.Get(C::FencesBufferDeferred), w.Get(C::FenceExtraFlushes),
+                       us(C::FenceNs), us(C::FenceCommitNs), us(C::FenceSubmitNs),
+                       w.Get(C::Submits), us(C::PopBufferNs), us(C::PopBufferWaitNs),
+                       w.Get(C::RepeatFeedback), w.Get(C::RepeatRtCpuModified),
+                       w.Get(C::RepeatRtSparse), w.Get(C::RepeatRtAlias),
+                       w.Get(C::RepeatViewCpuModified), w.Get(C::RepeatViewAlias));
+}
+
 [[nodiscard]] inline std::string FormatWindow(const Window& w) {
     u64 slow_reads = 0;
     std::size_t last_slot = 0;
@@ -253,7 +301,8 @@ struct Window {
         w.Get(C::BufferDownloads), kib(w.Get(C::BufferDownloadBytes)), w.Get(G::ReadPages),
         mib(w.Get(G::StagingBytes)), mib(w.Get(G::StagingDownloadBytes)), w.fastmem_fallbacks,
         w.fastmem_fallbacks_total, w.Get(C::FirstReadFlushes), w.Get(C::LatchPagesDropped),
-        w.Get(C::LatchImagesCleared), w.Get(G::LatchedImages));
+        w.Get(C::LatchImagesCleared), w.Get(G::LatchedImages)) +
+           FormatFences(w);
 }
 
 /// Whether a line is due at now_ns, `slack_ns` past its time; only one caller gets true for it

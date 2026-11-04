@@ -904,6 +904,9 @@ bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
     if (AsyncBufferDownloads()) {
         return false;
     }
+    if (no_copy_back) [[unlikely]] {
+        return false;
+    }
     if (read_latch_age != 0) [[unlikely]] {
         read_page_ages.Note(addr, size, frame_tick);
     }

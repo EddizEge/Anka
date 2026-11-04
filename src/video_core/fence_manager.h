@@ -18,6 +18,7 @@
 #include <queue>
 
 #include "common/common_types.h"
+#include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -81,15 +82,25 @@ public:
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
+        // EDEN_NX2_REACTIVE_STATS: the fence's count and time, by part (common/nx2_reactive.h).
+        const bool stats = Common::Nx2Reactive::StatsEnabled();
+        const s64 start_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
         const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        if (stats) [[unlikely]] {
+            CountCommit(start_ns, committed_flushes);
+        }
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
             func();
             rasterizer.InvalidateGPUCache();
+            if (stats) [[unlikely]] {
+                Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FencesSkipped, 1);
+                CountFence(start_ns);
+            }
             return;
         }
         skipped_fences = 0;
@@ -108,6 +119,8 @@ public:
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
         }
         pending_flushes.push_back(committed_flushes);
+        const s64 submit_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
+        const bool real_fence = !new_fence->IsStubbed();
         QueueFence(new_fence);
         if (!delay_fence) {
             func();
@@ -115,12 +128,25 @@ public:
         fences.push(std::move(new_fence));
         if (should_flush) {
             rasterizer.FlushCommands();
+            if (stats) [[unlikely]] {
+                Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FenceExtraFlushes,
+                                         real_fence ? 1 : 0);
+            }
+        }
+        if (stats) [[unlikely]] {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FencesReal, real_fence ? 1 : 0);
+            Common::Nx2Reactive::Add(
+                Common::Nx2Reactive::Counter::FenceSubmitNs,
+                static_cast<u64>((std::max)(s64{0}, Common::Nx2Reactive::NowNs() - submit_ns)));
         }
         if constexpr (can_async_check) {
             guard.unlock();
             cv.notify_all();
         }
         rasterizer.InvalidateGPUCache();
+        if (stats) [[unlikely]] {
+            CountFence(start_ns);
+        }
     }
 
     void SignalSyncPoint(u32 value) {
@@ -275,9 +301,20 @@ private:
                 }
             }
             if (buffer_pops != 0) {
+                const bool stats = Common::Nx2Reactive::StatsEnabled();
+                const s64 wait_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
                 std::scoped_lock lock{buffer_cache.mutex};
+                const s64 held_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
                 for (size_t i = 0; i < buffer_pops; ++i) {
                     buffer_cache.PopAsyncFlushes();
+                }
+                if (stats) [[unlikely]] {
+                    using Common::Nx2Reactive::Counter;
+                    Common::Nx2Reactive::Add(Counter::PopBufferWaitNs,
+                                             static_cast<u64>((std::max)(s64{0}, held_ns - wait_ns)));
+                    Common::Nx2Reactive::Add(
+                        Counter::PopBufferNs,
+                        static_cast<u64>((std::max)(s64{0}, Common::Nx2Reactive::NowNs() - held_ns)));
                 }
             }
             // Queries and operations keep their per-fence order.
@@ -351,6 +388,26 @@ private:
             }
         }
         return flushes;
+    }
+
+    /// EDEN_NX2_REACTIVE_STATS: CommitCacheFlushes' time and what it committed.
+    static void CountCommit(s64 start_ns, u8 committed) {
+        using Common::Nx2Reactive::Counter;
+        Common::Nx2Reactive::Add(
+            Counter::FenceCommitNs,
+            static_cast<u64>((std::max)(s64{0}, Common::Nx2Reactive::NowNs() - start_ns)));
+        Common::Nx2Reactive::Add(Counter::FencesBufferCommit, (committed & BufferFlushes) ? 1 : 0);
+        Common::Nx2Reactive::Add(Counter::FencesTextureCommit,
+                                 (committed & TextureFlushes) ? 1 : 0);
+    }
+
+    /// EDEN_NX2_REACTIVE_STATS: a fence signaled, its whole time.
+    static void CountFence(s64 start_ns) {
+        using Common::Nx2Reactive::Counter;
+        Common::Nx2Reactive::Add(Counter::Fences, 1);
+        Common::Nx2Reactive::Add(
+            Counter::FenceNs,
+            static_cast<u64>((std::max)(s64{0}, Common::Nx2Reactive::NowNs() - start_ns)));
     }
 
     /// Whether a fence with no downloads would do nothing, so need not be made: with fast GPU

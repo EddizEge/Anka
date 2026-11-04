@@ -894,6 +894,8 @@ private:
     SummarizedRangeSet<false> cpu_read_ranges;
     /// EDEN_NX2_READ_LATCH_AGE (0: off): the frame each of cpu_read_ranges' pages was last read in
     const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    /// EDEN_NX2_RX_NO_COPYBACK (diagnostic: no CPU-read page, no copy back)
+    const bool no_copy_back = Nx2Reactive::NoCopyBack();
     Nx2Reactive::ReadPageAges read_page_ages;
     /// Drops the CPU-read pages not read for read_latch_age frames and makes the cores' reads
     /// reach GetFlushArea again (TickFrame, every AgeStep frames).

@@ -312,6 +312,10 @@ public:
     /// CPU-modified contents or an alias written after one of them.
     [[nodiscard]] bool ViewsNeedRepeat(std::span<const ImageViewInOut> views) const;
 
+    /// EDEN_NX2_REACTIVE_STATS: counts why an image keeps a draw off the light way (the two
+    /// above answered yes) and logs the first images (an empty id: a feedback loop).
+    void Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const;
+
     /// EDEN_NX2_LIGHT_UNIFORM: how many times a memory write found an image (WriteMemory) so far.
     [[nodiscard]] u64 WriteHits() const noexcept {
         return write_hits.load(std::memory_order_relaxed);
@@ -607,6 +611,8 @@ private:
     u64 frame_tick = 0;
     /// EDEN_NX2_READ_LATCH_AGE (0: off; nx2_reactive_flush.h)
     const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    /// EDEN_NX2_RX_NO_RT_LATCH (diagnostic: CPU reads latch no image)
+    const bool no_rt_latch = Nx2Reactive::NoRtLatch();
     /// The images GetFlushArea latched (nx2_read_latched), kept with the switch or the stats
     const bool track_read_latches =
         read_latch_age != 0 || ::Common::Nx2Reactive::StatsEnabled();
