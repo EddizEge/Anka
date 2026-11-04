@@ -52,6 +52,43 @@ TEST_CASE("Nx2FgTiming: the weights of the burst at its display times", "[video_
     REQUIRE(Near(1.0f - TimedBlend(2, 3, b30, HZ170), HZ170 / b30, 1.0e-5f));
 }
 
+TEST_CASE("Nx2FgTiming: the screen time between real frames when n changes", "[video_core]") {
+    // Same n: the frame interval itself
+    REQUIRE(DisplayGap(1.0f / 30.0f, 3, 3, HZ170) == 1.0f / 30.0f);
+    // 50 fps at 170 Hz, the credit alternating n: N - 1 went out n_prev refreshes after its
+    // Composite, N n after this one
+    const f32 c = 0.020f;
+    const f32 more = DisplayGap(c, 2, 1, HZ170); // 25.9 ms
+    REQUIRE(Near(more, c + HZ170, 1.0e-6f));
+    REQUIRE(Near(TimedBlend(0, 2, more, HZ170), 0.5455f));
+    REQUIRE(Near(TimedBlend(1, 2, more, HZ170), 0.7727f));
+    const f32 fewer = DisplayGap(c, 1, 2, HZ170); // 14.1 ms
+    REQUIRE(Near(fewer, c - HZ170, 1.0e-6f));
+    REQUIRE(TimedApplies(1, fewer, HZ170));
+    REQUIRE(Near(TimedBlend(0, 1, fewer, HZ170), 0.5833f));
+    // The previous burst of four presents (23.5 ms) has not drained by 20 ms: even weights
+    const f32 backed_up = DisplayGap(c, 2, 3, HZ170);
+    REQUIRE_FALSE(TimedApplies(2, backed_up, HZ170));
+    REQUIRE(TimedBlend(0, 2, backed_up, HZ170) == EvenBlend(0, 2));
+    // In general the drain test on the gap is C > (n_prev + 1) * V
+    for (size_t previous = 0; previous <= 3; ++previous) {
+        for (size_t count = 1; count <= 3; ++count) {
+            for (f32 interval = 0.002f; interval < 0.06f; interval += 0.0001f) {
+                const bool drained = interval > static_cast<f32>(previous + 1) * HZ170 + 1.0e-6f;
+                const bool backed = interval < static_cast<f32>(previous + 1) * HZ170 - 1.0e-6f;
+                const bool applies =
+                    TimedApplies(count, DisplayGap(interval, count, previous, HZ170), HZ170);
+                if (drained) {
+                    REQUIRE(applies);
+                }
+                if (backed) {
+                    REQUIRE_FALSE(applies);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("Nx2FgTiming: falls back to the even weights", "[video_core]") {
     const f32 b30 = 1.0f / 30.0f;
     // No generated frames, a generation past the count

@@ -229,6 +229,9 @@ FrameGen::~FrameGen() = default;
 void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                        VkExtent2D guest_extent) {
     generated = false;
+    if (timing.timed || timing.diag) {
+        ++timing.composites;
+    }
 
     if (unavailable || !Settings::values.frame_gen.GetValue()) {
         if (chain || fsr3_chain) {
@@ -371,19 +374,26 @@ f32 FrameGen::RefreshPeriod() {
 }
 
 // Before GenerateInto of this frame: B and V of its burst, whether the burst takes the timed
-// weights, and the EDEN_NX2_FG_DIAG line. B is this frame's own interval, not the pacer's smoothed
-// one: N - 1 went out that long before N, and a smoothed B lags each 60 <-> 30 change by several
-// frames (on 30 -> 60 with three generated frames it would even time a burst that no longer
-// drains).
+// weights, and the EDEN_NX2_FG_DIAG line. B comes from this frame's own interval, not the pacer's
+// smoothed one (it lags each 60 <-> 30 change by several frames; on 30 -> 60 with three generated
+// frames it would even time a burst that no longer drains), and from the previous burst's
+// generated frames (Nx2FgTiming::DisplayGap): unknown when the previous Composite did not get here.
 void FrameGen::UpdateTiming(bool use_fsr3) {
     const size_t count = generated ? last_generations : 0;
+    const bool previous_known = timing.last_composite + 1 == timing.composites;
+    const size_t previous = timing.previous_count;
+    timing.last_composite = timing.composites;
+    timing.previous_count = count;
     // frame_pacing_mode Target_30..120 holds every present (generated ones too) to its own rate
     // (Swapchain::AcquireNextImage): they no longer go out one refresh apart
     const bool display_paced =
         Settings::values.frame_pacing_mode.GetValue() == Settings::FramePacingMode::Target_Auto ||
         !Settings::values.use_speed_limit.GetValue();
-    timing.interval = pacer.LastInterval();
+    const f32 frame_interval = pacer.LastInterval();
     timing.period = RefreshPeriod();
+    timing.interval = previous_known && frame_interval > 0.0f && timing.period > 0.0f
+                          ? Nx2FgTiming::DisplayGap(frame_interval, count, previous, timing.period)
+                          : 0.0f;
     timing.applies = timing.timed && use_fsr3 && display_paced &&
                      Nx2FgTiming::TimedApplies(count, timing.interval, timing.period);
     if (!timing.diag) {
@@ -397,10 +407,10 @@ void FrameGen::UpdateTiming(bool use_fsr3) {
             ++stats.timed_bursts;
         }
         stats.interval_min = stats.interval_count == 0
-                                 ? timing.interval
-                                 : std::min(stats.interval_min, timing.interval);
-        stats.interval_max = std::max(stats.interval_max, timing.interval);
-        stats.interval_sum += timing.interval;
+                                 ? frame_interval
+                                 : std::min(stats.interval_min, frame_interval);
+        stats.interval_max = std::max(stats.interval_max, frame_interval);
+        stats.interval_sum += frame_interval;
         ++stats.interval_count;
         // The sample: the last burst with the most generated frames
         if (count >= stats.sample_count && count <= stats.sample_blend.size()) {

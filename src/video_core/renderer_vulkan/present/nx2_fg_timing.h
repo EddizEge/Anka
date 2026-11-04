@@ -25,13 +25,24 @@ namespace Vulkan::Nx2FgTiming {
 // (170 Hz) they are 0.25 / 0.50 / 0.75 against 0.47 / 0.65 / 0.82, so the picture stops for
 // 15.7 ms and then sweeps through three quarters of the motion in 17.6 ms.
 //
-// Anchored on N (the content of the presents right before it): the spacing between real frames is
-// what it is (FIFO, the game's own pacing) and this only fixes the frames in between. B is the
-// interval of this very frame (FrameGenPacer::LastInterval): N - 1 went out that long before N.
-// When the presents cannot go out faster than they come (B <= (n + 1) * V, the queue never drains)
-// they are one refresh apart all the time and the even weights are right; both forms meet there.
+// The spacing between real frames is what it is (FIFO, the game's own pacing) and this only fixes
+// the frames in between. B is the screen time between N - 1 and N: the interval of this very frame
+// C (FrameGenPacer::LastInterval) when every burst has the same n, C + (n - n_prev) * V when the
+// pacer's credit alternates n (N - 1 went out n_prev refreshes after its own Composite, N n after
+// this one; DisplayGap). The content then moves evenly over that time. When the presents cannot go
+// out faster than they come (B <= (n + 1) * V, i.e. C <= (n_prev + 1) * V: the previous burst has
+// not drained) they are one refresh apart all the time and the even weights are right; both forms
+// meet there.
 // Strict FIFO is modelled; with FIFO_RELAXED a late first present shows at once, its lead on N lies
 // between (n - 1) * V and n * V, and the weight used stays between the even and the right one.
+
+/// The screen time between N - 1 and N: this frame's interval plus (count - previous) refreshes,
+/// count and previous the generated frames of this burst and of the one before it.
+[[nodiscard]] inline f32 DisplayGap(f32 frame_interval, size_t count, size_t previous,
+                                    f32 refresh_period) {
+    return frame_interval +
+           (static_cast<f32>(count) - static_cast<f32>(previous)) * refresh_period;
+}
 
 /// The weight the frame gen has always used: generation 0..count-1 of count.
 [[nodiscard]] inline f32 EvenBlend(size_t generation, size_t count) {

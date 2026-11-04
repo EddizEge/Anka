@@ -45,11 +45,14 @@ private:
         bool timed{};
         bool diag{};
         bool applies{};     // this burst takes the timed weights
-        f32 interval{};     // B of this burst, seconds
+        f32 interval{};     // B of this burst (DisplayGap), seconds
         f32 period{};       // V of this burst, seconds (0: unknown)
         std::optional<f32> override_hz;
         f32 display_hz{};
         std::optional<std::chrono::steady_clock::time_point> display_read;
+        u64 composites{};      // Process calls
+        u64 last_composite{};  // the one UpdateTiming saw last
+        size_t previous_count{}; // and its generated frames
         // EDEN_NX2_FG_DIAG: the frames since the last line
         struct Stats {
             std::array<u32, 8> bursts{}; // by generated frames, the last bin 7 or more
