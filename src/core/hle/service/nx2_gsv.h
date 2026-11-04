@@ -1009,7 +1009,7 @@ public:
             static_cast<void>(ReplyOwnCommands()); // its "needs the table" warning
         }
         // EDEN_NX2_DK_DYN applied (nx2_dk_dyn_pace.h): 107 reports VRR, presents are paced to
-        // every vblank.
+        // every vblank (unless EDEN_NX2_PACE_ONE=0).
         const bool dk_dyn = Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed);
         const u64 application = system.GetApplicationProcessProgramID();
         m_pace_one = Nx2DkDynPace::PaceOne(dk_dyn, application, std::getenv("EDEN_NX2_PACE_ONE"));
@@ -1021,8 +1021,8 @@ public:
                 RegisterHandlersTipc(vrr);
             } else {
                 LOG_WARNING(Service, "nx2:vi2 EDEN_NX2_DK_DYN: 107 answers from the reply table "
-                                     "(EDEN_NX2_VI2_REPLY), not with VRR support; presents are "
-                                     "still paced to every vblank");
+                                     "(EDEN_NX2_VI2_REPLY), not with VRR support{}",
+                            m_pace_one ? "; presents are still paced to every vblank" : "");
             }
         }
     }
