@@ -622,3 +622,45 @@ TEST_CASE("Reactive masked targets", "[video_core][nx2_reactive]") {
     static_assert(!Flush::MarksTarget(true, false, false));
     static_assert(Flush::MarksTarget(true, true, false));
 }
+
+TEST_CASE("Reactive render target fit", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // Donkey Kong Bananza: a 2112x1179 target over a 2095x1179 texture, clip 2095x1179.
+    static_assert(Flush::FitsTarget(0, 2095, 0, 1179, 2095, 1179, 2112, 1179));
+    // A clip wider than the image (the guest may render there), or offset past it: no.
+    static_assert(!Flush::FitsTarget(0, 2112, 0, 1179, 2095, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(1, 2095, 0, 1179, 2095, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(0, 2095, 1, 1179, 2095, 1179, 2112, 1179));
+    // Not narrower (the target's own image, or one taken already), or another height: no.
+    static_assert(!Flush::FitsTarget(0, 2095, 0, 1179, 2112, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(0, 2000, 0, 1179, 2095, 1179, 2095, 1179));
+    static_assert(!Flush::FitsTarget(0, 2095, 0, 1000, 2095, 1000, 2112, 1179));
+    static_assert(!Flush::FitsTarget(0, 2095, 0, 1179, 2095, 1180, 2112, 1179));
+    // Exhaustive over small sizes against the definition.
+    for (u32 clip_x = 0; clip_x < 3; ++clip_x) {
+        for (u32 clip_w = 0; clip_w < 6; ++clip_w) {
+            for (u32 clip_y = 0; clip_y < 3; ++clip_y) {
+                for (u32 clip_h = 0; clip_h < 6; ++clip_h) {
+                    for (u32 w = 0; w < 6; ++w) {
+                        for (u32 h = 0; h < 6; ++h) {
+                            for (u32 tw = 0; tw < 6; ++tw) {
+                                for (u32 th = 0; th < 6; ++th) {
+                                    const bool expected = w < tw && h == th &&
+                                                          clip_x + clip_w <= w &&
+                                                          clip_y + clip_h <= h;
+                                    REQUIRE(Flush::FitsTarget(clip_x, clip_w, clip_y, clip_h, w,
+                                                              h, tw, th) == expected);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The barrier only in mode 1 (2 is the diagnostic without it, 0 off).
+    static_assert(!Flush::FitFeedbackBarrier(0));
+    static_assert(Flush::FitFeedbackBarrier(1));
+    static_assert(!Flush::FitFeedbackBarrier(2));
+    static_assert(!Flush::FitFeedbackBarrier(3));
+}

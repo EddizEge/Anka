@@ -538,6 +538,16 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
                 continue;
             }
 
+            const ImageId view_image_id = slot_image_views[view.id].image_id;
+            if (Nx2Reactive::FitFeedbackBarrier(rt_fit)) [[unlikely]] {
+                // EDEN_NX2_RX_RT_FIT=1: a draw sampling a color target's image (the target it
+                // renders into, RtFit) sees the previous draws' writes, as the alias copy did.
+                for (size_t i = 0; i < NUM_RT; ++i) {
+                    if ((rt_active_mask & (1u << i)) && view_image_id == rt_image_id[i]) {
+                        return true;
+                    }
+                }
+            }
             {
                 bool is_continue = false;
                 for (size_t i = 0; i < 8; ++i)
@@ -549,7 +559,6 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
             if (depth_active && view.id == render_targets.depth_buffer_id)
                 continue;
 
-            const ImageId view_image_id = slot_image_views[view.id].image_id;
             {
                 bool is_continue = false;
                 for (size_t i = 0; i < 8; ++i)
@@ -2764,15 +2773,65 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 }
 
 template <class P>
+ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
+    if (info.type != ImageType::e2D) {
+        return ImageId{};
+    }
+    const size_t size = CalculateGuestSizeInBytes(info);
+    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size);
+    if (!cpu_addr) {
+        return ImageId{};
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const bool broken_views = runtime.HasBrokenTextureViewFormats();
+    const bool native_bgr = runtime.HasNativeBgr();
+    ImageId fit{};
+    u32 fit_width = info.size.width;
+    ForEachImageInRegion(*cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
+        // Same address and format, narrower, the whole surface clip inside it, and the same
+        // block linear layout (a relaxed size subresource at level 0, layer 0): the target's
+        // memory as the guest renders it.
+        if (True(image.flags & ImageFlagBits::Remapped) || image.gpu_addr != gpu_addr ||
+            image.info.type != info.type || image.info.format != info.format ||
+            !Nx2Reactive::FitsTarget(clip.x, clip.width, clip.y, clip.height,
+                                     image.info.size.width, image.info.size.height, fit_width,
+                                     info.size.height)) {
+            return false;
+        }
+        const std::optional<SubresourceBase> base =
+            FindSubresource(info, image, gpu_addr, RelaxedOptions::Size, broken_views, native_bgr);
+        if (!base || base->level != 0 || base->layer != 0) {
+            return false;
+        }
+        fit = image_id;
+        fit_width = image.info.size.width;
+        return false;
+    });
+    if (fit) {
+        if (static u32 logged{}; logged++ < 16) {
+            LOG_INFO(HW_GPU, "nx2 rt fit: {}x{} target at {:#x} renders into image {}x{} (clip {}x{})",
+                     info.size.width, info.size.height, gpu_addr, slot_images[fit].info.size.width,
+                     slot_images[fit].info.size.height, clip.width.Value(), clip.height.Value());
+        }
+    }
+    return fit;
+}
+
+template <class P>
 ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr) {
     ImageId image_id{};
-    bool delete_state = has_deleted_images;
-    do {
-        has_deleted_images = false;
-        image_id = FindOrInsertImage(info, gpu_addr);
-        delete_state |= has_deleted_images;
-    } while (has_deleted_images);
-    has_deleted_images = delete_state;
+    if (rt_fit != 0) [[unlikely]] {
+        image_id = Nx2FindFitTarget(info, gpu_addr);
+    }
+    if (!image_id) {
+        bool delete_state = has_deleted_images;
+        do {
+            has_deleted_images = false;
+            image_id = FindOrInsertImage(info, gpu_addr);
+            delete_state |= has_deleted_images;
+        } while (has_deleted_images);
+        has_deleted_images = delete_state;
+    }
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
     }

@@ -435,6 +435,10 @@ private:
     /// Find or create a view for a render target with the given image parameters
     [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr);
 
+    /// EDEN_NX2_RX_RT_FIT: the narrowest image with a render target's memory that holds the surface
+    /// clip, if any (nx2_reactive_flush.h RtFit)
+    [[nodiscard]] ImageId Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr);
+
     /// Iterates over all the images in a region calling func
     template <typename Func>
     void ForEachImageInRegion(DAddr cpu_addr, size_t size, Func&& func);
@@ -621,6 +625,8 @@ private:
     const bool no_rt_latch = Nx2Reactive::NoRtLatch();
     /// EDEN_NX2_RX_MASKED_TARGETS: a draw marks only the render targets it can write
     const bool masked_targets = Nx2Reactive::MaskedTargets();
+    /// EDEN_NX2_RX_RT_FIT (0: off; 1: with color feedback loop barriers; 2: without)
+    const u32 rt_fit = Nx2Reactive::RtFit();
     /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
     /// per (image, alias) pair, synchronizations (Nx2ReportTop)
     struct Nx2RepeatCount {

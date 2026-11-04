@@ -231,6 +231,38 @@ private:
     return !enabled || is_clear || can_write;
 }
 
+/// EDEN_NX2_RX_RT_FIT: a render target lookup takes a narrower image with the target's memory
+/// (same address, format and block linear layout, TextureCache::Nx2FindFitTarget) when the
+/// guest's surface clip lies inside it, instead of its own image of the full width. Donkey Kong
+/// Bananza's opening scene renders into a 2112x1179 R16_FLOAT target while it samples the same
+/// memory as a 2095x1179 texture: as two images, every draw copied the target into the texture
+/// (~27k whole image copies a second with reactive flushing on). As one image, a draw reads it
+/// as a feedback loop. 1: a color feedback loop ends the render pass before the draw (the
+/// barrier makes the previous draws visible, as the copy did); 2 (diagnostic): no barrier, the
+/// fork's color feedback policy. Off (0) by default.
+[[nodiscard]] inline u32 RtFit() noexcept {
+    static const u32 mode = [] {
+        const u64 value = ReadCount("EDEN_NX2_RX_RT_FIT");
+        return value <= 2 ? static_cast<u32>(value) : 0U;
+    }();
+    return mode;
+}
+
+/// Whether an image of width x height may stand for a render target of target_width x
+/// target_height (RtFit): narrower than the target and than any image taken so far (the
+/// narrowest wins), as high, and holding the whole surface clip.
+[[nodiscard]] constexpr bool FitsTarget(u32 clip_x, u32 clip_width, u32 clip_y, u32 clip_height,
+                                        u32 width, u32 height, u32 target_width,
+                                        u32 target_height) noexcept {
+    return width < target_width && height == target_height && clip_x + clip_width <= width &&
+           clip_y + clip_height <= height;
+}
+
+/// Whether a draw sampling a color target's image needs a feedback loop barrier (RtFit 1).
+[[nodiscard]] constexpr bool FitFeedbackBarrier(u32 mode) noexcept {
+    return mode == 1;
+}
+
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads
 /// note no buffer page (NoteCpuRead), so nothing the GPU writes to buffers is copied back at
 /// fences; reads still trap and images still latch.
