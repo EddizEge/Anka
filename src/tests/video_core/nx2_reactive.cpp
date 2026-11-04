@@ -627,10 +627,14 @@ TEST_CASE("Reactive render target fit", "[video_core][nx2_reactive]") {
     namespace Flush = VideoCommon::Nx2Reactive;
     // Donkey Kong Bananza: a 2112x1179 target over a 2095x1179 texture, clip 2095x1179.
     static_assert(Flush::FitsTarget(0, 2095, 0, 1179, 2095, 1179, 2112, 1179));
-    // A clip wider than the image (the guest may render there), or offset past it: no.
+    // A clip wider than the image (the guest may render there), offset, or smaller (the render
+    // area would not cover the image a full clear invalidates): no.
     static_assert(!Flush::FitsTarget(0, 2112, 0, 1179, 2095, 1179, 2112, 1179));
     static_assert(!Flush::FitsTarget(1, 2095, 0, 1179, 2095, 1179, 2112, 1179));
     static_assert(!Flush::FitsTarget(0, 2095, 1, 1179, 2095, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(1, 2094, 0, 1179, 2095, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(0, 2080, 0, 1179, 2095, 1179, 2112, 1179));
+    static_assert(!Flush::FitsTarget(0, 2095, 0, 1178, 2095, 1179, 2112, 1179));
     // Not narrower (the target's own image, or one taken already), or another height: no.
     static_assert(!Flush::FitsTarget(0, 2095, 0, 1179, 2112, 1179, 2112, 1179));
     static_assert(!Flush::FitsTarget(0, 2000, 0, 1179, 2095, 1179, 2095, 1179));
@@ -645,9 +649,9 @@ TEST_CASE("Reactive render target fit", "[video_core][nx2_reactive]") {
                         for (u32 h = 0; h < 6; ++h) {
                             for (u32 tw = 0; tw < 6; ++tw) {
                                 for (u32 th = 0; th < 6; ++th) {
-                                    const bool expected = w < tw && h == th &&
-                                                          clip_x + clip_w <= w &&
-                                                          clip_y + clip_h <= h;
+                                    const bool expected = w < tw && h == th && clip_x == 0 &&
+                                                          clip_y == 0 && clip_w == w &&
+                                                          clip_h == h;
                                     REQUIRE(Flush::FitsTarget(clip_x, clip_w, clip_y, clip_h, w,
                                                               h, tw, th) == expected);
                                 }

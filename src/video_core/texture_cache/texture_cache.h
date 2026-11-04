@@ -515,8 +515,11 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
         return;
     }
 
+    // EDEN_NX2_RX_RT_FIT=1 checks every draw: the color feedback barrier is all that orders a
+    // draw after the previous ones, and the cache key does not follow the views a draw samples.
     if (render_targets_serial == last_feedback_loop_serial &&
-        texture_bindings_serial == last_feedback_texture_serial) {
+        texture_bindings_serial == last_feedback_texture_serial &&
+        !Nx2Reactive::FitFeedbackBarrier(rt_fit)) {
         if (last_feedback_loop_result) {
             runtime.BarrierFeedbackLoop();
         }
@@ -656,7 +659,9 @@ bool TextureCache<P>::RescaleRenderTargets() {
         has_deleted_images = false;
         // Render target control is used on all render targets, so force look ups when this one is
         // up
-        const bool force = flags[Dirty::RenderTargetControl];
+        // EDEN_NX2_RX_RT_FIT: a surface clip write dirties only RenderTargets, and a target taken
+        // for one clip (Nx2FindFitTarget) is looked up again for another.
+        const bool force = flags[Dirty::RenderTargetControl] || rt_fit != 0;
         flags[Dirty::RenderTargetControl] = false;
 
         scale_rating = 0;
@@ -2777,6 +2782,11 @@ ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_ad
     if (info.type != ImageType::e2D) {
         return ImageId{};
     }
+    if (Nx2Reactive::FitFeedbackBarrier(rt_fit) &&
+        !Settings::values.barrier_feedback_loops.GetValue()) {
+        // Mode 1 orders the draws with CheckFeedbackLoop's barrier, which this setting turns off.
+        return ImageId{};
+    }
     const size_t size = CalculateGuestSizeInBytes(info);
     const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size);
     if (!cpu_addr) {
@@ -2788,10 +2798,13 @@ ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_ad
     ImageId fit{};
     u32 fit_width = info.size.width;
     ForEachImageInRegion(*cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
-        // Same address and format, narrower, the whole surface clip inside it, and the same
-        // block linear layout (same blocks and tile spacing, a relaxed size subresource at
-        // level 0, layer 0): the target's memory as the guest renders it.
-        if (True(image.flags & ImageFlagBits::Remapped) || image.gpu_addr != gpu_addr ||
+        // Same address and format, narrower, exactly the surface clip, and the same block
+        // linear layout (same blocks and tile spacing, a relaxed size subresource at level 0,
+        // layer 0): the target's memory as the guest renders it. Backed, not sparse.
+        constexpr ImageFlagBits unfit = ImageFlagBits::Remapped | ImageFlagBits::Unbacked |
+                                        ImageFlagBits::UnwrittenSparse |
+                                        ImageFlagBits::SparseLayers;
+        if (True(image.flags & unfit) || image.gpu_addr != gpu_addr ||
             image.info.type != info.type || image.info.format != info.format ||
             image.info.block != info.block ||
             image.info.tile_width_spacing != info.tile_width_spacing ||
