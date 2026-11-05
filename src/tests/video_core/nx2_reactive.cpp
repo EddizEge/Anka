@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <optional>
 #include <random>
@@ -714,37 +715,94 @@ TEST_CASE("Reactive render target fit modes", "[video_core][nx2_reactive]") {
                     (before || (mode == 3 && changed)));
         }
     }
-    // TextureCache::CheckFeedbackLoop's answer per mode, for a draw sampling a color target's
-    // image (`color`) and / or the depth target's (`depth`): the render pass end (and the light
-    // way refused), or the barrier inside it. Off and 2: the fork's policy (depth only).
-    struct Answer {
-        bool end;
-        bool in_pass;
-    };
-    const auto check = [](u32 mode, bool color, bool depth) {
-        Answer answer{};
-        if (color && Flush::FitOrdersFeedback(mode)) {
-            if (Flush::FitFeedbackBarrier(mode)) {
-                return Answer{true, false};
-            }
-            answer.in_pass = true;
-        }
-        if (depth) {
-            answer.end = true;
-        }
-        if (answer.end) {
-            answer.in_pass = false; // the render pass end's barrier covers the color targets
-        }
-        return answer;
-    };
-    for (u32 mode = 0; mode < 4; ++mode) {
+    // TextureCache::CheckFeedbackLoop's answer per view (FitFeedbackFor): a color target's image
+    // read by the fragment stage alone gets the barrier inside the render pass in mode 3; another
+    // stage's view or a storage image the draw writes ends the render pass, as everything in mode
+    // 1; off and 2 leave it to the fork's check.
+    using Flush::FitFeedback;
+    for (u32 mode = 0; mode < 8; ++mode) {
         for (int bits = 0; bits < 4; ++bits) {
-            const bool color = (bits & 1) != 0;
-            const bool depth = (bits & 2) != 0;
-            const Answer answer = check(mode, color, depth);
-            REQUIRE(answer.end == (depth || (color && mode == 1)));
-            REQUIRE(answer.in_pass == (color && !depth && mode == 3));
-            REQUIRE(!(answer.end && answer.in_pass));
+            const bool target = (bits & 1) != 0;
+            const bool fragment_read = (bits & 2) != 0;
+            const FitFeedback answer = Flush::FitFeedbackFor(mode, target, fragment_read);
+            const bool ordered = target && (mode == 1 || mode == 3);
+            REQUIRE((answer == FitFeedback::None) == !ordered);
+            REQUIRE((answer == FitFeedback::InPass) == (ordered && mode == 3 && fragment_read));
+            REQUIRE((answer == FitFeedback::EndPass) ==
+                    (ordered && (mode == 1 || !fragment_read)));
+        }
+    }
+    static_assert(Flush::FitFeedbackFor(3, true, true) == FitFeedback::InPass);
+    static_assert(Flush::FitFeedbackFor(3, true, false) == FitFeedback::EndPass);
+    static_assert(Flush::FitFeedbackFor(1, true, true) == FitFeedback::EndPass);
+    static_assert(Flush::FitFeedbackFor(2, true, true) == FitFeedback::None);
+    static_assert(Flush::FitFeedbackFor(0, true, true) == FitFeedback::None);
+    static_assert(Flush::FitFeedbackFor(3, false, true) == FitFeedback::None);
+}
+
+TEST_CASE("Reactive render target fit lookups", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // TextureCache::RescaleRenderTargets' `force` (FitLookupForced), call by call.
+    const std::array<u32, 4> wide{0, 2112, 0, 1179};
+    const std::array<u32, 4> narrow{0, 2095, 0, 1179};
+    int engine_a = 0;
+    int engine_b = 0;
+    {
+        // Mode 3, the review's sequence: a clip-only write, then the render target control with
+        // the narrow clip (the narrow image taken), then the wide clip alone again: that call
+        // must look the targets up again (the narrow image no longer fits).
+        Flush::FitClipMemo memo;
+        REQUIRE(Flush::FitLookupForced(3, false, memo, wide, &engine_a));  // first call
+        REQUIRE(!Flush::FitLookupForced(3, false, memo, wide, &engine_a)); // same clip
+        REQUIRE(Flush::FitLookupForced(3, true, memo, narrow, &engine_a)); // control dirty
+        REQUIRE(Flush::FitLookupForced(3, false, memo, wide, &engine_a));  // back to wide
+        REQUIRE(!Flush::FitLookupForced(3, false, memo, wide, &engine_a));
+        // Control dirty with the same clip: forced, and the clip noted all the same.
+        REQUIRE(Flush::FitLookupForced(3, true, memo, wide, &engine_a));
+        REQUIRE(!Flush::FitLookupForced(3, false, memo, wide, &engine_a));
+        // Another engine (channel): forced, and again when the first comes back.
+        REQUIRE(Flush::FitLookupForced(3, false, memo, wide, &engine_b));
+        REQUIRE(Flush::FitLookupForced(3, false, memo, wide, &engine_a));
+        // Each word of the clip counts.
+        for (std::size_t word = 0; word < 4; ++word) {
+            std::array<u32, 4> other = wide;
+            ++other[word];
+            REQUIRE(Flush::FitLookupForced(3, false, memo, other, &engine_a));
+            REQUIRE(Flush::FitLookupForced(3, false, memo, wide, &engine_a));
+        }
+    }
+    {
+        // Modes 1 and 2: every call (as before); off: only the control flag, nothing noted.
+        for (const u32 mode : {1U, 2U}) {
+            Flush::FitClipMemo memo;
+            for (int call = 0; call < 4; ++call) {
+                REQUIRE(Flush::FitLookupForced(mode, false, memo, wide, &engine_a));
+                REQUIRE(Flush::FitLookupForced(mode, true, memo, narrow, &engine_a));
+            }
+        }
+        Flush::FitClipMemo memo;
+        REQUIRE(!Flush::FitLookupForced(0, false, memo, wide, &engine_a));
+        REQUIRE(Flush::FitLookupForced(0, true, memo, narrow, &engine_a));
+        REQUIRE(memo.engine == nullptr);
+        REQUIRE(memo.clip == std::array<u32, 4>{});
+    }
+    {
+        // Against a model of the registers: in mode 3 a call with an unchanged clip and engine
+        // and no control write never forces; every other call does.
+        std::mt19937_64 rng{0xc11b};
+        Flush::FitClipMemo memo;
+        std::array<u32, 4> last{};
+        const void* last_engine = nullptr;
+        for (int step = 0; step < 100'000; ++step) {
+            const std::array<u32, 4> clip{0, rng() % 3 == 0 ? 2112U : 2095U, 0,
+                                          rng() % 7 == 0 ? 1000U : 1179U};
+            const void* engine = rng() % 50 == 0 ? static_cast<const void*>(&engine_b)
+                                                 : static_cast<const void*>(&engine_a);
+            const bool control = rng() % 4 == 0;
+            const bool expected = control || clip != last || engine != last_engine;
+            REQUIRE(Flush::FitLookupForced(3, control, memo, clip, engine) == expected);
+            last = clip;
+            last_engine = engine;
         }
     }
 }
@@ -756,14 +814,16 @@ TEST_CASE("Reactive loose fence coalescing", "[video_core][nx2_reactive]") {
         const bool loose = (bits & 1) != 0;
         const bool real = (bits & 2) != 0;
         const bool stub = (bits & 4) != 0;
-        REQUIRE(Flush::CoalesceMadeAnyway(loose, real, stub) == (real || (!loose && stub)));
+        REQUIRE(Flush::CoalesceMadeAnyway(loose, real, [&] { return stub; }) ==
+                (real || (!loose && stub)));
     }
-    static_assert(Flush::CoalesceMadeAnyway(true, true, false));
-    static_assert(!Flush::CoalesceMadeAnyway(true, false, true));
-    static_assert(Flush::CoalesceMadeAnyway(false, false, true));
-    static_assert(!Flush::CoalesceMadeAnyway(false, false, false));
-    // FenceManager::CommitBufferNow before and after: the stubbed reasons are asked only when no
-    // real one and not loose; not loose, the answer is the old one for every input.
+    static_assert(Flush::CoalesceMadeAnyway(true, true, [] { return false; }));
+    static_assert(!Flush::CoalesceMadeAnyway(true, false, [] { return true; }));
+    static_assert(Flush::CoalesceMadeAnyway(false, false, [] { return true; }));
+    static_assert(!Flush::CoalesceMadeAnyway(false, false, [] { return false; }));
+    // FenceManager::CommitBufferNow before and after (it calls CoalesceMadeAnyway with
+    // MadeStubbedAnyway, which takes a lock): the stubbed reasons are asked only when no real one
+    // and not loose; not loose, the answer is the old expression's for every input.
     for (int bits = 0; bits < 128; ++bits) {
         const bool should_flush = (bits & 1) != 0;
         const bool committed = (bits & 2) != 0;
@@ -780,8 +840,7 @@ TEST_CASE("Reactive loose fence coalescing", "[video_core][nx2_reactive]") {
             asked = true;
             return skip_limit || fence_work || operations;
         };
-        const bool stub_work = !real_work && !loose && stubbed();
-        const bool made = Flush::CoalesceMadeAnyway(loose, real_work, stub_work);
+        const bool made = Flush::CoalesceMadeAnyway(loose, real_work, stubbed);
         REQUIRE(asked == (!real_work && !loose));
         if (!loose) {
             REQUIRE(made == old_made);

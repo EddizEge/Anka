@@ -510,7 +510,8 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
 }
 
 template <class P>
-void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
+void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views,
+                                        size_t first_fragment_view) {
     // EDEN_NX2_RX_RT_FIT=3: this draw's, set below when it samples a color target's image.
     nx2_in_pass_feedback = false;
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
@@ -538,7 +539,8 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     const bool depth_active = (rt_active_mask & depth_bit) != 0;
 
     const bool requires_barrier = [&] {
-        for (const auto& view : views) {
+        for (size_t view_index = 0; view_index < views.size(); ++view_index) {
+            const ImageViewInOut& view = views[view_index];
             if (!view.id) {
                 continue;
             }
@@ -548,15 +550,22 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
                 // EDEN_NX2_RX_RT_FIT=1 / 3: a draw sampling a color target's image (the target it
                 // renders into, RtFit) sees the previous draws' writes, as the alias copy did: 1
                 // ends the render pass, 3 records a barrier inside it (ConfigureDraw, light
-                // draws) and looks on for a depth feedback loop (the view is a target's below).
-                for (size_t i = 0; i < NUM_RT; ++i) {
-                    if ((rt_active_mask & (1u << i)) && view_image_id == rt_image_id[i]) {
-                        if (Nx2Reactive::FitFeedbackBarrier(rt_fit)) {
-                            return true;
-                        }
-                        nx2_in_pass_feedback = true;
-                        break;
-                    }
+                // draws) for a view its fragment stage reads (a storage image's `blacklist` is
+                // its write), and looks on for a depth feedback loop (the view is a target's
+                // below).
+                bool target_image = false;
+                for (size_t i = 0; i < NUM_RT && !target_image; ++i) {
+                    target_image = (rt_active_mask & (1u << i)) && view_image_id == rt_image_id[i];
+                }
+                switch (Nx2Reactive::FitFeedbackFor(
+                    rt_fit, target_image, view_index >= first_fragment_view && !view.blacklist)) {
+                case Nx2Reactive::FitFeedback::EndPass:
+                    return true;
+                case Nx2Reactive::FitFeedback::InPass:
+                    nx2_in_pass_feedback = true;
+                    break;
+                case Nx2Reactive::FitFeedback::None:
+                    break;
                 }
             }
             {
@@ -671,7 +680,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
         // up
         // EDEN_NX2_RX_RT_FIT: a surface clip write dirties only RenderTargets, and a target taken
         // for one clip (Nx2FindFitTarget) is looked up again for another.
-        const bool force = flags[Dirty::RenderTargetControl] || Nx2FitForcesLookup();
+        const bool force = Nx2FitForcesLookup(flags[Dirty::RenderTargetControl]);
         flags[Dirty::RenderTargetControl] = false;
 
         scale_rating = 0;
@@ -2788,17 +2797,14 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 }
 
 template <class P>
-bool TextureCache<P>::Nx2FitForcesLookup() {
+bool TextureCache<P>::Nx2FitForcesLookup(bool control_dirty) {
     if (rt_fit == 0) {
-        return false;
+        return control_dirty;
     }
     const auto& clip = maxwell3d->regs.surface_clip;
-    const std::array<u32, 4> seen{clip.x.Value(), clip.width.Value(), clip.y.Value(),
-                                  clip.height.Value()};
-    const bool changed = seen != nx2_fit_clip || nx2_fit_clip_engine != maxwell3d;
-    nx2_fit_clip = seen;
-    nx2_fit_clip_engine = maxwell3d;
-    return Nx2Reactive::FitForcesLookup(rt_fit, changed);
+    return Nx2Reactive::FitLookupForced(
+        rt_fit, control_dirty, nx2_fit_clip,
+        {clip.x.Value(), clip.width.Value(), clip.y.Value(), clip.height.Value()}, maxwell3d);
 }
 
 template <class P>

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
@@ -210,12 +211,12 @@ private:
 }
 
 /// Whether a fence is made anyway for CommitBufferCopyBack: `real_work` when it would be a real
-/// fence without the copy back (another cache's downloads, query flushes), `stub_work` when it
-/// would be made, stubbed, for queued operations, query fence work or the skip limit; the latter
-/// counts unless CoalesceLoose.
-[[nodiscard]] constexpr bool CoalesceMadeAnyway(bool loose, bool real_work,
-                                                bool stub_work) noexcept {
-    return real_work || (!loose && stub_work);
+/// fence without the copy back (another cache's downloads, query flushes), else `stubbed()` when
+/// it would be made, stubbed, for queued operations, query fence work or the skip limit; the
+/// latter counts unless CoalesceLoose, and is asked only when it counts (it takes a lock).
+template <typename Stubbed>
+[[nodiscard]] constexpr bool CoalesceMadeAnyway(bool loose, bool real_work, Stubbed&& stubbed) {
+    return real_work || (!loose && stubbed());
 }
 
 /// EDEN_NX2_RX_ONE_SUBMIT=1: a fence with downloads to wait for is made real, and a real fence's
@@ -311,6 +312,55 @@ private:
 /// the engine) changed since its last call; a target whose registers changed is looked up anyway.
 [[nodiscard]] constexpr bool FitForcesLookup(u32 mode, bool clip_changed) noexcept {
     return mode == 1 || mode == 2 || (mode == 3 && clip_changed);
+}
+
+/// The surface clip (x, width, y, height) and engine RescaleRenderTargets last saw (RtFit).
+struct FitClipMemo {
+    std::array<u32, 4> clip{};
+    const void* engine{};
+
+    /// Notes what this call sees; whether it differs from the last call's.
+    constexpr bool Note(const std::array<u32, 4>& seen, const void* now) noexcept {
+        const bool changed = seen != clip || now != engine;
+        clip = seen;
+        engine = now;
+        return changed;
+    }
+};
+
+/// RescaleRenderTargets' `force` (every target looked up again): RenderTargetControl dirty, or
+/// FitForcesLookup. With RtFit on every call notes the clip, whatever else forces the lookups, so
+/// a target taken for one clip is looked up again when the next call sees another; off, nothing
+/// is noted (as before the switch).
+[[nodiscard]] constexpr bool FitLookupForced(u32 mode, bool control_dirty, FitClipMemo& memo,
+                                             const std::array<u32, 4>& clip,
+                                             const void* engine) noexcept {
+    if (mode == 0) {
+        return control_dirty;
+    }
+    const bool changed = memo.Note(clip, engine);
+    return control_dirty || FitForcesLookup(mode, changed);
+}
+
+/// What CheckFeedbackLoop does for a sampled view with RtFit: nothing more, end the render pass
+/// before the draw, or a barrier inside it.
+enum class FitFeedback : u32 {
+    None,
+    EndPass,
+    InPass,
+};
+
+/// For a view of a color target's image (`target_image`) the draw reads in its fragment stage
+/// alone (`fragment_read`: not another stage's view, not a storage image it writes): modes 1 and
+/// 3 order the draw after the previous ones, 1 by ending the render pass, 3 with a barrier inside
+/// it (the self-dependency's second scope: fragment shader reads), else by ending it too; 0 and 2
+/// leave it to the fork's check (a depth target's image ends the render pass there).
+[[nodiscard]] constexpr FitFeedback FitFeedbackFor(u32 mode, bool target_image,
+                                                   bool fragment_read) noexcept {
+    if (!target_image || !FitOrdersFeedback(mode)) {
+        return FitFeedback::None;
+    }
+    return FitInPassBarrier(mode) && fragment_read ? FitFeedback::InPass : FitFeedback::EndPass;
 }
 
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads

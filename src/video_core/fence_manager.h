@@ -409,9 +409,8 @@ private:
         // EDEN_NX2_RX_COALESCE_LOOSE leaves the copy back off the latter, nx2_reactive_flush.h).
         const bool real_work = flushes.should_flush || flushes.committed != 0 ||
                                query_cache.HasUncommittedFlushes();
-        const bool stub_work = !real_work && !coalesce_loose && MadeStubbedAnyway();
-        const bool made_anyway =
-            Nx2Reactive::CoalesceMadeAnyway(coalesce_loose, real_work, stub_work);
+        const bool made_anyway = Nx2Reactive::CoalesceMadeAnyway(
+            coalesce_loose, real_work, [this] { return MadeStubbedAnyway(); });
         const bool force = coalesce_force.exchange(false, std::memory_order_relaxed);
         if (Nx2Reactive::CommitBufferCopyBack(coalesce_fences, delay_fence, made_anyway, force,
                                               deferred_fences)) {

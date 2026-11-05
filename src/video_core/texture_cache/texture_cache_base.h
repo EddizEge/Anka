@@ -217,8 +217,10 @@ public:
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
-    /// Handle feedback loops during draws.
-    void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
+    /// Handle feedback loops during draws. `first_fragment_view`: the index of the fragment
+    /// stage's first view (views are in stage order; EDEN_NX2_RX_RT_FIT=3 orders those alone
+    /// inside the render pass).
+    void CheckFeedbackLoop(std::span<const ImageViewInOut> views, size_t first_fragment_view);
 
     /// Get the sampler from the graphics/compute descriptor table in the specified index
     Sampler* GetSampler(u32 index, bool compute);
@@ -446,9 +448,10 @@ private:
     /// clip, if any (nx2_reactive_flush.h RtFit)
     [[nodiscard]] ImageId Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr);
 
-    /// EDEN_NX2_RX_RT_FIT: whether RescaleRenderTargets looks every render target up again
-    /// (nx2_reactive_flush.h FitForcesLookup); notes the surface clip it saw
-    [[nodiscard]] bool Nx2FitForcesLookup();
+    /// RescaleRenderTargets' `force` (every render target looked up again): `control_dirty`
+    /// (RenderTargetControl), or EDEN_NX2_RX_RT_FIT's lookups (nx2_reactive_flush.h
+    /// FitLookupForced); with the switch notes the surface clip at every call
+    [[nodiscard]] bool Nx2FitForcesLookup(bool control_dirty);
 
     /// Iterates over all the images in a region calling func
     template <typename Func>
@@ -641,10 +644,9 @@ private:
     /// EDEN_NX2_RX_RT_FIT (0: off; 1: with color feedback loop barriers; 2: without; 3: with
     /// them inside the render pass)
     const u32 rt_fit = Nx2Reactive::RtFit();
-    /// EDEN_NX2_RX_RT_FIT=3: the surface clip (x, width, y, height) and engine RescaleRenderTargets
-    /// last saw (Nx2FitForcesLookup)
-    std::array<u32, 4> nx2_fit_clip{};
-    const void* nx2_fit_clip_engine = nullptr;
+    /// EDEN_NX2_RX_RT_FIT: the surface clip and engine RescaleRenderTargets last saw
+    /// (Nx2FitForcesLookup)
+    Nx2Reactive::FitClipMemo nx2_fit_clip{};
     /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
     /// per (image, alias) pair, synchronizations (Nx2ReportTop)
     struct Nx2RepeatCount {

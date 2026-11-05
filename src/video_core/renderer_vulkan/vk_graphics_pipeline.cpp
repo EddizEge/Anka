@@ -638,6 +638,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
         return true;
     }};
+    // EDEN_NX2_RX_RT_FIT=3: where the fragment stage's views begin (CheckFeedbackLoop).
+    size_t first_fragment_view{};
     {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         if constexpr (Spec::enabled_stages[0]) {
@@ -652,6 +654,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         if constexpr (Spec::enabled_stages[3]) {
             config_stage(3);
         }
+        first_fragment_view = views.size();
         if constexpr (Spec::enabled_stages[4]) {
             config_stage(4);
         }
@@ -793,7 +796,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         texture_cache.CheckFeedbackLoop(
-            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
+            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()},
+            first_fragment_view);
     }
     if (IsBuilt() && !pipeline) {
         return false;
@@ -1216,6 +1220,8 @@ bool GraphicsPipeline::ConfigureTexturesImpl(const StageDrawReader& in,
             }
         }
     }};
+    // EDEN_NX2_RX_RT_FIT=3: where the fragment stage's views begin (CheckFeedbackLoop).
+    size_t first_fragment_view{};
     {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         if constexpr (Spec::enabled_stages[0]) {
@@ -1230,6 +1236,7 @@ bool GraphicsPipeline::ConfigureTexturesImpl(const StageDrawReader& in,
         if constexpr (Spec::enabled_stages[3]) {
             config_stage(3);
         }
+        first_fragment_view = views.size();
         if constexpr (Spec::enabled_stages[4]) {
             config_stage(4);
         }
@@ -1294,7 +1301,8 @@ bool GraphicsPipeline::ConfigureTexturesImpl(const StageDrawReader& in,
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         texture_cache.CheckFeedbackLoop(
-            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()});
+            std::span<const VideoCommon::ImageViewInOut>{views.data(), views.size()},
+            first_fragment_view);
     }
     if (IsBuilt() && !pipeline) {
         return false;
