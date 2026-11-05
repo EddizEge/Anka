@@ -11,8 +11,9 @@ to them; use this fork's issue tracker: https://github.com/EddizEge/NX2Perf/issu
 
 - Base: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
-- This release: see `VERSION_NX2PERF.txt` in the package (tag, commit, build date).
-- Source: https://github.com/EddizEge/NX2Perf (the same commit as the program; GPLv3, see "License").
+- This release: see `VERSION_NX2PERF.txt` in the package (tag, commit, configure date).
+- Source: https://github.com/EddizEge/NX2Perf, branch `nx2perf`, tag `v2.0.0-nx2perf1` (the same
+  commit as the program; GPLv3, see "License").
 - Changes: `CHANGELOG_NX2PERF.md`. Every switch: `nx2_switches_NX2PERF.txt` (in the source:
   `dist/nx2_switches.txt`).
 - Türkçe: `BENIOKU_NX2PERF.md`.
@@ -63,7 +64,9 @@ start.**
    `use_reactive_flushing\default=false` and `use_reactive_flushing=false` under `[Renderer]`
    (see "Reactive flushing"). `start-reactive-experimental.bat` is meant for it **on** (the
    default, or `=true`). With the default left on, `start-recommended.bat` runs reactive
-   flushing without `RX_RT_FIT`, the slowest setup we measured at the game's opening.
+   flushing without `RX_RT_FIT`, the slowest setup we measured at the game's opening. To use
+   both launchers, copy the .ini, set the copy to `=true` and write its full path in the reactive
+   launcher's `CONFIG=` line (see "Reactive flushing").
 
 To uninstall, delete the files the zip added. Shader caches the new program built stay in the
 user folder; they are safe to keep.
@@ -277,7 +280,7 @@ Most of this fork's code, its commit messages and these documents were written b
 assistant (Claude Opus 5.5, by Anthropic) working under the direction of the human maintainer,
 who decided what to try, played and tested the builds, and is responsible for the release. The
 measurements above were taken on the maintainer's PC, many of them by automated runs. Every
-commit made with the assistant says so with an `Assisted-by:` line, as the Eden project's AI
+commit made with the assistant (all but two plain git merges) says so with an `Assisted-by:` line, as the Eden project's AI
 policy asks (`docs/policies/AI.md`). This fork is published on its own and is not submitted
 upstream. The upstream commits picked into it are listed with their authors in the changelog.
 

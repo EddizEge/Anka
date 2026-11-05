@@ -14,7 +14,7 @@ them against the `.sha512sum` file published next to each archive. `-DCPM_SOURCE
 the downloads in one folder. For the release build these were fetched (name: version):
 
 boost 1.92.0, cubeb fa02160712, enet v1.3.18, ffmpeg (prebuilt, crueter-ci
-9.0.2-1790726865-946fcce07b), fmt 12.1.0, frozen 61dce5ae18, gamemode ce6fe122f3, httplib
+9.0.2-1790726865-946fcce07b), fmt 12.1.0, frozen 61dce5ae18, gamemode ce6fe122f3 (Qt program only; not in eden-cli), httplib
 v0.46.0, libusb v1.0.29, lz4 ebb370ca83, nlohmann_json v3.12.0, nx_tzdb, openssl (prebuilt,
 crueter-ci 4.0.1-1788234794-b64f68a94e: a development snapshot, the library reports
 `OpenSSL 4.1.0-dev`), opus a3f0ec02b3, reshade v6.8.0, sdl3 (prebuilt,
@@ -33,13 +33,18 @@ components are in the tree: `externals/` and `src/dynarmic`. Their licenses are 
 and in their own folders.
 
 FFmpeg (LGPL-2.1-or-later) is linked statically. The prebuilt package is FFmpeg 9.0.2, commit
-946fcce07b6dcd0331c8cc609192aeff5e1924f8, with Eden's `0001-steamdeck.patch` applied
-(`patch -Np1` in the source root; it comments out the use of `VK_KHR_internally_synchronized_queues`),
-configured and built by `tools/configure.sh` / `tools/package.sh` of `crueter-ci/FFmpeg` at
-adbaa353e2 (release tag `9.0.2-1790726865-946fcce07b`; the Windows / amd64 / MSVC branch: static,
-`--disable-everything` plus the h264 / vp8 / vp9 / opus decoders and hardware decoding, without
-`--enable-gpl`). All of it is in the `-prebuilt-source.zip`. To link the program with a modified
-FFmpeg, build it the same way, put its `include/` and `lib/` in place of the prebuilt package's
+946fcce07b6dcd0331c8cc609192aeff5e1924f8, with Eden's `0001-steamdeck.patch` applied (it
+comments out the use of `VK_KHR_internally_synchronized_queues` in `libavutil/hwcontext_vulkan.c`
+and `libavutil/vulkan.c`), configured and built by `tools/configure.sh` / `tools/package.sh` of
+`crueter-ci/FFmpeg` at adbaa353e2 (release tag `9.0.2-1790726865-946fcce07b`; the Windows / amd64 /
+MSVC branch: static, `--disable-everything` plus the h264 / vp8 / vp9 / opus decoders and hardware
+decoding, without `--enable-gpl`). `tools/configure.sh` downloads that patch from the Eden repository
+and applies it itself (`curl ... | patch -Np1`); to build offline, apply the patch from the
+`-prebuilt-source.zip` to the unpacked source (`patch -Np1 < 0001-steamdeck.patch` in its root) and
+remove those two lines from `configure.sh` first, so that it is not applied twice. All of it is in
+the `-prebuilt-source.zip` (its `README_PREBUILT_SOURCES.txt` has the steps). To link the program
+with a modified FFmpeg, build it the same way, put its `include/` and `lib/` in place of the prebuilt
+package's
 in the CPM cache (`<CPM_SOURCE_CACHE>/ffmpeg/9.0.2-1790726865-946fcce07b-windows-amd64/`), and
 build as below. (Not tried for this release; `-DYUZU_USE_BUNDLED_FFMPEG=OFF` is the build
 system's own path for an FFmpeg built from source.)
@@ -61,7 +66,8 @@ cmake --build build-lto --target yuzu-cmd
 ```
 
 This gives `build-lto/bin/eden-cli.exe`: link-time code generation, no profile. It behaves the
-same as the release program and is slower (about 16-22% in our measurements).
+same as the release program and is slower (the PGO link made it about 16-22% faster in our
+measurements).
 
 ## Profile-guided optimization (the release program)
 
@@ -94,8 +100,8 @@ functionally the same either way.
 The release zips were made by a packaging script outside this tree. The program zip holds the
 program, the launchers from `dist/nx2perf/`, the README / BENIOKU / CHANGELOG / BUILDING files,
 `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_NX2PERF.txt` (the license texts and notices of
-the third-party components), a NOTICE file and `dist/nx2_switches.txt` (renamed so that it does
-not replace 2.0.0's own). The `-source.zip` is `git archive` of the same commit plus
+the third-party components), a NOTICE file, `VERSION_NX2PERF.txt` and `dist/nx2_switches.txt`
+(renamed so that it does not replace 2.0.0's own); the `-pdb.zip` holds the program's debug symbols. The `-source.zip` is `git archive` of the same commit plus
 `GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),
 `SOURCE_NX2PERF.txt`, the NOTICE file and the third-party notices; the `-deps-source.zip` holds the
 third-party sources CPM fetched (not the prebuilt packages), the `-prebuilt-source.zip` the

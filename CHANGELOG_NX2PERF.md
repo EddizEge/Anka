@@ -2,7 +2,7 @@
 
 Changes since **PokeDinner-Eglantine 2.0.0** (commit `70ecb39ef0`). The full history is in git
 (`git log 70ecb39ef0..`); this file groups it by topic. Most changes are behind `EDEN_NX2_*`
-switches (`nx2_switches.txt`): the opt-in ones are off unless a launcher sets them, the
+switches (`nx2_switches_NX2PERF.txt`; in the source `dist/nx2_switches.txt`): the opt-in ones are off unless a launcher sets them, the
 per-draw shortcuts are on and `=0` brings back the 2.0.0 code path.
 
 ## NX2Perf 1 (`2.0.0-nx2perf1`)
@@ -189,6 +189,6 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 ### Documentation
 
 - `NX2_NOTES.md` and `NX2_GPU_THREAD_SPLIT.md`: what was tried, measured and why.
-- `nx2_switches.txt`: every switch with its default.
+- `nx2_switches_NX2PERF.txt` (in the source `dist/nx2_switches.txt`): every switch with its default.
 - `README_NX2PERF.md` / `BENIOKU_NX2PERF.md`, this file, `BUILDING_NX2PERF.md`, the launchers in
   `dist/nx2perf/`.

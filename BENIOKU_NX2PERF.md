@@ -10,10 +10,12 @@ sorun izleyicisini kullanın: https://github.com/EddizEge/NX2Perf/issues
 
 - Taban: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
-- Bu sürüm: paketteki `VERSION_NX2PERF.txt` (etiket, commit, derleme tarihi).
-- Kaynak: https://github.com/EddizEge/NX2Perf (programla aynı commit; GPLv3, bkz. "Lisans").
+- Bu sürüm: paketteki `VERSION_NX2PERF.txt` (etiket, commit, yapılandırma tarihi).
+- Kaynak: https://github.com/EddizEge/NX2Perf, dal `nx2perf`, etiket `v2.0.0-nx2perf1` (programla
+  aynı commit; GPLv3, bkz. "Lisans").
 - Değişiklikler: `CHANGELOG_NX2PERF.md` (İngilizce). Bütün anahtarlar: `nx2_switches_NX2PERF.txt`
   (kaynakta `dist/nx2_switches.txt`).
+- English: `README_NX2PERF.md`.
 
 **Tek makinede, tek oyunla denendi.** Aşağıdaki bütün sayılar Ryzen 7 5700X (8 çekirdek), 64 GB
 RAM, NVIDIA GeForce RTX 4060 Ti ve 1440p 170 Hz ekranlı bir makinede Donkey Kong Bananza
@@ -60,7 +62,9 @@ klasörünü (kayıtlarınız) yedekleyin.**
    altına `use_reactive_flushing\default=false` ve `use_reactive_flushing=false` ekleyin (bkz.
    "Reaktif boşaltma"). `start-reactive-experimental.bat` ise **açık** içindir (varsayılan ya da
    `=true`). Varsayılan açık bırakılırsa `start-recommended.bat` reaktif boşaltmayı `RX_RT_FIT`'siz
-   çalıştırır: oyunun açılışında ölçtüğümüz en yavaş kurulum.
+   çalıştırır: oyunun açılışında ölçtüğümüz en yavaş kurulum. İki başlatıcıyı birden kullanmak
+   için ini'yi kopyalayın, kopyada `=true` yapın ve tam yolunu reaktif başlatıcının `CONFIG=`
+   satırına yazın (bkz. "Reaktif boşaltma").
 
 Kaldırmak için zip'in eklediği dosyaları silin. Yeni programın kurduğu gölgelendirici önbellekleri
 kullanıcı klasöründe kalır; durmalarında sakınca yok.
@@ -269,7 +273,7 @@ değildir.
 Bu çatalın kodunun, commit mesajlarının ve bu belgelerin çoğunu bir yapay zekâ kodlama asistanı
 (Anthropic'in Claude Opus 5.5'i) insan bakımcının yönetiminde yazdı. Neyin deneneceğine bakımcı
 karar verdi, derlemeleri o oynayıp denedi ve sürümün sorumluluğu ondadır. Yukarıdaki ölçümler
-bakımcının bilgisayarında, çoğu otomatik koşularla alındı. Asistanla yapılan her commit bunu
+bakımcının bilgisayarında, çoğu otomatik koşularla alındı. Asistanla yapılan her commit (iki düz git birleştirmesi dışında) bunu
 `Assisted-by:` satırıyla belirtir; Eden projesinin yapay zekâ politikası (`docs/policies/AI.md`)
 bunu ister. Bu çatal kendi başına yayımlanır, upstream'e gönderilmez. İçine alınan upstream
 commit'leri yazarlarıyla değişiklik günlüğünde listelenir.
