@@ -17,6 +17,7 @@ rem ----------------------------------------------------------------------------
 if not "%~1"=="" set "GAME=%~1"
 if not defined GAME goto nogame
 if not exist "%~dp0eden-cli-nx2perf.exe" goto noexe
+if defined CONFIG if not exist "%CONFIG%" goto noconfig
 cd /d "%~dp0"
 rem Opt-in switches: cleared (off).
 set EDEN_NX2_BACK_STAGES=
@@ -45,6 +46,22 @@ set EDEN_NX2_PACE_GUEST_SLEEP=
 set EDEN_NX2_PRESENT_RATE=
 set EDEN_NX2_PRESENT_DIAG=
 set EDEN_NX2_MODE_DIAG=
+set EDEN_NX2_MODE_DIAG_MAX=
+set EDEN_NX2_PACE_ONE=
+set EDEN_NX2_MEMBAR=
+set EDEN_NX2_BACK_CORE=
+set EDEN_NX2_FRONT_CORE=
+set EDEN_NX2_FG_DIAG=
+set EDEN_NX2_RX_RT_FIT=
+set EDEN_NX2_FLUSH_FIRST_READ=
+set EDEN_NX2_READ_LATCH_AGE=
+set EDEN_NX2_RX_ONE_SUBMIT=
+set EDEN_NX2_RX_COALESCE=
+set EDEN_NX2_RX_PITCH_FORCED=
+set EDEN_NX2_RX_MASKED_TARGETS=
+set EDEN_NX2_REACTIVE_STATS=
+set EDEN_NX2_RX_NO_COPYBACK=
+set EDEN_NX2_RX_NO_RT_LATCH=
 rem Shortcuts that are on by default: off (=0, the code path of 2.0.0).
 set EDEN_NX2_LIGHT_DRAW=0
 set EDEN_NX2_LIGHT_UNIFORM=0
@@ -109,14 +126,26 @@ set EDEN_NX2_UPSCALE_LEARN=0
 set EDEN_NX2_UPSCALE_HEADER=0
 if defined CONFIG goto withconfig
 "%~dp0eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
-goto end
+goto ran
 :withconfig
 "%~dp0eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+:ran
+rem Keep the window open when the emulator stopped with an error, so it can be read.
+if errorlevel 1 pause
 goto end
 :nogame
 echo.
 echo  No game given. Drag your game file onto this .bat, or write its path
 echo  in the GAME line at the top of it (right click, Edit).
+echo.
+pause
+exit /b 1
+:noconfig
+echo.
+echo  The CONFIG file in this .bat was not found:
+echo  "%CONFIG%"
+echo  eden-cli would make a new one with default settings. Fix the CONFIG line
+echo  (right click, Edit) or empty it.
 echo.
 pause
 exit /b 1

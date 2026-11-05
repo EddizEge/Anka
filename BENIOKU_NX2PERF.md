@@ -60,20 +60,28 @@ Oyun dosyanızı bir başlatıcının üstüne sürükleyin ya da `.bat`'ı meti
 | `DK_DYN=1` | Bananza dinamik kare hızı yaması (aşağıda); `0` = kapalı |
 | `OSD=1` | RTSS ile FPS / hız göstergesi; `0` = kapalı |
 
+(`DK_DYN=` ve `OSD=` yalnız önerilen ve reaktif başlatıcılarda var.) Oyunun yolunda `&`, `^`, `,`,
+`;` ya da `=` varsa dosyayı sürüklemeyin, yolu `GAME=` satırına yazın. `CONFIG=` satırındaki dosya
+yoksa başlatıcı bir iletiyle durur (eden-cli sessizce varsayılan ayarlarla yeni bir dosya
+yazardı); emülatör hatayla kapanırsa pencere açık kalır. Başlatıcıları yayın zip'inden alın:
+Windows satır sonları (CRLF) gerekir.
+
 - **`start-recommended.bat`** (önerilen): bizim oynadığımız ayarlar (Donkey Kong Bananza).
   GPU iş parçacığının arka tarafı aşamalı (`BACK_STAGES=1`, `BACK_CUTS=a`), `ACQUIRE_PEEK=1`,
   `JIT_SAME=1`, `FRONT_MACRO_LEAN=1`; Bananza'nın kendi 60/30/20 FPS seçimi doğru hızda izlenir
   (`PRESENT_INTERVAL_WORD=12:16:4`, `MODE_PACE=2`, `PACE_SPIN_US=1500`); dinamik kare hızı yaması
-  (`DK_DYN=1`); zamanlı FSR3 ara kareleri (`FG_TIMED=1`, yalnız kare üretme açıkken etkili); RTSS
+  (`DK_DYN=1`; yama uygulanınca yukarıdaki iki hız satırı devre dışı kalır: `DK_DYN=0` iken ya
+  da yama uygulanmazsa etkilidirler); zamanlı FSR3 ara kareleri (`FG_TIMED=1`, yalnız kare üretme açıkken etkili); RTSS
   göstergesi (`OSD=1`). Bananza'ya özel satırlar işaretli; başka oyunlar için güvenli başlatıcıyı
   kullanın ya da o satırları silin.
 - **`start-safe.bat`** (güvenli): bu çatalın eklediği bütün anahtarlar kapalı (varsayılanı açık
   kısayollar `0`, isteğe bağlı olanlar boş). Programın 2.0.0'a en yakın hâli; bir sorunun yeni
   anahtarlardan gelip gelmediğini anlamak için. Anahtarı olmayan değişiklikler (değişiklik
   günlüğündeki doğruluk düzeltmeleri ve upstream'den alınanlar) yine içeridedir.
-- **`start-reactive-draft.bat`** (reaktif, TASLAK): reaktif boşaltma açıkken kullanılmak üzere
-  önerilen ayarlar, artı onun bedelini azaltan anahtarlar (son listesi yayında belli olur).
-  Reaktif boşaltma bir anahtar değil, bir ayardır: aşağıda "Reaktif boşaltma".
+- **`start-reactive-draft.bat`** (reaktif, TASLAK; bütün olarak ölçülmedi): reaktif boşaltma
+  açıkken kullanılmak üzere önerilen ayarlar, artı `RX_RT_FIT=1` (Bananza'nın açılışındaki
+  çizim hedefi için çizim başına bir kopya yerine tek görüntü). Reaktif boşaltma bir anahtar
+  değil, bir ayardır: aşağıda "Reaktif boşaltma".
 
 eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur. `nx2_switches_NX2PERF.txt` her
 anahtarı varsayılanı ve ne yaptığıyla listeler. (2.0.0'ın kendi `nx2_switches.txt`'sini yalnız Qt
@@ -81,7 +89,7 @@ programı okur; paket onu değiştirmez.)
 
 ## Başlıca anahtarlar
 
-Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (214 yeni ad, çoğu tanı ya da ince ayar)
+Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (yaklaşık 230 yeni ad, çoğu tanı ya da ince ayar)
 `nx2_switches_NX2PERF.txt`'de.
 
 | Anahtar | Varsayılan | Ne yapar |
@@ -97,19 +105,23 @@ Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (214 yeni ad, ço
 | `OSD=1` | kapalı | RTSS'de oyun FPS'i, ekran FPS'i (kare üretme çarpanıyla) ve hız |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (60 kadar) | **açık** | GPU iş parçacığında çizim başı kısayollar; `=0` 2.0.0'ın kod yolu, çoğu `=2` ile kendini denetleyip günlüğe yazar |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **açık** | Bananza arazisi: dolaylı çizimler ana makinenin GPU'sunda ve birleşik; GPU'nun yazdığı parametreler 256 KiB'lık pencerelerle boşaltılır |
+| `RX_RT_FIT=1` | kapalı | reaktif boşaltmayla: Bananza'nın açılışı çizim başına kopya yerine tek görüntüye çizer (`barrier_feedback_loops=true` gerekir) |
+| `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | kapalı | reaktif boşaltma deneyleri; kazanç ölçülmedi, önerilmez |
+| `RX_MASKED_TARGETS` | kapalı | **bilinen kusur, açmayın** |
 
 ## Donkey Kong Bananza dinamik kare hızı (DK-DYN)
 
 `EDEN_NX2_DK_DYN=1` oyuna özel bir yama uygular: Bananza'nın ana modülü yüklenirken oyunun kare
 hızı denetleyicisinin birkaç komutu **bellekte** değiştirilir; böylece oyun 30'a düşmek yerine 40
-ile 60 FPS arasında her hızda çalışabilir ve saati gerçek kare süresiyle ilerler (oyunun hızı doğru
-kalır). ZendNevs çatalının `dk_dynamic_fps` yamasının (v2.0.5) aktarımıdır. Diske hiçbir şey
+ile 60 FPS arasında her hızda çalışabilir ve saati gerçek kare süresiyle ilerler (oyunun hızı 24
+FPS'e dek doğru kalır). ZendNevs çatalının `dk_dynamic_fps` yamasının (v2.0.5) aktarımıdır. Diske hiçbir şey
 yazılmaz, hiçbir oyun dosyası değişmez; anahtar boşken hiçbir modüle dokunulmaz. Yalnız Bananza'ya
 (başlık 040074A01BF12000) ve yalnız beklenen komutlar bulunursa uygulanır. `DK_DYN_MIN_FPS=<1-60>`
 40 FPS sınırını değiştirir.
 
 Programda varsayılan kapalıdır; `start-recommended.bat` açar (başındaki `DK_DYN=1`). Açıkken
-oyunun kare süresi bilerek değişkendir (40 ile 60 arası her hız); 40 FPS'in altında oyun yine
+oyunun kare süresi bilerek değişkendir (40 ile 60 arası, 2'lik adımlarla). Yama uygulanınca
+`PRESENT_INTERVAL_WORD` ve `MODE_PACE` devre dışı kalır, sunumlar her vblank'e göre zamanlanır; 40 FPS'in altında oyun yine
 kendi 30 FPS kuralına iner.
 
 ## Kare üretme (isteğe bağlı)
@@ -140,8 +152,8 @@ kullanıyoruz; `0` ise `frame_gen_multiplier`'ı, 2-4, kullanır). `frame_gen_ty
 
 `use_reactive_flushing` (`[Renderer]`), GPU'nun yazdığı veriyi oyun okuduğunda oyunun belleğine geri
 kopyalar. **Programın masaüstündeki varsayılanı açıktır.** Bizim deneme kurulumumuzda **kapalıydı**
-ve aşağıdaki önerilen sayılar böyle ölçüldü. Bizim makinede açmak geniş alanlarda FPS'i %13-20
-artırdı, oyunun açılışında %28 düşürdü. `sdl2-config.ini`'nize bakın:
+ve aşağıdaki önerilen sayılar böyle ölçüldü. Bizim makinede, daha eski derlemelerle ve kare
+üretme kapalıyken, açmak geniş alanlarda FPS'i %13-23 artırdı, oyunun açılışında %23-30 düşürdü. `sdl2-config.ini`'nize bakın:
 
 ```ini
 use_reactive_flushing\default=false
@@ -153,6 +165,19 @@ boşaltma açık demektir, `start-reactive-draft.bat` bunun içindir. İkisini b
 .ini'yi kopyalayın (ör. aynı klasöre `sdl2-config-reactive.ini`), kopyayı değiştirin ve tam yolunu
 bir başlatıcının `CONFIG=` satırına yazın.
 
+Bu sürüm reaktif boşaltma için anahtarlar ekler (hepsi varsayılan kapalı;
+`nx2_switches_NX2PERF.txt`, "reactive flushing"). `RX_RT_FIT=1` açılışta bulunan bedeli hedefler:
+orada Bananza 2112x1179'luk bir görüntüye çizerken aynı belleği 2095x1179'luk bir doku olarak
+okuyor; reaktif boşaltmayla her çizim birini ötekine kopyalıyordu. Anahtarla ikisi tek görüntü
+olur; onu okuyan bir çizim önce çizim geçişini bitirir, bunun için `[Renderer]` altında
+`barrier_feedback_loops=true` gerekir (o olmadan anahtar bir şey yapmaz). **Kesinleşmedi:** bu
+sürümün koduyla ilk koşularda (5 Kasım, DK-DYN açık, kare üretme kapalı) `RX_RT_FIT=1`'li reaktif
+boşaltma açılışta reaktif kapalıya göre yine %20 yavaştı (34,3'e karşı 42,9 FPS, kol başına 2
+koşu); bu yazılırken geniş alan koşuları bitmemişti. Reaktif boşaltma kare üretmeyle birlikte
+**hiç ölçülmedi**. Bu yüzden `start-reactive-draft.bat` taslaktır; önerilen bir başlatıcı olup
+olmayacağına bu ölçümlerden sonra karar verilir. `RX_MASKED_TARGETS`'ı açmayın (bilinen kusur:
+bir doku kopyalaması maskeyi yok sayıyor).
+
 ## Ölçülen sonuçlar
 
 Yukarıdaki makinede, yalnız Donkey Kong Bananza ile ölçüldü. FPS oyunun kendi kare hızıdır (aksi
@@ -163,20 +188,21 @@ uzaktan bakış; kamera koşudan koşuya birebir aynı değil).
 
 | Değişiklik | Kollar (A -> B) | Sahne, koşu | Sonuç |
 |---|---|---|---|
-| Hepsi, PokeDinner 2.0.0 -> NX2Perf | 2.0.0'ın `eden-cli`'si / bu çatalın 3-5 Kasım derlemeleri | 2.0.0: elle uzak bakış, 25 sn (31 Ekim). Çatal: açılış ve geniş alanın otomatik koşuları | 2.0.0: 17,3 FPS (kare süresi medyanı 58 ms). Çatal: sınırsız 42-51 FPS (3-4 Kasım); DK-DYN açık, kare üretme kapalı 39-46 FPS (5 Kasım, bu sürümden bir önceki commit'in derlemesi). **Denetimli bir A/B değil**: sahneler ve koşular farklı; büyüklük mertebesi olarak okuyun |
-| GPU'nun yazdığı parametrelerin boşaltma penceresi | aynı derleme, `PBFLUSH_WINDOW_KIB=0` -> varsayılan | uzak bakış, kol başına 2 x 25 sn | 18,0 -> 19,7 FPS (+%9) |
-| Arazi dolaylı çizimleri ana makinenin GPU'sunda | aynı derleme, `HLE_INDIRECT=0` -> varsayılan | elle uzak bakış, kol başına 2-4 koşu | ~20,8 -> ~30,8 FPS (~+%48; kamera birebir aynı değil) |
+| Hepsi, PokeDinner 2.0.0 -> NX2Perf | 2.0.0'ın `eglantine.exe`'si (Qt; el kipi, GPU doğruluğu Fast, 1x) / bu çatalın 3-5 Kasım `eden-cli` derlemeleri (çoğu TV kipi) | 2.0.0: elle uzak bakış, 25 sn (31 Ekim). Çatal: açılış ve geniş alanın otomatik koşuları | 2.0.0: 17,3 FPS (kare süresi medyanı 58 ms). Çatal: sınırsız 42-53 FPS (3-4 Kasım); DK-DYN açık, kare üretme kapalı 39-46 FPS (5 Kasım, `b5a994e3eb` commit'inin derlemesi). **Denetimli bir A/B değil**: program, kip, sahneler ve koşular farklı, 2.0.0'ın sahnesi en ağırı; aynı uzak bakışta çatalın 31 Ekim - 1 Kasım derlemeleri 19,7 ve ~30,8 FPS ölçtü (aşağıdaki satırlar). Yalnız kaba bir gösterge |
+| GPU'nun yazdığı parametrelerin boşaltma penceresi | aynı derleme (31 Ekim, öteki değişikliklerin çoğundan önce), `PBFLUSH_WINDOW_KIB=0` -> varsayılan | uzak bakış, kol başına 2 x 25 sn | 18,0 -> 19,7 FPS (+%9; `HLE_INDIRECT`'ten önce ölçüldü, asıl `HLE_INDIRECT=0` iken önemli) |
+| Arazi dolaylı çizimleri ana makinenin GPU'sunda | aynı derleme (1 Kasım), `HLE_INDIRECT=0` -> varsayılan | elle uzak bakış, kol başına 2-4 koşu | ~20,8 -> ~30,8 FPS (~+%48; kamera birebir aynı değil) |
 | Arka aşamalar (kesim a) | `BACK_STAGES=0` -> `1` | açılış, 2 tur x 2 x 25 sn | +%8,7 / +%7,3 |
-| Çizim başı kısayollar (b-hiz takımı) | kapalı -> açık | açılış, aynı koşular | +%7,5 / +%6,8 |
+| Çizim başı kısayollar (ilk takım, 2 Kasım; hepsi değil) | kapalı -> açık | açılış, aynı koşular (2. turda bir örnek dışarıda) | +%7,5 / +%6,8 |
 | Acquire peek | `ACQUIRE_PEEK=0` -> `1` | açılış, aynı koşular | +%1,4 / +%3,9 |
-| Profil güdümlü iyileştirme (PGO) | LTO derlemesi -> LTO + PGO | açılış, aynı koşular | +%21,5 / +%15,8 |
+| Profil güdümlü iyileştirme (PGO) | LTO derlemesi -> LTO + PGO | açılış, aynı koşular | +%21,5 / +%15,8 (3 Kasım derlemesi ve profili; bu sürümün programının kendi profili var, böyle ölçülmedi) |
 | Ön tarafın makro JIT süzgeci | kapalı -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | açılış, 2 tur x 2 | 39,6 -> 42,1 FPS (+%6) |
-| Reaktif boşaltma | kapalı -> açık | geniş alan / açılış, gece otomatik koşuları | +%13-20 / −%28 |
-| `DK_DYN_MIN_FPS=30` | boş (40) -> 30 | açılış ve geniş alan, 4 + 4 koşu | −%4 / −%5, 30'a yakın kare daha sık: önerilmez |
+| Reaktif boşaltma | kapalı -> açık | geniş alan / açılış, gece otomatik koşuları (3-4 Kasım derlemeleri) | +%13-23 / −%23-30 |
+| `RX_RT_FIT=1`'li reaktif boşaltma | reaktif kapalı -> açık + `RX_RT_FIT=1` (bu sürümün kodu, DK-DYN açık) | açılış, kol başına 2 koşu (5 Kasım) | 42,9 -> 34,3 FPS (−%20); geniş alan bitmedi |
+| `DK_DYN_MIN_FPS=30` | boş (40) -> 30 | açılış ve geniş alan, her sahnede kol başına 2 koşu | −%4 / −%5 (açılışta FPS aralıkları örtüşüyor; 30'a yakın karelerin artması daha açık işaret): önerilmez |
 
 DK-DYN ve 120'yi hedefleyen FSR3 kare üretmesiyle (önerilen kurulumun daha eski bir derlemesi),
 3,6 dakikalık olağan bir oyun oturumunun günlüğünde oyun FPS'i medyan 46 (en düşük 35), ekranda
-saniyede medyan 119 kare (en düşük 97), oyun hızı %99,8 çıktı. Bu bir oturumdur, kıyas ölçümü
+saniyede medyan 119 kare (en düşük 97), oyun hızı medyan %99,8 (en düşük %93) çıktı. Bu bir oturumdur, kıyas ölçümü
 değildir.
 
 ## Bilinen sorunlar
@@ -188,7 +214,8 @@ değildir.
   önce kare üretmesiz görüldüler; olası neden kare üretme değil, bu oyunun daha eski bir çizim
   sorunu (upstream için de bildirildi), ama kesinleşmedi. Görürseniz dünyada yerinde kalıp
   kalmadığına bakın, kare üretmesiz ve `start-safe.bat` ile deneyin, nerede olduğunu bildirin.
-- **Reaktif boşaltma** (varsayılan açık) oyunun açılışında FPS'e mal oluyor (yukarıda).
+- **Reaktif boşaltma** (varsayılan açık) oyunun açılışında FPS'e mal oluyor (yukarıda); yeni
+  anahtarları kare üretmeyle ölçülmedi.
 - **AMD ve Intel ekran kartları denenmedi**; başka oyunlar da. Bananza anahtarları
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) yalnız Bananza içindir.
 - Gösterge RTSS'nin paylaşımlı belleğine yazar; program zorla kapatılırsa (Görev Yöneticisi)
@@ -210,10 +237,11 @@ commit'leri yazarlarıyla değişiklik günlüğünde listelenir.
 
 Eden ve PokeDinner-Eglantine gibi NX2Perf de **GNU Genel Kamu Lisansı v3.0 ya da sonrası** ile
 lisanslıdır (`LICENSE.txt`). PokeDinner-Eglantine 2.0.0'ın değiştirilmiş bir sürümüdür; neyin ne
-zaman değiştiği `NOTICE_NX2PERF.txt` ve `CHANGELOG_NX2PERF.md`'dedir. Bu sürümün eksiksiz karşılık
+zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX2PERF.md`'dedir. Bu sürümün eksiksiz karşılık
 gelen kaynak kodu `<KAYNAK_URL>`'de ve programın yanındaki `-source.zip`'tedir; üçüncü taraf
 kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
-lisanslarını korur (`LICENSES\`).
+lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
+`LICENSES\` içinde; programa giren kütüphanelerin kaynağı `-deps-source.zip`'te.
 
 Nintendo Switch ve Donkey Kong Bananza, Nintendo'nun ticari markalarıdır. Bu projenin Nintendo
 ile bir bağı yoktur. Yalnız sahip olduğunuz oyunlarla kullanın.

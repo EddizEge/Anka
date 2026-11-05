@@ -8,7 +8,8 @@ per-draw shortcuts are on and `=0` brings back the 2.0.0 code path.
 ## NX2Perf 1 (`2.0.0-nx2perf1`)
 
 Base: PokeDinner-Eglantine 2.0.0. Program: `eden-cli` (SDL front end), built with LTO and
-profile-guided optimization. About 370 commits.
+profile-guided optimization. About 390 commits, made between 30 October and 5 November 2026
+(modified by the NX2Perf maintainer; see `NOTICE_NX2PERF.txt` in the release zips).
 
 ### Donkey Kong Bananza terrain and the GPU command stream
 
@@ -88,6 +89,26 @@ profile-guided optimization. About 370 commits.
 - float16 stays on for Ampere and newer when frame generation starts with LSFG.
 - The frame counters count the images sent to the screen, generated ones included.
 
+### Reactive flushing (all off by default)
+
+For `use_reactive_flushing=true`; none of these was measured with frame generation (README,
+"Reactive flushing").
+
+- `RX_RT_FIT=1`: a render target lookup takes the narrower image with the target's memory when
+  the guest's surface clip is exactly that image (Bananza's opening renders into a 2112x1179
+  target and samples the same memory as a 2095x1179 texture: one image instead of a whole copy
+  per draw); a color feedback loop ends the render pass first (`barrier_feedback_loops=true`).
+  `=2` (diagnostic) leaves the barrier out.
+- Experiments without a measured gain: `FLUSH_FIRST_READ` (a buffer page the GPU wrote is
+  flushed at the guest's first CPU read), `READ_LATCH_AGE` (what CPU reads latched is dropped
+  after that many frames unread), `RX_ONE_SUBMIT` (no empty second submission after a fence's
+  own), `RX_COALESCE` (buffer copy backs ride along with fences made anyway), `RX_PITCH_FORCED`
+  (pitch linear images stay downloaded at every bind).
+- `RX_MASKED_TARGETS`: a draw marks only the targets its masks let it write. Known defect (a
+  texture blit ignores the mask): do not turn it on.
+- Diagnostics: `REACTIVE_STATS` (counters and a log line about every 10 s), `RX_NO_COPYBACK`,
+  `RX_NO_RT_LATCH`.
+
 ### On-screen display
 
 - `OSD=1` (eden-cli on Windows): game FPS, display FPS with frame generation's multiplier, and
@@ -152,7 +173,9 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 ### Not in this release
 
 - The Qt program (`eglantine.exe`).
-- Reactive flushing fixes (`EDEN_NX2_RX_*`): added here at release if they are merged.
+- A reactive flushing launcher that is recommended: `start-reactive-draft.bat` stays a draft
+  until reactive flushing with `RX_RT_FIT` is measured in the open area and with frame
+  generation.
 - The "M" stage of the split GPU thread work.
 
 ### Documentation

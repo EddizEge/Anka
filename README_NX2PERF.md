@@ -62,20 +62,28 @@ the `GAME=` line. The top of each launcher has the lines meant to be changed:
 | `DK_DYN=1` | Bananza dynamic frame rate patch (below); `0` = off |
 | `OSD=1` | FPS / speed display through RTSS; `0` = off |
 
+(`DK_DYN=` and `OSD=` are in the recommended and reactive launchers only.) If the path of your
+game contains `&`, `^`, `,`, `;` or `=`, write it in the `GAME=` line instead of dragging the file.
+A launcher stops with a message when its `CONFIG=` file does not exist (eden-cli would quietly
+make a new one with default settings), and keeps its window open when the emulator exits with an
+error. Take the launchers from the release zip: they need Windows line endings (CRLF).
+
 - **`start-recommended.bat`** - the settings we play with (Donkey Kong Bananza):
   the GPU thread's back as stages (`BACK_STAGES=1`, `BACK_CUTS=a`), `ACQUIRE_PEEK=1`,
   `JIT_SAME=1`, `FRONT_MACRO_LEAN=1`; Bananza's own 60/30/20 fps choice followed at the right
   speed (`PRESENT_INTERVAL_WORD=12:16:4`, `MODE_PACE=2`, `PACE_SPIN_US=1500`); the dynamic
-  frame rate patch (`DK_DYN=1`); timed FSR3 generated frames (`FG_TIMED=1`, only does something
+  frame rate patch (`DK_DYN=1`; while it is applied, the two pacing lines above are set aside:
+  they act with `DK_DYN=0` or when the patch does not apply); timed FSR3 generated frames (`FG_TIMED=1`, only does something
   with frame generation on); the RTSS display (`OSD=1`). The Bananza-specific lines are marked;
   for other games use the safe launcher, or remove them.
 - **`start-safe.bat`** - every switch this fork added turned off (the shortcuts that are on by
   default set to `0`, the opt-in ones cleared). This is as close to 2.0.0 as the program gets;
   use it to see whether a problem comes from the new switches. Changes without a switch (the
   accuracy fixes and upstream picks in the changelog) stay in.
-- **`start-reactive-draft.bat`** - DRAFT. The recommended settings for use with reactive
-  flushing on, plus the switches that reduce its cost (their final list is set at release).
-  Reactive flushing is a config setting, not a switch: see "Reactive flushing" below.
+- **`start-reactive-draft.bat`** - DRAFT, not measured as a whole. The recommended settings for
+  use with reactive flushing on, plus `RX_RT_FIT=1` (one image for Bananza's opening render
+  target instead of a copy per draw). Reactive flushing is a config setting, not a switch: see
+  "Reactive flushing" below.
 
 eden-cli reads the switches only from its environment (the launchers).
 `nx2_switches_NX2PERF.txt` lists every switch with its default and what it does. (2.0.0's own
@@ -83,8 +91,8 @@ eden-cli reads the switches only from its environment (the launchers).
 
 ## Main switches
 
-All are environment variables named `EDEN_NX2_<NAME>`. The full list (214 new names, most of
-them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
+All are environment variables named `EDEN_NX2_<NAME>`. The full list (about 230 new names, most
+of them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
 
 | Switch | Default | What it does |
 |---|---|---|
@@ -99,20 +107,24 @@ them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
 | `OSD=1` | off | game FPS, display FPS (with frame generation's multiplier) and speed in RTSS |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (about 60) | **on** | per-draw shortcuts on the GPU thread; `=0` is the 2.0.0 code path, many accept `=2` to check themselves and log |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **on** | Bananza's terrain: indirect draws on the host GPU, merged; GPU-written parameters flushed in 256 KiB windows |
+| `RX_RT_FIT=1` | off | with reactive flushing: Bananza's opening renders into one image instead of copying it per draw (needs `barrier_feedback_loops=true`) |
+| `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | off | reactive flushing experiments; no gain measured, not recommended |
+| `RX_MASKED_TARGETS` | off | **known defect, do not turn on** |
 
 ## Donkey Kong Bananza dynamic frame rate (DK-DYN)
 
 `EDEN_NX2_DK_DYN=1` applies a game-specific patch: when Bananza's main module is loaded, a few
 instructions of the game's frame rate controller are rewritten **in memory** so that the game
 may run at any rate from 40 to 60 fps instead of dropping to 30, with its clock stepped by the
-real frame time (the game's speed stays right). It is a port of the `dk_dynamic_fps` patch of
+real frame time (the game's speed stays right down to 24 fps). It is a port of the `dk_dynamic_fps` patch of
 the ZendNevs fork (v2.0.5). Nothing is written to disk, no game file is changed, and with the
 switch unset no module is touched. It only applies to Bananza (title 040074A01BF12000) and
 only if the expected instructions are found. `DK_DYN_MIN_FPS=<1-60>` moves the 40 fps limit.
 
 It is off by default in the program; `start-recommended.bat` turns it on (`DK_DYN=1` at its
-top). With it the game's frame time varies by design (any rate between 40 and 60); below 40 fps
-the game still drops to its 30 fps rule.
+top). With it the game's frame time varies by design (any rate between 40 and 60, in steps of
+2); below 40 fps the game still drops to its 30 fps rule. While it is applied,
+`PRESENT_INTERVAL_WORD` and `MODE_PACE` are set aside and presents are paced to every vblank.
 
 ## Frame generation (optional)
 
@@ -141,9 +153,9 @@ display; `0` uses `frame_gen_multiplier`, 2-4). `frame_gen_type=0` would pick LS
 
 `use_reactive_flushing` (`[Renderer]`) copies data the GPU wrote back to game memory when the
 game reads it. **The program's default on desktop is on.** Our test setup had it **off**, and
-the recommended numbers below were measured that way. On our machine turning it on gained
-+13 to +20% FPS in open areas and lost 28% at the game's opening. Look at your
-`sdl2-config.ini`:
+the recommended numbers below were measured that way. On our machine, with earlier builds and
+frame generation off, turning it on gained +13 to +23% FPS in open areas and lost 23 to 30% at
+the game's opening. Look at your `sdl2-config.ini`:
 
 ```ini
 use_reactive_flushing\default=false
@@ -155,6 +167,19 @@ matches our recommended setup; `=true` (or no such lines) is reactive flushing o
 `sdl2-config-reactive.ini` in the same folder), change the copy, and write the copy's full path
 in a launcher's `CONFIG=` line.
 
+This release adds switches for reactive flushing (all off by default; `nx2_switches_NX2PERF.txt`,
+"reactive flushing"). `RX_RT_FIT=1` targets the cost found at the game's opening: there Bananza
+renders into a 2112x1179 image while it samples the same memory as a 2095x1179 one, and with
+reactive flushing every draw copied one into the other. With the switch the two are one image;
+a draw that reads it ends the render pass first, which needs `barrier_feedback_loops=true` under
+`[Renderer]` (the switch does nothing without it). **Not settled:** in the first runs with this
+release's code (5 Nov, DK-DYN on, frame generation off) reactive flushing with `RX_RT_FIT=1` was
+still 20% slower at the opening than reactive flushing off (34.3 vs 42.9 FPS, 2 runs each); the
+open area runs were not finished when this was written. Reactive flushing was **never measured
+together with frame generation**. `start-reactive-draft.bat` is therefore a draft; whether it
+becomes a recommended launcher is decided after those measurements. Do not turn on
+`RX_MASKED_TARGETS` (known defect: a texture blit ignores the mask).
+
 ## Measured results
 
 Measured on the machine above with Donkey Kong Bananza only. FPS is the game's own frame rate
@@ -165,20 +190,21 @@ hand; camera not exactly the same between runs).
 
 | Change | Arms (A -> B) | Scene, runs | Result |
 |---|---|---|---|
-| Everything, PokeDinner 2.0.0 -> NX2Perf | 2.0.0's `eden-cli` / this fork's builds of 3-5 Nov | 2.0.0: far view by hand, 25 s (31 Oct). Fork: automated runs of the opening and open area | 2.0.0: 17.3 FPS (median frame 58 ms). Fork: 42-51 FPS uncapped (3-4 Nov); 39-46 FPS with DK-DYN, frame generation off (5 Nov, the build one commit before this one). **Not a controlled A/B**: scenes and runs differ; read it as an order of magnitude |
-| GPU-written parameter flush window | same build, `PBFLUSH_WINDOW_KIB=0` -> default | far view, 2 x 25 s each | 18.0 -> 19.7 FPS (+9%) |
-| Terrain indirect draws on the host GPU | same build, `HLE_INDIRECT=0` -> default | far view by hand, 2-4 runs each | ~20.8 -> ~30.8 FPS (~+48%; camera not identical) |
+| Everything, PokeDinner 2.0.0 -> NX2Perf | 2.0.0's `eglantine.exe` (Qt; handheld mode, GPU accuracy Fast, 1x) / this fork's `eden-cli` builds of 3-5 Nov (mostly TV mode) | 2.0.0: far view by hand, 25 s (31 Oct). Fork: automated runs of the opening and open area | 2.0.0: 17.3 FPS (median frame 58 ms). Fork: 42-53 FPS uncapped (3-4 Nov); 39-46 FPS with DK-DYN, frame generation off (5 Nov, build of commit `b5a994e3eb`). **Not a controlled A/B**: program, mode, scenes and runs differ, and the 2.0.0 scene is the heaviest one; in the same far view the fork's builds of 31 Oct - 1 Nov measured 19.7 and ~30.8 FPS (rows below). A rough indication only |
+| GPU-written parameter flush window | same build (31 Oct, before most other changes), `PBFLUSH_WINDOW_KIB=0` -> default | far view, 2 x 25 s each | 18.0 -> 19.7 FPS (+9%; measured before `HLE_INDIRECT`, so it matters mostly with `HLE_INDIRECT=0`) |
+| Terrain indirect draws on the host GPU | same build (1 Nov), `HLE_INDIRECT=0` -> default | far view by hand, 2-4 runs each | ~20.8 -> ~30.8 FPS (~+48%; camera not identical) |
 | Back stages (cut a) | `BACK_STAGES=0` -> `1` | opening, 2 rounds x 2 x 25 s | +8.7% / +7.3% |
-| Per-draw shortcuts (b-hiz set) | off -> on | opening, same runs | +7.5% / +6.8% |
+| Per-draw shortcuts (the first set, 2 Nov; not all of them) | off -> on | opening, same runs (one sample of round 2 left out) | +7.5% / +6.8% |
 | Acquire peek | `ACQUIRE_PEEK=0` -> `1` | opening, same runs | +1.4% / +3.9% |
-| Profile-guided optimization (PGO) | LTO build -> LTO + PGO | opening, same runs | +21.5% / +15.8% |
+| Profile-guided optimization (PGO) | LTO build -> LTO + PGO | opening, same runs | +21.5% / +15.8% (3 Nov build and profile; this release's program has its own profile, not measured this way) |
 | Front macro JIT filter | off -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | opening, 2 rounds x 2 | 39.6 -> 42.1 FPS (+6%) |
-| Reactive flushing | off -> on | open area / opening, nightly automated runs | +13 to +20% / -28% |
-| `DK_DYN_MIN_FPS=30` | unset (40) -> 30 | opening and open area, 4 + 4 runs | -4% / -5%, more frames near 30: not recommended |
+| Reactive flushing | off -> on | open area / opening, nightly automated runs (3-4 Nov builds) | +13 to +23% / -23 to -30% |
+| Reactive flushing with `RX_RT_FIT=1` | reactive off -> on + `RX_RT_FIT=1` (this release's code, DK-DYN on) | opening, 2 runs each (5 Nov) | 42.9 -> 34.3 FPS (-20%); open area not finished |
+| `DK_DYN_MIN_FPS=30` | unset (40) -> 30 | opening and open area, 2 runs per arm in each scene | -4% / -5% (FPS ranges overlap at the opening; more frames near 30 is the clearer sign): not recommended |
 
 With DK-DYN and FSR3 frame generation aiming at 120 (an earlier build of the recommended
 setup), a 3.6 minute session of normal play logged a median of 46 game FPS (lowest 35), 119
-frames a second on screen (lowest 97) and a game speed of 99.8%. That is one session, not a
+frames a second on screen (lowest 97) and a median game speed of 99.8% (lowest 93%). That is one session, not a
 benchmark.
 
 ## Known issues
@@ -192,7 +218,8 @@ benchmark.
   this game (also reported for upstream), not frame generation, but it is not settled. If you
   see them, note whether they stay in place in the world, try without frame generation and with
   `start-safe.bat`, and report where.
-- **Reactive flushing** (on by default) costs FPS at the game's opening (above).
+- **Reactive flushing** (on by default) costs FPS at the game's opening (above); its new
+  switches were not measured with frame generation.
 - **AMD and Intel GPUs were not tried**; neither were other games. The Bananza switches
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) are meant for Bananza only.
 - The OSD writes to RTSS's shared memory; if the program is killed (Task Manager), the text can
@@ -214,10 +241,13 @@ upstream. The upstream commits picked into it are listed with their authors in t
 
 Like Eden and PokeDinner-Eglantine, NX2Perf is licensed under the **GNU General Public License
 v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantine 2.0.0; what
-was changed and when is in `NOTICE_NX2PERF.txt` and `CHANGELOG_NX2PERF.md`. The complete
+was changed and when is in `NOTICE_NX2PERF.txt` (in the release zips) and
+`CHANGELOG_NX2PERF.md`. The complete
 corresponding source code of this release is at `<KAYNAK_URL>` and in the `-source.zip` next to
 the program, with notes on how the third-party libraries are fetched (`BUILDING_NX2PERF.md`).
-Third-party components keep their own licenses (`LICENSES\`).
+Third-party components keep their own licenses: their notices and license texts are in
+`THIRD_PARTY_NOTICES_NX2PERF.txt` and `LICENSES\`; the source of the libraries built into the
+program is in the `-deps-source.zip`.
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. This project has no
 affiliation with Nintendo. Use it only with games you own.

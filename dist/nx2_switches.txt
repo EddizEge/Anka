@@ -1,4 +1,4 @@
-# Switch NX2 - read at every start of the Eglantine GUI (eden.exe). The command line
+# Switch NX2 - read at every start of the Eglantine GUI (eglantine.exe). The command line
 # version (eden-cli) does not read it: give it the variables in its environment.
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
@@ -24,7 +24,7 @@
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
 
-# --- GPU thread shortcuts (on by default; =0 as before) ---
+# --- GPU thread shortcuts (on by default; =0 as before; added by NX2Perf) ---
 # =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,
 # FAST_PRIORITY_SCAN, DESC_XLAT.
 #EDEN_NX2_VERTEX_SKIP=0
@@ -43,7 +43,7 @@
 #EDEN_NX2_TC_EXPECTED_MIB=21322
 #EDEN_NX2_TC_CRITICAL_MIB=22346
 
-# --- experiments (off by default; NX2_NOTES.md) ---
+# --- experiments (off by default; NX2_NOTES.md; added by NX2Perf) ---
 #EDEN_NX2_PACE_GUEST_SLEEP=1
 #EDEN_NX2_PACE_GUEST_TAIL_US=1000
 # vi2 104 = GetHdrStatus, SDR reply (one line "104: 1 0 0" in a file works too)
@@ -231,6 +231,41 @@
 # DK_DYN_MIN_FPS=<1-60>: with DK_DYN, move the game's 40 fps floor (unset: 40; 30 measured
 # worse on our machine).
 #EDEN_NX2_DK_DYN_MIN_FPS=40
+
+# --- reactive flushing (video_core/nx2_reactive_flush.h, common/nx2_reactive.h) ---
+# All off by default. Most matter only with use_reactive_flushing=true in the config;
+# RX_RT_FIT, RX_MASKED_TARGETS, RX_ONE_SUBMIT and RX_COALESCE act without it too. None of
+# them was measured together with frame generation (README, "Reactive flushing").
+# RX_RT_FIT: a render target lookup takes the narrower image with the target's memory when
+# the guest's surface clip is exactly that image (Bananza's opening: one image instead of a
+# copy per draw). 1: a color feedback loop ends the render pass first (needs
+# barrier_feedback_loops=true in the config); 2 (diagnostic): no barrier. 0 off.
+#EDEN_NX2_RX_RT_FIT=1
+# FLUSH_FIRST_READ=1: a guest CPU read of a buffer page the GPU wrote flushes it once, at
+# that read (without it the first such read gets stale data).
+#EDEN_NX2_FLUSH_FIRST_READ=1
+# READ_LATCH_AGE=<frames>: what a guest CPU read latched (buffer pages copied back at
+# every fence, images downloaded at every bind) is dropped when not read again for that
+# many frames. 0 / unset: kept for good.
+#EDEN_NX2_READ_LATCH_AGE=60
+# RX_ONE_SUBMIT=1: no second, empty submission after a fence's own one.
+#EDEN_NX2_RX_ONE_SUBMIT=1
+# RX_COALESCE=<n>: a buffer copy back that alone would turn a fence real waits for a fence
+# made anyway, at most n - 1 fences (only without delayed fences). 0 / 1: off.
+#EDEN_NX2_RX_COALESCE=4
+# RX_PITCH_FORCED=1: with reactive flushing on, pitch linear images stay downloaded at every
+# bind (as with it off).
+#EDEN_NX2_RX_PITCH_FORCED=1
+# RX_MASKED_TARGETS=1: a draw marks only the render targets its masks let it write.
+# KNOWN DEFECT (a texture blit ignores the mask): do not turn it on.
+#EDEN_NX2_RX_MASKED_TARGETS=1
+# Diagnostics (they defeat reactive flushing; for tests only):
+# REACTIVE_STATS=1: counters and one "nx2 reactive:" log line about every 10 s.
+#EDEN_NX2_REACTIVE_STATS=1
+# RX_NO_COPYBACK=1: CPU reads note no buffer page (nothing copied back at fences).
+#EDEN_NX2_RX_NO_COPYBACK=1
+# RX_NO_RT_LATCH=1: CPU reads latch no image (images never downloaded for them).
+#EDEN_NX2_RX_NO_RT_LATCH=1
 
 # --- frame generation and on-screen display ---
 # FG_TIMED=1: FSR3 frame generation blends each generated frame for the time it is shown

@@ -20,6 +20,7 @@ rem ----------------------------------------------------------------------------
 if not "%~1"=="" set "GAME=%~1"
 if not defined GAME goto nogame
 if not exist "%~dp0eden-cli-nx2perf.exe" goto noexe
+if defined CONFIG if not exist "%CONFIG%" goto noconfig
 cd /d "%~dp0"
 rem Opt-in switches this launcher does not use: cleared.
 set EDEN_NX2_PRESENT_INTERVAL=
@@ -37,6 +38,22 @@ set EDEN_NX2_PACE_GUEST_SLEEP=
 set EDEN_NX2_PRESENT_RATE=
 set EDEN_NX2_PRESENT_DIAG=
 set EDEN_NX2_MODE_DIAG=
+set EDEN_NX2_MODE_DIAG_MAX=
+set EDEN_NX2_PACE_ONE=
+set EDEN_NX2_MEMBAR=
+set EDEN_NX2_BACK_CORE=
+set EDEN_NX2_FRONT_CORE=
+set EDEN_NX2_FG_DIAG=
+set EDEN_NX2_RX_RT_FIT=
+set EDEN_NX2_FLUSH_FIRST_READ=
+set EDEN_NX2_READ_LATCH_AGE=
+set EDEN_NX2_RX_ONE_SUBMIT=
+set EDEN_NX2_RX_COALESCE=
+set EDEN_NX2_RX_PITCH_FORCED=
+set EDEN_NX2_RX_MASKED_TARGETS=
+set EDEN_NX2_REACTIVE_STATS=
+set EDEN_NX2_RX_NO_COPYBACK=
+set EDEN_NX2_RX_NO_RT_LATCH=
 rem The recommended switches (README_NX2PERF.md, "Launchers").
 rem Split GPU thread: the back as stages (cut a), acquire peek, leaner front macro path.
 set EDEN_NX2_BACK_STAGES=1
@@ -57,14 +74,26 @@ rem Game FPS, display FPS and speed in RivaTuner Statistics Server's overlay (OS
 set EDEN_NX2_OSD=%OSD%
 if defined CONFIG goto withconfig
 "%~dp0eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
-goto end
+goto ran
 :withconfig
 "%~dp0eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+:ran
+rem Keep the window open when the emulator stopped with an error, so it can be read.
+if errorlevel 1 pause
 goto end
 :nogame
 echo.
 echo  No game given. Drag your game file onto this .bat, or write its path
 echo  in the GAME line at the top of it (right click, Edit).
+echo.
+pause
+exit /b 1
+:noconfig
+echo.
+echo  The CONFIG file in this .bat was not found:
+echo  "%CONFIG%"
+echo  eden-cli would make a new one with default settings. Fix the CONFIG line
+echo  (right click, Edit) or empty it.
 echo.
 pause
 exit /b 1
