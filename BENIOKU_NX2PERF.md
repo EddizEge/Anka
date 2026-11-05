@@ -49,41 +49,57 @@ Bu resmî olmayan, deneysel bir derlemedir ve hiçbir garantisi yoktur (`NOTICE_
 2.0.0'ın kayıtlarını kullanır (aşağıda): **ilk açılıştan önce kullanıcı klasöründeki `nand`
 klasörünü (kayıtlarınız) yedekleyin.**
 
-1. PokeDinner-Eglantine 2.0.0 klasörünü açın (`eglantine.exe` ve `eden-cli.exe`'nin olduğu).
-2. NX2Perf zip'inin içindekilerin hepsini oraya kopyalayın. Hiçbir dosyanın üstüne yazılmaz:
-   programın kendi adı var (`eden-cli-nx2perf.exe`), 2.0.0 eskisi gibi çalışmaya devam eder.
-3. NX2Perf, 2.0.0'ın `eden-cli.exe`'siyle aynı kullanıcı klasörünü kullanır (taşınabilir
-   kurulumda programın yanındaki `user\`, değilse `%APPDATA%\eden`): aynı anahtarlar, kayıtlar,
-   ayarlar. eden-cli ayarlarını oradaki `config\sdl2-config.ini`'de tutar (Qt programı
-   `eglantine.exe` `qt-config.ini`'yi kullanır; ikisi ayrıdır). Bu dosya yoksa programı bir kez
-   açıp kapatın.
-4. Reaktif boşaltma: başlatıcılar bunu ayarlayamaz, `sdl2-config.ini` ayarlar ve programın
-   varsayılanı açıktır. `start-recommended.bat` (ölçülen kurulum) için **kapatın**: `[Renderer]`
-   altına `use_reactive_flushing\default=false` ve `use_reactive_flushing=false` ekleyin (bkz.
-   "Reaktif boşaltma"). `start-reactive-experimental.bat` ise **açık** içindir (varsayılan ya da
-   `=true`). Varsayılan açık bırakılırsa `start-recommended.bat` reaktif boşaltmayı `RX_RT_FIT`'siz
-   çalıştırır: oyunun açılışında ölçtüğümüz en yavaş kurulum. İki başlatıcıyı birden kullanmak
-   için ini'yi kopyalayın, kopyada `=true` yapın ve tam yolunu reaktif başlatıcının `CONFIG=`
-   satırına yazın (bkz. "Reaktif boşaltma").
+1. NX2Perf `-win64.zip`'ini PokeDinner-Eglantine 2.0.0 klasörüne, `eglantine.exe`'nin yanına
+   açın. Hiçbir dosyanın üstüne yazılmaz: programın kendi adı var (`eden-cli-nx2perf.exe`),
+   2.0.0 eskisi gibi çalışmaya devam eder.
+2. Oyun dosyanızı (`.nsp`, `.xci`, `.nsz` ya da `.xcz`) yeni `Games` klasörüne koyun (alt
+   klasörde de olabilir) ya da başlatıcının üstüne sürükleyin.
+3. `start-recommended.bat`'a çift tıklayın.
 
-Kaldırmak için zip'in eklediği dosyaları silin. Yeni programın kurduğu gölgelendirici önbellekleri
-kullanıcı klasöründe kalır; durmalarında sakınca yok.
+**İlk açılışta** başlatıcı ayarları hazırlar. NX2Perf, 2.0.0 ile aynı kullanıcı klasörünü
+kullanır (taşınabilir kurulumda programın yanındaki `user\`, değilse `%APPDATA%\eden`): aynı
+anahtarlar, firmware ve kayıtlar. eden-cli ayarlarını oradaki `config\sdl2-config.ini`'de tutar;
+Qt programının `qt-config.ini`'sinden ayrıdır. `sdl2-config.ini` henüz yoksa başlatıcı onu
+`qt-config.ini`'nin kopyası olarak oluşturur; böylece `eglantine.exe`'de ayarladığınız kumanda ve
+ayarlar gelir. Kopyada reaktif boşaltmayı da kapatır (ölçülen kurulum, bkz. "Reaktif boşaltma").
+Var olan bir `sdl2-config.ini`'yi de, `qt-config.ini`'yi de asla değiştirmez. Düzenlemeyi
+başlatıcıların yanındaki `nx2perf-config.ps1` yapar: küçük, okunur bir PowerShell betiği; o yoksa
+başlatıcılar bu adımı atlayıp oyunu açar. İki dosya da yoksa başlatıcı bir iletiyle durur:
+`eglantine.exe`'yi bir kez açıp kumandanızı orada ayarlayın, sonra başlatıcıyı yeniden açın.
+`Games`'te birden çok oyun varsa başlatıcı onları listeler ve numara sorar.
+
+Oyun tam ekran açılır; eden-cli'nin menüsü yoktur. **Alt+F4 ile çıkın.**
+
+Kaldırmak için zip'in eklediği dosyaları silin (`eden-cli-nx2perf.exe`, üç `start-*.bat`,
+`nx2perf-config.ps1`, `*_NX2PERF.*` dosyaları, `LICENSES\`, `Games\PUT-YOUR-GAMES-HERE.txt`).
+**`Games`'te kendi oyun dosyalarınız durur:** klasörü silmeden önce onları taşıyın. Başlatıcıların
+ayar dosyaları (`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) ve yeni programın
+kurduğu gölgelendirici önbellekleri kullanıcı klasöründe kalır; durmalarında sakınca yok.
 
 ## Başlatıcılar
 
-Oyun dosyanızı bir başlatıcının üstüne sürükleyin ya da `.bat`'ı metin düzenleyicide açıp yolu
-`GAME=` satırına yazın. Her başlatıcının başında değiştirilmek için konmuş satırlar var:
+| Başlatıcı | Ne zaman |
+|---|---|
+| `start-recommended.bat` | **Önerilen.** Ölçtüğümüz en hızlı ayarlar (Donkey Kong Bananza). |
+| `start-reactive-experimental.bat` | **Deneysel.** Reaktif boşaltma açık: bizim makinede oyunun açılışında yaklaşık %7 yavaş, geniş alanlarda yaklaşık %15 hızlı. Görüntü hatası görürseniz önerilene dönün. |
+| `start-safe.bat` | Bu çatalın eklediği bütün anahtarlar kapalı, 2.0.0'a en yakın: sorun ararken ve Bananza dışındaki oyunlar için. |
+
+Başlatıcı şu sırayla açar: üstüne sürüklenen oyun dosyası, `GAME=` satırı, ya da yanındaki
+`Games` klasöründeki oyun (birden çoksa hangisi olduğunu sorar). Bir satırı değiştirmek için
+`.bat`'ı metin düzenleyicide açın (sağ tık, Düzenle). Her başlatıcının başında değiştirilmek için
+konmuş satırlar var:
 
 | Satır | Anlamı |
 |---|---|
-| `GAME=` | açılacak oyun (sürüklenen dosya önceliklidir) |
-| `CONFIG=` | bu başlatıcı için başka bir `sdl2-config` .ini; boş = eden-cli'nin kendi ayarı |
+| `GAME=` | açılacak oyun (sürüklenen dosya önceliklidir; bu satır `Games`'ten önce gelir) |
+| `CONFIG=` | bu başlatıcı için başka bir `sdl2-config` .ini; boş = kendiliğinden (Kurulum; reaktif başlatıcı `sdl2-config-reactive.ini`'yi kullanır) |
 | `FULLSCREEN=-f` | tam ekran; boş = pencere |
 | `DK_DYN=1` | Bananza dinamik kare hızı yaması (aşağıda); `0` = kapalı |
 | `OSD=1` | RTSS ile FPS / hız göstergesi; `0` = kapalı |
 
 (`DK_DYN=` ve `OSD=` yalnız önerilen ve reaktif başlatıcılarda var.) Oyunun yolunda `&`, `^`, `,`,
-`;` ya da `=` varsa dosyayı sürüklemeyin, yolu `GAME=` satırına yazın. `CONFIG=` satırındaki dosya
+`;` ya da `=` olup boşluk yoksa Windows sürüklenen dosyayı bozuk iletir: oyunu `Games`'e koyun ya
+da yolu `GAME=` satırına yazın. `CONFIG=` satırındaki dosya
 yoksa başlatıcı bir iletiyle durur (eden-cli sessizce varsayılan ayarlarla yeni bir dosya
 yazardı); emülatör hatayla kapanırsa pencere açık kalır. Başlatıcıları yayın zip'inden alın:
 Windows satır sonları (CRLF) gerekir.
@@ -95,8 +111,9 @@ Windows satır sonları (CRLF) gerekir.
   (`DK_DYN=1`; yama uygulanınca yukarıdaki iki hız satırı devre dışı kalır: `DK_DYN=0` iken ya
   da yama uygulanmazsa etkilidirler); zamanlı FSR3 ara kareleri (`FG_TIMED=1`, yalnız kare üretme açıkken etkili); RTSS
   göstergesi (`OSD=1`). Bananza'ya özel satırlar işaretli; başka oyunlar için güvenli başlatıcıyı
-  kullanın ya da o satırları silin. `sdl2-config.ini`'de reaktif boşaltmanın **kapalı** olmasını
-  bekler (Kurulum, 4. adım).
+  kullanın ya da o satırları silin. Reaktif boşaltma **kapalıyken** ölçüldü: oluşturduğu
+  `sdl2-config.ini`'de onu kapatır, var olan dosyada açıksa yalnız bir not yazar ("Reaktif
+  boşaltma").
 - **`start-safe.bat`** (güvenli): bu çatalın eklediği bütün anahtarlar kapalı (varsayılanı açık
   kısayollar `0`, oyunu etkileyen isteğe bağlı olanlar boş; `AUTO_INPUT_FILE`, `VI2_REPLY` gibi
   birkaç tanı anahtarı boşaltılmaz: bunları sistem ortamınızda tanımlamayın). Programın 2.0.0'a en yakın hâli; bir sorunun yeni
@@ -107,8 +124,10 @@ Windows satır sonları (CRLF) gerekir.
   hedefi için çizim başına bir kopya yerine tek görüntü). Bizim makinede açılışı geniş alanlara
   değişir: reaktif kapalı aynı derlemeye göre oyunun açılışında FPS −%7, geniş alanda +%15. Henüz
   denenmedi: kare üretmeyle birlikte çalışması ve `RX_RT_FIT=3`'ün görüntüsü. Reaktif boşaltma bir
-  anahtar değil, bir ayardır: `sdl2-config.ini`'de açık olmalı (programın varsayılanı; aşağıda
-  "Reaktif boşaltma"). Kapalıyken de `RX_RT_FIT=3` etkilidir; bu bileşim ölçülmedi.
+  anahtar değil, bir ayardır: `CONFIG=` boşken bu başlatıcı `config\sdl2-config-reactive.ini`'yi
+  kullanır; onu bir kez, `sdl2-config.ini`'nin reaktif boşaltma ve `barrier_feedback_loops` açık
+  kopyası olarak oluşturur (aşağıda "Reaktif boşaltma"). Reaktif boşaltması kapalı bir `CONFIG=`
+  dosyasıyla da `RX_RT_FIT=3` etkilidir; bu bileşim ölçülmedi.
 
 eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur. `nx2_switches_NX2PERF.txt` her
 anahtarı varsayılanı ve ne yaptığıyla listeler. (2.0.0'ın kendi `nx2_switches.txt`'sini yalnız Qt
@@ -189,9 +208,13 @@ use_reactive_flushing=false
 ```
 
 bizim önerilen kurulumumuza karşılık gelir; `=true` (ya da bu satırların hiç olmaması) reaktif
-boşaltma açık demektir, `start-reactive-experimental.bat` bunun içindir. İkisini birden tutmak için
-.ini'yi kopyalayın (ör. aynı klasöre `sdl2-config-reactive.ini`), kopyayı değiştirin ve tam yolunu
-bir başlatıcının `CONFIG=` satırına yazın.
+boşaltma açık demektir. Bunu başlatıcılar halleder. `start-recommended.bat` ilk açılışta
+oluşturduğu `sdl2-config.ini`'ye bu iki satırı yazar; var olan dosyayı asla değiştirmez, orada
+reaktif boşaltma açıksa yalnız bir not yazar (ölçülen kurulum için iki satırı program kapalıyken
+elle değiştirin). `start-reactive-experimental.bat` kendi kopyasını kullanır:
+`config\sdl2-config-reactive.ini`, bir kez `sdl2-config.ini`'den `use_reactive_flushing=true` ve
+`barrier_feedback_loops=true` ile oluşturulur. Sonradan iki dosyadan birinde değiştirilen ayar
+ötekine geçmez: `sdl2-config-reactive.ini`'yi silerseniz reaktif başlatıcı onu yeniden oluşturur.
 
 Bu sürüm reaktif boşaltma için anahtarlar ekler (hepsi varsayılan kapalı;
 `nx2_switches_NX2PERF.txt`, "reactive flushing"). `RX_RT_FIT` açılışta bulunan bedeli hedefler:
@@ -252,13 +275,16 @@ değildir.
 
 - **Yalnız komut satırı programı.** Qt programı (`eglantine.exe`) bu sürümde yok: derleme ve PGO
   profili `eden-cli` içindir. Menüleri için 2.0.0'ın `eglantine.exe`'sini kullanmayı sürdürün;
-  orada değiştirilen ayarlar eden-cli'ye geçmez (`qt-config.ini` ile `sdl2-config.ini` ayrı).
+  başlatıcılar onun `qt-config.ini`'sini ilk açılışta bir kez kopyalar; orada sonradan değiştirilen
+  ayarlar eden-cli'ye (`sdl2-config.ini`) geçmez. Yeniden kopyalatmak için `sdl2-config.ini`'nin
+  (ve `sdl2-config-reactive.ini`'nin) adını değiştirip bir başlatıcıyı açın.
 - **Parlak kenarlı siyah bloklar** bazı yerlerde görünüyor. Kare üretmeli bir oturumda ve ondan
   önce kare üretmesiz görüldüler; olası neden kare üretme değil, bu oyunun daha eski bir çizim
   sorunu (upstream için de bildirildi), ama kesinleşmedi. Görürseniz dünyada yerinde kalıp
   kalmadığına bakın, kare üretmesiz ve `start-safe.bat` ile deneyin, nerede olduğunu bildirin.
-- **Reaktif boşaltma** (varsayılan açık) oyunun açılışında FPS'e mal oluyor (yukarıda); yeni
-  anahtarları kare üretmeyle ölçülmedi.
+- **Reaktif boşaltma** (programın varsayılanı; önerilen başlatıcı onu yalnız kendi oluşturduğu
+  `sdl2-config.ini`'de kapatır) oyunun açılışında FPS'e mal oluyor (yukarıda); yeni anahtarları
+  kare üretmeyle ölçülmedi.
 - **AMD ve Intel ekran kartları denenmedi**; başka oyunlar da. Bananza anahtarları
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) yalnız Bananza içindir.
 - Gösterge RTSS'nin paylaşımlı belleğine yazar; program zorla kapatılırsa (Görev Yöneticisi)

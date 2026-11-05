@@ -98,10 +98,13 @@ functionally the same either way.
 ## Release package
 
 The release zips were made by a packaging script outside this tree. The program zip holds the
-program, the launchers from `dist/nx2perf/`, the README / BENIOKU / CHANGELOG / BUILDING files,
+program, the launchers from `dist/nx2perf/` with `nx2perf-config.ps1` (the small PowerShell script
+they call with `-File` to prepare the `.ini` files on the first start), an empty `Games` folder
+with its note (`dist/nx2perf/Games/PUT-YOUR-GAMES-HERE.txt`), the README / BENIOKU / CHANGELOG / BUILDING files,
 `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_NX2PERF.txt` (the license texts and notices of
 the third-party components), a NOTICE file, `VERSION_NX2PERF.txt` and `dist/nx2_switches.txt`
-(renamed so that it does not replace 2.0.0's own); the `-pdb.zip` holds the program's debug symbols. The `-source.zip` is `git archive` of the same commit plus
+(renamed so that it does not replace 2.0.0's own); no name in it is one of 2.0.0's files. The
+`-pdb.zip` holds the program's debug symbols. The `-source.zip` is `git archive` of the same commit plus
 `GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),
 `SOURCE_NX2PERF.txt`, the NOTICE file and the third-party notices; the `-deps-source.zip` holds the
 third-party sources CPM fetched (not the prebuilt packages), the `-prebuilt-source.zip` the

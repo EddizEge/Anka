@@ -1,21 +1,27 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
 rem NX2Perf - REACTIVE (EXPERIMENTAL): recommended + reactive flushing + RX_RT_FIT=3.
 rem NX2Perf launcher for eden-cli-nx2perf.exe (command line / SDL front end of PokeDinner-Eglantine).
 rem Put this file next to eden-cli-nx2perf.exe, in your PokeDinner-Eglantine 2.0.0 folder.
-rem Start: drag your game file onto this .bat, or write its path in GAME below.
+rem Start: put your game (.nsp .xci .nsz .xcz) in the Games folder next to this file and double-click
+rem this file; or drag a game file onto it; or write the game's path in GAME below.
+rem First start: when the user folder has no config\sdl2-config.ini yet, it is made as a copy of
+rem config\qt-config.ini (the menu program's controller and settings). An existing sdl2-config.ini is
+rem never changed. The .ini edits are made by nx2perf-config.ps1 next to this file (a small,
+rem readable PowerShell script). Quit the game with Alt+F4.
 rem The second choice next to start-recommended.bat. Reactive flushing copies GPU-written data
 rem back to the game. On our PC (5 Nov, DK_DYN on, frame generation off) it traded the opening
 rem for open areas: with RX_RT_FIT=3, -7 percent FPS at the game's opening and +15 percent in
 rem the open area against the same build with it off. Not checked yet: together with frame
 rem generation, and the image with RX_RT_FIT=3 (README, "Reactive flushing"). If you see wrong
 rem images, set RX_RT_FIT=1 below or use start-recommended.bat. Reactive flushing is a config
-rem setting, not a switch: make a copy of your sdl2-config.ini with use_reactive_flushing=true
-rem and barrier_feedback_loops=true, and put its path in CONFIG below.
+rem setting, not a switch: with CONFIG empty this launcher uses config\sdl2-config-reactive.ini,
+rem made once as a copy of sdl2-config.ini with use_reactive_flushing=true and
+rem barrier_feedback_loops=true.
 rem ---- your settings -------------------------------------------------------------------
-rem GAME: the game to start (a drag-and-drop file wins over this line).
+rem GAME: the game to start (a drag-and-drop file wins over this line, this line over Games).
 set "GAME="
-rem CONFIG: a separate sdl2-config .ini to use; empty = eden-cli's own config (README).
+rem CONFIG: a separate sdl2-config .ini to use; empty = automatic (above, README).
 set "CONFIG="
 rem FULLSCREEN: -f starts in full screen; empty = window.
 set "FULLSCREEN=-f"
@@ -24,11 +30,24 @@ set "DK_DYN=1"
 rem OSD: 1 = FPS / speed overlay through RivaTuner Statistics Server (if running).
 set "OSD=1"
 rem ---------------------------------------------------------------------------------------
-if not "%~1"=="" set "GAME=%~1"
-if not defined GAME goto nogame
-if not exist "%~dp0eden-cli-nx2perf.exe" goto noexe
-if defined CONFIG if not exist "%CONFIG%" goto noconfig
-cd /d "%~dp0"
+set "HERE=%~dp0"
+if not exist "%HERE%eden-cli-nx2perf.exe" goto noexe
+if not "%~1"=="" set "GAME=%~f1"
+cd /d "%HERE%"
+if defined GAME goto havegame
+call :findgames
+if "%NGAMES%"=="0" goto nogame
+if "%NGAMES%"=="1" goto havegame
+goto choose
+:havegame
+if not exist "%GAME%" goto gamemissing
+if defined CONFIG goto userconfig
+call :prepconfig
+if errorlevel 1 exit /b 1
+goto configdone
+:userconfig
+if not exist "%CONFIG%" goto noconfig
+:configdone
 rem Opt-in switches this launcher does not use: cleared.
 set EDEN_NX2_PRESENT_INTERVAL=
 set EDEN_NX2_MODE_GOV=
@@ -80,23 +99,33 @@ set EDEN_NX2_FG_TIMED=1
 rem Game FPS, display FPS and speed in RivaTuner Statistics Server's overlay (OSD above).
 set EDEN_NX2_OSD=%OSD%
 rem Reactive flushing: Bananza's opening renders into one image instead of a copy per draw
-rem (needs barrier_feedback_loops=true in the CONFIG file); 3 keeps the render pass going with a
+rem (needs barrier_feedback_loops=true in the config); 3 keeps the render pass going with a
 rem barrier inside it, 1 ends it (slower). Do not add RX_MASKED_TARGETS (known defect) or
 rem RX_COALESCE_LOOSE (diagnostic only).
 set EDEN_NX2_RX_RT_FIT=3
 if defined CONFIG goto withconfig
-"%~dp0eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
+"%HERE%eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
 goto ran
 :withconfig
-"%~dp0eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+"%HERE%eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
 :ran
-rem Keep the window open when the emulator stopped with an error, so it can be read.
-if errorlevel 1 pause
+rem Keep the window open when the emulator stopped with an error (any non-zero code, a crash's
+rem is negative), so it can be read.
+if not "%errorlevel%"=="0" pause
 goto end
 :nogame
 echo.
-echo  No game given. Drag your game file onto this .bat, or write its path
-echo  in the GAME line at the top of it (right click, Edit).
+echo  No game found. Put your game file (.nsp .xci .nsz .xcz) in the Games folder next to
+echo  this file, or drag it onto this .bat.
+echo  Oyun bulunamadi. Oyun dosyanizi bu dosyanin yanindaki Games klasorune koyun ya da
+echo  bu .bat'in ustune surukleyin.
+echo.
+pause
+exit /b 1
+:gamemissing
+echo.
+echo  The game file was not found / Oyun dosyasi bulunamadi:
+echo  "%GAME%"
 echo.
 pause
 exit /b 1
@@ -115,6 +144,120 @@ echo  eden-cli-nx2perf.exe is not next to this .bat. Put both in your
 echo  PokeDinner-Eglantine 2.0.0 folder (README_NX2PERF.md).
 echo.
 pause
+exit /b 1
+
+rem ---- the game list: the Games folder next to this file, subfolders too ----------------
+:findgames
+set "NGAMES=0"
+if not exist "%HERE%Games\" exit /b 0
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~fF"
+  call :addgame
+)
+exit /b 0
+:addgame
+set /a NGAMES+=1
+if "%NGAMES%"=="1" set "GAME=%F%"
+exit /b 0
+:choose
+echo.
+echo  Games in the Games folder / Games klasorundeki oyunlar:
+set "I=0"
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~nxF"
+  call :showgame
+)
+echo.
+:ask
+set "SEL="
+set /p "SEL= Number / Numara (1-%NGAMES%; Enter = quit / cikis): "
+if not defined SEL goto end
+set "SEL=%SEL:"=%"
+set "PICK="
+for /l %%I in (1,1,%NGAMES%) do if "%SEL%"=="%%I" set "PICK=%%I"
+if not defined PICK goto ask
+set "I=0"
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~fF"
+  call :pickgame
+)
+goto havegame
+:showgame
+set /a I+=1
+setlocal EnableDelayedExpansion
+echo   !I!. !F!
+endlocal
+exit /b 0
+:pickgame
+set /a I+=1
+if "%I%"=="%PICK%" set "GAME=%F%"
+exit /b 0
+
+rem ---- the config: the user folder as eden-cli finds it (user\ next to the program, else
+rem %APPDATA%\eden); an existing sdl2-config.ini is only read, never written ---------------
+:prepconfig
+if exist "%HERE%nx2perf-config.ps1" goto prepstart
+echo  [NX2Perf] nx2perf-config.ps1 is not next to this .bat: the settings step is skipped.
+echo  [NX2Perf] nx2perf-config.ps1 bu .bat'in yaninda yok: ayar adimi atlandi.
+exit /b 0
+:prepstart
+set "UDIR=%APPDATA%\eden"
+if exist "%HERE%user\" set "UDIR=%HERE%user"
+set "CDIR=%UDIR%\config"
+set "SDL=%CDIR%\sdl2-config.ini"
+set "FRESH="
+if exist "%SDL%" goto sdlready
+if not exist "%CDIR%\qt-config.ini" goto noini
+copy /y "%CDIR%\qt-config.ini" "%SDL%" >nul
+if errorlevel 1 goto noini
+set "FRESH=1"
+echo  [NX2Perf] config\sdl2-config.ini was made from qt-config.ini: the controller and settings of
+echo            the menu program (eglantine.exe) are used.
+echo  [NX2Perf] config\sdl2-config.ini, qt-config.ini'den olusturuldu: menulu programin
+echo            (eglantine.exe) kumanda ve ayarlari kullanilir.
+:sdlready
+if not defined FRESH goto rxcopy
+set "NX2_INI=%SDL%"
+set "NX2_SET=use_reactive_flushing\default=false|use_reactive_flushing=false"
+call :psset
+:rxcopy
+set "RXI=%CDIR%\sdl2-config-reactive.ini"
+if exist "%RXI%" goto rxuse
+copy /y "%SDL%" "%RXI%" >nul
+if errorlevel 1 goto rxfail
+set "NX2_INI=%RXI%"
+set "NX2_SET=use_reactive_flushing\default=false|use_reactive_flushing=true|barrier_feedback_loops\default=false|barrier_feedback_loops=true"
+call :psset
+if errorlevel 1 goto rxfail
+echo  [NX2Perf] config\sdl2-config-reactive.ini made (reactive flushing on) / olusturuldu (reaktif acik).
+:rxuse
+set "CONFIG=%RXI%"
+exit /b 0
+:rxfail
+rem the half-made copy is this launcher's own (it did not exist above): remove it, try again next time
+if exist "%RXI%" del /f /q "%RXI%" >nul 2>&1
+echo  [NX2Perf] config\sdl2-config-reactive.ini could not be made: this start uses sdl2-config.ini
+echo            as it is (reactive flushing as set there).
+echo  [NX2Perf] config\sdl2-config-reactive.ini olusturulamadi: bu acilis sdl2-config.ini ile.
+pause
+exit /b 0
+:noini
+echo.
+echo  [NX2Perf] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
+echo            "%CDIR%".
+echo            Start eglantine.exe once and set up your controller there, then start this again.
+echo  [NX2Perf] Henuz ayar yok: config\sdl2-config.ini de config\qt-config.ini de yok. eglantine.exe'yi
+echo            bir kez acip kumandanizi ayarlayin, sonra bunu yeniden baslatin.
+echo.
+pause
+exit /b 1
+:psset
+set "NX2_MODE=set"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%HERE%nx2perf-config.ps1"
+if errorlevel 1 goto psfail
+exit /b 0
+:psfail
+echo  [NX2Perf] Could not edit "%NX2_INI%" / duzenlenemedi.
 exit /b 1
 :end
 endlocal

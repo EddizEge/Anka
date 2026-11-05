@@ -192,3 +192,8 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 - `nx2_switches_NX2PERF.txt` (in the source `dist/nx2_switches.txt`): every switch with its default.
 - `README_NX2PERF.md` / `BENIOKU_NX2PERF.md`, this file, `BUILDING_NX2PERF.md`, the launchers in
   `dist/nx2perf/`.
+- Launchers: they find the game in the `Games` folder next to them (asking which one when there
+  are several), and on the first start make `config\sdl2-config.ini` as a copy of
+  `qt-config.ini` (the recommended one turns reactive flushing off in that copy; the reactive one
+  makes its own `sdl2-config-reactive.ini`). An existing `sdl2-config.ini` is never changed. The
+  edits are made by `nx2perf-config.ps1`, a small, readable PowerShell script next to them.

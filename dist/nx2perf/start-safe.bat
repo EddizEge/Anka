@@ -1,24 +1,42 @@
 @echo off
-setlocal
+setlocal DisableDelayedExpansion
 rem NX2Perf - SAFE: every switch this fork added turned off (as close to 2.0.0 as it gets).
 rem NX2Perf launcher for eden-cli-nx2perf.exe (command line / SDL front end of PokeDinner-Eglantine).
 rem Put this file next to eden-cli-nx2perf.exe, in your PokeDinner-Eglantine 2.0.0 folder.
-rem Start: drag your game file onto this .bat, or write its path in GAME below.
+rem Start: put your game (.nsp .xci .nsz .xcz) in the Games folder next to this file and double-click
+rem this file; or drag a game file onto it; or write the game's path in GAME below.
+rem First start: when the user folder has no config\sdl2-config.ini yet, it is made as a copy of
+rem config\qt-config.ini (the menu program's controller and settings). An existing sdl2-config.ini is
+rem never changed. The .ini edits are made by nx2perf-config.ps1 next to this file (a small,
+rem readable PowerShell script). Quit the game with Alt+F4.
 rem Use it to tell whether a problem comes from the new switches. Changes that have no
 rem switch stay in (CHANGELOG_NX2PERF.md).
 rem ---- your settings -------------------------------------------------------------------
-rem GAME: the game to start (a drag-and-drop file wins over this line).
+rem GAME: the game to start (a drag-and-drop file wins over this line, this line over Games).
 set "GAME="
-rem CONFIG: a separate sdl2-config .ini to use; empty = eden-cli's own config (README).
+rem CONFIG: a separate sdl2-config .ini to use; empty = automatic (above, README).
 set "CONFIG="
 rem FULLSCREEN: -f starts in full screen; empty = window.
 set "FULLSCREEN=-f"
 rem ---------------------------------------------------------------------------------------
-if not "%~1"=="" set "GAME=%~1"
-if not defined GAME goto nogame
-if not exist "%~dp0eden-cli-nx2perf.exe" goto noexe
-if defined CONFIG if not exist "%CONFIG%" goto noconfig
-cd /d "%~dp0"
+set "HERE=%~dp0"
+if not exist "%HERE%eden-cli-nx2perf.exe" goto noexe
+if not "%~1"=="" set "GAME=%~f1"
+cd /d "%HERE%"
+if defined GAME goto havegame
+call :findgames
+if "%NGAMES%"=="0" goto nogame
+if "%NGAMES%"=="1" goto havegame
+goto choose
+:havegame
+if not exist "%GAME%" goto gamemissing
+if defined CONFIG goto userconfig
+call :prepconfig
+if errorlevel 1 exit /b 1
+goto configdone
+:userconfig
+if not exist "%CONFIG%" goto noconfig
+:configdone
 rem Opt-in switches: cleared (off).
 set EDEN_NX2_BACK_STAGES=
 set EDEN_NX2_BACK_CUTS=
@@ -126,18 +144,28 @@ set EDEN_NX2_UPSCALE_SCAN=0
 set EDEN_NX2_UPSCALE_LEARN=0
 set EDEN_NX2_UPSCALE_HEADER=0
 if defined CONFIG goto withconfig
-"%~dp0eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
+"%HERE%eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
 goto ran
 :withconfig
-"%~dp0eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+"%HERE%eden-cli-nx2perf.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
 :ran
-rem Keep the window open when the emulator stopped with an error, so it can be read.
-if errorlevel 1 pause
+rem Keep the window open when the emulator stopped with an error (any non-zero code, a crash's
+rem is negative), so it can be read.
+if not "%errorlevel%"=="0" pause
 goto end
 :nogame
 echo.
-echo  No game given. Drag your game file onto this .bat, or write its path
-echo  in the GAME line at the top of it (right click, Edit).
+echo  No game found. Put your game file (.nsp .xci .nsz .xcz) in the Games folder next to
+echo  this file, or drag it onto this .bat.
+echo  Oyun bulunamadi. Oyun dosyanizi bu dosyanin yanindaki Games klasorune koyun ya da
+echo  bu .bat'in ustune surukleyin.
+echo.
+pause
+exit /b 1
+:gamemissing
+echo.
+echo  The game file was not found / Oyun dosyasi bulunamadi:
+echo  "%GAME%"
 echo.
 pause
 exit /b 1
@@ -156,6 +184,91 @@ echo  eden-cli-nx2perf.exe is not next to this .bat. Put both in your
 echo  PokeDinner-Eglantine 2.0.0 folder (README_NX2PERF.md).
 echo.
 pause
+exit /b 1
+
+rem ---- the game list: the Games folder next to this file, subfolders too ----------------
+:findgames
+set "NGAMES=0"
+if not exist "%HERE%Games\" exit /b 0
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~fF"
+  call :addgame
+)
+exit /b 0
+:addgame
+set /a NGAMES+=1
+if "%NGAMES%"=="1" set "GAME=%F%"
+exit /b 0
+:choose
+echo.
+echo  Games in the Games folder / Games klasorundeki oyunlar:
+set "I=0"
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~nxF"
+  call :showgame
+)
+echo.
+:ask
+set "SEL="
+set /p "SEL= Number / Numara (1-%NGAMES%; Enter = quit / cikis): "
+if not defined SEL goto end
+set "SEL=%SEL:"=%"
+set "PICK="
+for /l %%I in (1,1,%NGAMES%) do if "%SEL%"=="%%I" set "PICK=%%I"
+if not defined PICK goto ask
+set "I=0"
+for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
+  set "F=%%~fF"
+  call :pickgame
+)
+goto havegame
+:showgame
+set /a I+=1
+setlocal EnableDelayedExpansion
+echo   !I!. !F!
+endlocal
+exit /b 0
+:pickgame
+set /a I+=1
+if "%I%"=="%PICK%" set "GAME=%F%"
+exit /b 0
+
+rem ---- the config: the user folder as eden-cli finds it (user\ next to the program, else
+rem %APPDATA%\eden); an existing sdl2-config.ini is only read, never written ---------------
+:prepconfig
+set "UDIR=%APPDATA%\eden"
+if exist "%HERE%user\" set "UDIR=%HERE%user"
+set "CDIR=%UDIR%\config"
+set "SDL=%CDIR%\sdl2-config.ini"
+set "FRESH="
+if exist "%SDL%" goto sdlready
+if not exist "%CDIR%\qt-config.ini" goto noini
+copy /y "%CDIR%\qt-config.ini" "%SDL%" >nul
+if errorlevel 1 goto noini
+set "FRESH=1"
+echo  [NX2Perf] config\sdl2-config.ini was made from qt-config.ini: the controller and settings of
+echo            the menu program (eglantine.exe) are used.
+echo  [NX2Perf] config\sdl2-config.ini, qt-config.ini'den olusturuldu: menulu programin
+echo            (eglantine.exe) kumanda ve ayarlari kullanilir.
+:sdlready
+exit /b 0
+:noini
+echo.
+echo  [NX2Perf] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
+echo            "%CDIR%".
+echo            Start eglantine.exe once and set up your controller there, then start this again.
+echo  [NX2Perf] Henuz ayar yok: config\sdl2-config.ini de config\qt-config.ini de yok. eglantine.exe'yi
+echo            bir kez acip kumandanizi ayarlayin, sonra bunu yeniden baslatin.
+echo.
+pause
+exit /b 1
+:psset
+set "NX2_MODE=set"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%HERE%nx2perf-config.ps1"
+if errorlevel 1 goto psfail
+exit /b 0
+:psfail
+echo  [NX2Perf] Could not edit "%NX2_INI%" / duzenlenemedi.
 exit /b 1
 :end
 endlocal

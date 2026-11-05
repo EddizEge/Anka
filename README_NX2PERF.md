@@ -50,42 +50,58 @@ This is an unofficial, experimental build with no warranty (`NOTICE_NX2PERF.txt`
 2.0.0 saves (below): **back up the user folder's `nand` folder (your saves) before the first
 start.**
 
-1. Open the folder of your PokeDinner-Eglantine 2.0.0 (the one with `eglantine.exe` and
-   `eden-cli.exe`).
-2. Copy everything from the NX2Perf zip into it. Nothing is overwritten: the program has its
-   own name (`eden-cli-nx2perf.exe`) and 2.0.0 keeps working as before.
-3. NX2Perf uses the same user folder as 2.0.0's `eden-cli.exe` (`user\` next to the program
-   in a portable setup, otherwise `%APPDATA%\eden`): same keys, saves and settings.
-   eden-cli keeps its settings in `config\sdl2-config.ini` there (the Qt program
-   `eglantine.exe` uses `qt-config.ini`; the two are separate). Run the program once and close
-   it if that file does not exist yet.
-4. Reactive flushing: the launchers cannot set it, `sdl2-config.ini` does, and the program's
-   default is on. For `start-recommended.bat` (the measured setup) turn it **off**: add
-   `use_reactive_flushing\default=false` and `use_reactive_flushing=false` under `[Renderer]`
-   (see "Reactive flushing"). `start-reactive-experimental.bat` is meant for it **on** (the
-   default, or `=true`). With the default left on, `start-recommended.bat` runs reactive
-   flushing without `RX_RT_FIT`, the slowest setup we measured at the game's opening. To use
-   both launchers, copy the .ini, set the copy to `=true` and write its full path in the reactive
-   launcher's `CONFIG=` line (see "Reactive flushing").
+1. Unzip the NX2Perf `-win64.zip` into your PokeDinner-Eglantine 2.0.0 folder, next to
+   `eglantine.exe`. Nothing is overwritten: the program has its own name
+   (`eden-cli-nx2perf.exe`) and 2.0.0 keeps working as before.
+2. Put your game file (`.nsp`, `.xci`, `.nsz` or `.xcz`) in the new `Games` folder (subfolders
+   are fine), or drag it onto the launcher instead.
+3. Double-click `start-recommended.bat`.
 
-To uninstall, delete the files the zip added. Shader caches the new program built stay in the
-user folder; they are safe to keep.
+**On the first start** the launcher prepares the settings. NX2Perf uses the same user folder as
+2.0.0 (`user\` next to the program in a portable setup, otherwise `%APPDATA%\eden`): the same
+keys, firmware and saves. eden-cli keeps its settings in `config\sdl2-config.ini` there, apart
+from the Qt program's `qt-config.ini`. When `sdl2-config.ini` does not exist yet, the launcher
+makes it as a copy of `qt-config.ini`, so the controller and settings you set up in
+`eglantine.exe` come along, and turns reactive flushing off in the copy (the measured setup, see
+"Reactive flushing"). It never changes an existing `sdl2-config.ini`, nor `qt-config.ini`. The
+editing is done by `nx2perf-config.ps1` next to the launchers, a small, readable PowerShell
+script; without it the launchers skip this step and start the game. If neither file exists, the
+launcher stops with a message: start `eglantine.exe` once and set up your controller there, then
+start the launcher again. With more than one game in `Games`, the launcher lists them and asks
+for a number.
+
+The game starts in full screen; eden-cli has no menu. **Quit with Alt+F4.**
+
+To uninstall, delete the files the zip added (`eden-cli-nx2perf.exe`, the three `start-*.bat`,
+`nx2perf-config.ps1`, the `*_NX2PERF.*` files, `LICENSES\`, `Games\PUT-YOUR-GAMES-HERE.txt`).
+**`Games` holds your own game files:** move them before you delete that folder. The launchers'
+settings files (`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) and the shader caches
+the new program built stay in the user folder; they are safe to keep.
 
 ## Launchers
 
-Drag your game file onto a launcher, or open the `.bat` in a text editor and write the path in
-the `GAME=` line. The top of each launcher has the lines meant to be changed:
+| Launcher | When to use it |
+|---|---|
+| `start-recommended.bat` | **Recommended.** The fastest settings we measured (Donkey Kong Bananza). |
+| `start-reactive-experimental.bat` | **Experimental.** Reactive flushing on: on our machine about 7% slower at the game's opening and about 15% faster in open areas. If you see image errors, go back to the recommended one. |
+| `start-safe.bat` | Every switch this fork added off, the closest to 2.0.0: for troubleshooting and for games other than Bananza. |
+
+A launcher starts, in this order: a game file dragged onto it, the `GAME=` line, or the game in
+the `Games` folder next to it (with several, it asks which one). To change a line, open the
+`.bat` in a text editor (right click, Edit). The top of each launcher has the lines meant to be
+changed:
 
 | Line | Meaning |
 |---|---|
-| `GAME=` | the game to start (a dragged file wins) |
-| `CONFIG=` | another `sdl2-config` .ini for this launcher; empty = eden-cli's own |
+| `GAME=` | the game to start (a dragged file wins; this line wins over `Games`) |
+| `CONFIG=` | another `sdl2-config` .ini for this launcher; empty = automatic (Install; the reactive launcher uses `sdl2-config-reactive.ini`) |
 | `FULLSCREEN=-f` | full screen; empty = window |
 | `DK_DYN=1` | Bananza dynamic frame rate patch (below); `0` = off |
 | `OSD=1` | FPS / speed display through RTSS; `0` = off |
 
 (`DK_DYN=` and `OSD=` are in the recommended and reactive launchers only.) If the path of your
-game contains `&`, `^`, `,`, `;` or `=`, write it in the `GAME=` line instead of dragging the file.
+game contains `&`, `^`, `,`, `;` or `=` but no space, Windows passes a dragged file badly: put
+the game in `Games` or write it in the `GAME=` line instead.
 A launcher stops with a message when its `CONFIG=` file does not exist (eden-cli would quietly
 make a new one with default settings), and keeps its window open when the emulator exits with an
 error. Take the launchers from the release zip: they need Windows line endings (CRLF).
@@ -97,8 +113,9 @@ error. Take the launchers from the release zip: they need Windows line endings (
   frame rate patch (`DK_DYN=1`; while it is applied, the two pacing lines above are set aside:
   they act with `DK_DYN=0` or when the patch does not apply); timed FSR3 generated frames (`FG_TIMED=1`, only does something
   with frame generation on); the RTSS display (`OSD=1`). The Bananza-specific lines are marked;
-  for other games use the safe launcher, or remove them. It expects reactive flushing **off**
-  in `sdl2-config.ini` (Install, step 4).
+  for other games use the safe launcher, or remove them. It was measured with reactive flushing
+  **off**: it turns it off in an `sdl2-config.ini` it makes, and only prints a note when an
+  existing one has it on ("Reactive flushing").
 - **`start-safe.bat`** - every switch this fork added turned off (the shortcuts that are on by
   default set to `0`, the opt-in ones that change play cleared; a few diagnostic ones, such as
   `AUTO_INPUT_FILE` or `VI2_REPLY`, are not cleared: do not set them in your system environment). This is as close to 2.0.0 as the program gets;
@@ -109,9 +126,11 @@ error. Take the launchers from the release zip: they need Windows line endings (
   image for Bananza's opening render target instead of a copy per draw). On our machine it trades
   the opening for open areas: -7% FPS at the game's opening, +15% in the open area, against the
   same build with reactive flushing off. Not checked yet: together with frame generation, and the
-  image with `RX_RT_FIT=3`. Reactive flushing is a config setting, not a switch: it must be on
-  in `sdl2-config.ini` (the program's default; see "Reactive flushing" below). With it off,
-  `RX_RT_FIT=3` still acts, a combination that was not measured.
+  image with `RX_RT_FIT=3`. Reactive flushing is a config setting, not a switch: with `CONFIG=`
+  empty this launcher uses `config\sdl2-config-reactive.ini`, which it makes once as a copy of
+  `sdl2-config.ini` with reactive flushing and `barrier_feedback_loops` on ("Reactive flushing"
+  below). With a `CONFIG=` file that has reactive flushing off, `RX_RT_FIT=3` still acts, a
+  combination that was not measured.
 
 eden-cli reads the switches only from its environment (the launchers).
 `nx2_switches_NX2PERF.txt` lists every switch with its default and what it does. (2.0.0's own
@@ -191,10 +210,15 @@ use_reactive_flushing\default=false
 use_reactive_flushing=false
 ```
 
-matches our recommended setup; `=true` (or no such lines) is reactive flushing on, the setting
-`start-reactive-experimental.bat` is meant for. To keep both, copy the .ini (for example to
-`sdl2-config-reactive.ini` in the same folder), change the copy, and write the copy's full path
-in a launcher's `CONFIG=` line.
+matches our recommended setup; `=true` (or no such lines) is reactive flushing on. The
+launchers take care of it. `start-recommended.bat` writes these two lines into the
+`sdl2-config.ini` it makes on the first start; it never changes an existing one, it only prints
+a note when reactive flushing is on there (change the two lines by hand, with the program
+closed, for the measured setup). `start-reactive-experimental.bat` uses its own copy,
+`config\sdl2-config-reactive.ini`, made once from `sdl2-config.ini` with
+`use_reactive_flushing=true` and `barrier_feedback_loops=true`. A setting changed later in one
+of the two files does not reach the other: delete `sdl2-config-reactive.ini` and the reactive
+launcher makes it again.
 
 This release adds switches for reactive flushing (all off by default; `nx2_switches_NX2PERF.txt`,
 "reactive flushing"). `RX_RT_FIT` targets the cost found at the game's opening: there Bananza
@@ -256,15 +280,17 @@ benchmark.
 
 - **Only the command line program.** The Qt program (`eglantine.exe`) is not part of this
   release: the build and the PGO profile are for `eden-cli`. Keep using 2.0.0's `eglantine.exe`
-  for its menus; settings changed there do not reach eden-cli (`qt-config.ini` vs
-  `sdl2-config.ini`).
+  for its menus. The launchers copy its `qt-config.ini` once, on the first start; settings
+  changed there later do not reach eden-cli (`sdl2-config.ini`). To copy them again, rename
+  `sdl2-config.ini` (and `sdl2-config-reactive.ini`) and start a launcher.
 - **Black blocks with a bright edge** appear in some places. They were seen in a session with
   frame generation and, before that, without it; the likely cause is an older rendering issue of
   this game (also reported for upstream), not frame generation, but it is not settled. If you
   see them, note whether they stay in place in the world, try without frame generation and with
   `start-safe.bat`, and report where.
-- **Reactive flushing** (on by default) costs FPS at the game's opening (above); its new
-  switches were not measured with frame generation.
+- **Reactive flushing** (the program's default; the recommended launcher turns it off only in a
+  `sdl2-config.ini` it makes) costs FPS at the game's opening (above); its new switches were not
+  measured with frame generation.
 - **AMD and Intel GPUs were not tried**; neither were other games. The Bananza switches
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) are meant for Bananza only.
 - The OSD writes to RTSS's shared memory; if the program is killed (Task Manager), the text can
