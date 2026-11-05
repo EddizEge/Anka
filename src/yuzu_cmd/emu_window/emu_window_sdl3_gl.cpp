@@ -95,8 +95,9 @@ EmuWindow_SDL3_GL::EmuWindow_SDL3_GL(InputCommon::InputSubsystem* input_subsyste
     }
     SDL_GL_SetSwapInterval(0);
 
-    std::string window_title = fmt::format("{} | {}-{}", Common::g_build_fullname,
-                                           Common::g_scm_branch, Common::g_scm_desc);
+    std::string window_title =
+        fmt::format("NX2Perf by EddizEge | {} | {}-{}", Common::g_build_fullname,
+                    Common::g_scm_branch, Common::g_scm_desc);
     render_window =
         SDL_CreateWindow(window_title.c_str(), Layout::ScreenUndocked::Width,
                          Layout::ScreenUndocked::Height,
