@@ -30,6 +30,13 @@ from source; for the four prebuilts it links their upstream sources
 components are in the tree: `externals/` and `src/dynarmic`. Their licenses are in `LICENSES/`
 and in their own folders.
 
+FFmpeg (LGPL-2.1-or-later) is linked statically. To link the program with a modified FFmpeg,
+build FFmpeg yourself with the configuration of `crueter-ci/FFmpeg` (static, without
+`--enable-gpl`), put its `include/` and `lib/` in place of the prebuilt package's in the CPM
+cache (`<CPM_SOURCE_CACHE>/ffmpeg/9.0.2-1790726865-946fcce07b-windows-amd64/`), and build as
+below. (Not tried for this release; `-DYUZU_USE_BUNDLED_FFMPEG=OFF` is the build system's own
+path for an FFmpeg built from source.)
+
 The shaders need a `glslangValidator` (Khronos glslang; the release used glslang 16.6.0); pass
 it with `-DGLSLANGVALIDATOR=`.
 

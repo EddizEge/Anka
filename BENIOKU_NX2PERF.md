@@ -6,12 +6,12 @@ Tek bir program içerir: `eden-cli-nx2perf.exe` (komut satırı / SDL ön yüzü
 PokeDinner-Eglantine 2.0.0 kurulumunun yanına konur; başlatıcılar onu ölçtüğümüz ayarlarla açar.
 
 Eden projesiyle ya da Franseven'le bir bağı yoktur. Sorunlarını onlara bildirmeyin; bu çatalın
-sorun izleyicisini kullanın (`https://github.com/EddizEge/NX2Perf`).
+sorun izleyicisini kullanın: https://github.com/EddizEge/NX2Perf/issues
 
 - Taban: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
 - Bu sürüm: paketteki `VERSION_NX2PERF.txt` (etiket, commit, derleme tarihi).
-- Kaynak: `https://github.com/EddizEge/NX2Perf` (programla aynı commit; GPLv3, bkz. "Lisans").
+- Kaynak: https://github.com/EddizEge/NX2Perf (programla aynı commit; GPLv3, bkz. "Lisans").
 - Değişiklikler: `CHANGELOG_NX2PERF.md` (İngilizce). Bütün anahtarlar: `nx2_switches_NX2PERF.txt`
   (kaynakta `dist/nx2_switches.txt`).
 
@@ -33,7 +33,19 @@ oynanırken alındı. Başka oyunlar, başka işlemciler, AMD ya da Intel ekran 
 - Çok çekirdekli CPU öykünmesi açık (varsayılan). Kare zamanlama anahtarları bunu ister.
 - İsteğe bağlı: ekranda FPS / hız göstergesi için RivaTuner Statistics Server (RTSS).
 
+## İndirme ve denetim
+
+Yayında dört zip ve `SHA256SUMS.txt` var. Oynamak için yalnız `-win64.zip` gerekir; `-pdb.zip`
+hata ayıklama sembolleridir (çökme raporları için), `-source.zip` ve `-deps-source.zip` kaynak
+koddur (bkz. "Lisans"). İndirmeyi denetlemek için Git Bash'te `sha256sum -c SHA256SUMS.txt
+--ignore-missing`, ya da komut isteminde `certutil -hashfile <zip> SHA256` yazıp dosyadakiyle
+karşılaştırın. Program imzasızdır: Windows SmartScreen ilk açılışta uyarabilir.
+
 ## Kurulum
+
+Bu resmî olmayan, deneysel bir derlemedir ve hiçbir garantisi yoktur (`NOTICE_NX2PERF.txt`).
+2.0.0'ın kayıtlarını kullanır (aşağıda): **ilk açılıştan önce kullanıcı klasöründeki `nand`
+klasörünü (kayıtlarınız) yedekleyin.**
 
 1. PokeDinner-Eglantine 2.0.0 klasörünü açın (`eglantine.exe` ve `eden-cli.exe`'nin olduğu).
 2. NX2Perf zip'inin içindekilerin hepsini oraya kopyalayın. Hiçbir dosyanın üstüne yazılmaz:
@@ -43,6 +55,12 @@ oynanırken alındı. Başka oyunlar, başka işlemciler, AMD ya da Intel ekran 
    ayarlar. eden-cli ayarlarını oradaki `config\sdl2-config.ini`'de tutar (Qt programı
    `eglantine.exe` `qt-config.ini`'yi kullanır; ikisi ayrıdır). Bu dosya yoksa programı bir kez
    açıp kapatın.
+4. Reaktif boşaltma: başlatıcılar bunu ayarlayamaz, `sdl2-config.ini` ayarlar ve programın
+   varsayılanı açıktır. `start-recommended.bat` (ölçülen kurulum) için **kapatın**: `[Renderer]`
+   altına `use_reactive_flushing\default=false` ve `use_reactive_flushing=false` ekleyin (bkz.
+   "Reaktif boşaltma"). `start-reactive-experimental.bat` ise **açık** içindir (varsayılan ya da
+   `=true`). Varsayılan açık bırakılırsa `start-recommended.bat` reaktif boşaltmayı `RX_RT_FIT`'siz
+   çalıştırır: oyunun açılışında ölçtüğümüz en yavaş kurulum.
 
 Kaldırmak için zip'in eklediği dosyaları silin. Yeni programın kurduğu gölgelendirici önbellekleri
 kullanıcı klasöründe kalır; durmalarında sakınca yok.
@@ -73,9 +91,11 @@ Windows satır sonları (CRLF) gerekir.
   (`DK_DYN=1`; yama uygulanınca yukarıdaki iki hız satırı devre dışı kalır: `DK_DYN=0` iken ya
   da yama uygulanmazsa etkilidirler); zamanlı FSR3 ara kareleri (`FG_TIMED=1`, yalnız kare üretme açıkken etkili); RTSS
   göstergesi (`OSD=1`). Bananza'ya özel satırlar işaretli; başka oyunlar için güvenli başlatıcıyı
-  kullanın ya da o satırları silin.
+  kullanın ya da o satırları silin. `sdl2-config.ini`'de reaktif boşaltmanın **kapalı** olmasını
+  bekler (Kurulum, 4. adım).
 - **`start-safe.bat`** (güvenli): bu çatalın eklediği bütün anahtarlar kapalı (varsayılanı açık
-  kısayollar `0`, isteğe bağlı olanlar boş). Programın 2.0.0'a en yakın hâli; bir sorunun yeni
+  kısayollar `0`, oyunu etkileyen isteğe bağlı olanlar boş; `AUTO_INPUT_FILE`, `VI2_REPLY` gibi
+  birkaç tanı anahtarı boşaltılmaz: bunları sistem ortamınızda tanımlamayın). Programın 2.0.0'a en yakın hâli; bir sorunun yeni
   anahtarlardan gelip gelmediğini anlamak için. Anahtarı olmayan değişiklikler (değişiklik
   günlüğündeki doğruluk düzeltmeleri ve upstream'den alınanlar) yine içeridedir.
 - **`start-reactive-experimental.bat`** (reaktif, DENEYSEL; önerilenin yanında ikinci seçenek):
@@ -83,7 +103,8 @@ Windows satır sonları (CRLF) gerekir.
   hedefi için çizim başına bir kopya yerine tek görüntü). Bizim makinede açılışı geniş alanlara
   değişir: reaktif kapalı aynı derlemeye göre oyunun açılışında FPS −%7, geniş alanda +%15. Henüz
   denenmedi: kare üretmeyle birlikte çalışması ve `RX_RT_FIT=3`'ün görüntüsü. Reaktif boşaltma bir
-  anahtar değil, bir ayardır: aşağıda "Reaktif boşaltma".
+  anahtar değil, bir ayardır: `sdl2-config.ini`'de açık olmalı (programın varsayılanı; aşağıda
+  "Reaktif boşaltma"). Kapalıyken de `RX_RT_FIT=3` etkilidir; bu bileşim ölçülmedi.
 
 eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur. `nx2_switches_NX2PERF.txt` her
 anahtarı varsayılanı ve ne yaptığıyla listeler. (2.0.0'ın kendi `nx2_switches.txt`'sini yalnız Qt
@@ -107,7 +128,7 @@ Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (yaklaşık 230 y
 | `OSD=1` | kapalı | RTSS'de oyun FPS'i, ekran FPS'i (kare üretme çarpanıyla) ve hız |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (60 kadar) | **açık** | GPU iş parçacığında çizim başı kısayollar; `=0` 2.0.0'ın kod yolu, çoğu `=2` ile kendini denetleyip günlüğe yazar |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **açık** | Bananza arazisi: dolaylı çizimler ana makinenin GPU'sunda ve birleşik; GPU'nun yazdığı parametreler 256 KiB'lık pencerelerle boşaltılır |
-| `RX_RT_FIT=3` | kapalı | reaktif boşaltmayla: Bananza'nın açılışı çizim başına kopya yerine tek görüntüye çizer, sırayı çizim geçişinin içindeki bir bariyer sağlar (deneysel; `=1` bunun yerine çizim geçişini bitirir, daha yavaş; ikisi de `barrier_feedback_loops=true` ister) |
+| `RX_RT_FIT=3` | kapalı | reaktif boşaltma için (onsuz da etkili, öyle ölçülmedi): Bananza'nın açılışı çizim başına kopya yerine tek görüntüye çizer, sırayı çizim geçişinin içindeki bir bariyer sağlar (deneysel; `=1` bunun yerine çizim geçişini bitirir, daha yavaş; ikisi de `barrier_feedback_loops=true` ister) |
 | `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | kapalı | reaktif boşaltma deneyleri; kazanç ölçülmedi, önerilmez |
 | `RX_MASKED_TARGETS` | kapalı | **bilinen kusur, açmayın** |
 | `RX_COALESCE_LOOSE` | kapalı | yalnız tanı (reaktif boşaltmanın sıralamasını zayıflatır): oyun için değil |
@@ -205,13 +226,13 @@ uzaktan bakış; kamera koşudan koşuya birebir aynı değil).
 
 | Değişiklik | Kollar (A -> B) | Sahne, koşu | Sonuç |
 |---|---|---|---|
-| Hepsi, PokeDinner 2.0.0 -> NX2Perf | 2.0.0'ın `eglantine.exe`'si (Qt; el kipi, GPU doğruluğu Fast, 1x) / bu çatalın 3-5 Kasım `eden-cli` derlemeleri (çoğu TV kipi) | 2.0.0: elle uzak bakış, 25 sn (31 Ekim). Çatal: açılış ve geniş alanın otomatik koşuları | 2.0.0: 17,3 FPS (kare süresi medyanı 58 ms). Çatal: sınırsız 42-53 FPS (3-4 Kasım); DK-DYN açık, kare üretme kapalı 39-46 FPS (5 Kasım, `b5a994e3eb` commit'inin derlemesi). **Denetimli bir A/B değil**: program, kip, sahneler ve koşular farklı, 2.0.0'ın sahnesi en ağırı; aynı uzak bakışta çatalın 31 Ekim - 1 Kasım derlemeleri 19,7 ve ~30,8 FPS ölçtü (aşağıdaki satırlar). Yalnız kaba bir gösterge |
+| Hepsi, PokeDinner 2.0.0 -> NX2Perf | 2.0.0'ın `eglantine.exe`'si (Qt; el kipi, GPU doğruluğu Fast, 1x) / bu çatalın 3-5 Kasım `eden-cli` derlemeleri (çoğu TV kipi) | 2.0.0: elle uzak bakış, 25 sn (31 Ekim). Çatal: açılış ve geniş alanın otomatik koşuları | 2.0.0: 17,3 FPS (kare süresi medyanı 58 ms). Çatal: sınırsız 42-53 FPS (3-4 Kasım); DK-DYN açık, kare üretme kapalı 39-46 FPS (5 Kasım, `2d424d6efd` commit'inin derlemesi). **Denetimli bir A/B değil**: program, kip, sahneler ve koşular farklı, 2.0.0'ın sahnesi en ağırı; aynı uzak bakışta çatalın 31 Ekim - 1 Kasım derlemeleri 19,7 ve ~30,8 FPS ölçtü (aşağıdaki satırlar). Yalnız kaba bir gösterge |
 | GPU'nun yazdığı parametrelerin boşaltma penceresi | aynı derleme (31 Ekim, öteki değişikliklerin çoğundan önce), `PBFLUSH_WINDOW_KIB=0` -> varsayılan | uzak bakış, kol başına 2 x 25 sn | 18,0 -> 19,7 FPS (+%9; `HLE_INDIRECT`'ten önce ölçüldü, asıl `HLE_INDIRECT=0` iken önemli) |
 | Arazi dolaylı çizimleri ana makinenin GPU'sunda | aynı derleme (1 Kasım), `HLE_INDIRECT=0` -> varsayılan | elle uzak bakış, kol başına 2-4 koşu | ~20,8 -> ~30,8 FPS (~+%48; kamera birebir aynı değil) |
 | Arka aşamalar (kesim a) | `BACK_STAGES=0` -> `1` | açılış, 2 tur x 2 x 25 sn | +%8,7 / +%7,3 |
 | Çizim başı kısayollar (ilk takım, 2 Kasım; hepsi değil) | kapalı -> açık | açılış, aynı koşular (2. turda bir örnek dışarıda) | +%7,5 / +%6,8 |
 | Acquire peek | `ACQUIRE_PEEK=0` -> `1` | açılış, aynı koşular | +%1,4 / +%3,9 |
-| Profil güdümlü iyileştirme (PGO) | LTO derlemesi -> LTO + PGO | açılış, aynı koşular | +%21,5 / +%15,8 (3 Kasım derlemesi ve profili; bu sürümün programının kendi profili var, böyle ölçülmedi) |
+| Profil güdümlü iyileştirme (PGO) | LTO derlemesi -> LTO + PGO | açılış, aynı koşular | +%21,5 / +%15,8 (3 Kasım derlemesi ve profili; bu sürümün programı o profili yeniden kullanır, bkz. "Bilinen sorunlar"; böyle ölçülmedi) |
 | Ön tarafın makro JIT süzgeci | kapalı -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | açılış, 2 tur x 2 | 39,6 -> 42,1 FPS (+%6) |
 | Reaktif boşaltma | kapalı -> açık | geniş alan / açılış, gece otomatik koşuları (3-4 Kasım derlemeleri) | +%13-23 / −%23-30 |
 | `RX_RT_FIT=1`'li reaktif boşaltma | aynı derleme, reaktif kapalı -> açık + `RX_RT_FIT=1` (DK-DYN açık) | açılış / geniş alan, kol başına 2 koşu (5 Kasım) | −%23 / +%13 |
@@ -238,8 +259,10 @@ değildir.
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) yalnız Bananza içindir.
 - Gösterge RTSS'nin paylaşımlı belleğine yazar; program zorla kapatılırsa (Görev Yöneticisi)
   yazı RTSS yeniden başlatılana dek ekranda kalabilir.
-- Profil güdümlü iyileştirmeyle derlenmiş program, eğitildiği yollarda (Bananza, önerilen
-  anahtarlar) en hızlıdır. Başka ayarlar da çalışır, belki biraz yavaş.
+- Profil güdümlü iyileştirmeyle derlenmiş program, eğitildiği yollarda en hızlıdır. Bu sürüm
+  daha önceki bir eğitim koşusunun profilini yeniden kullanır (commit `c8bbd32fe9`, 3 Kasım:
+  o günün anahtarlarıyla Bananza; `DK_DYN`, `FG_TIMED` ve `RX_RT_FIT`'ten önce, reaktif boşaltma
+  kapalı). Yeni ve başka yollar da çalışır, belki biraz yavaş.
 
 ## Yapay zekâ beyanı
 
@@ -255,12 +278,17 @@ commit'leri yazarlarıyla değişiklik günlüğünde listelenir.
 
 Eden ve PokeDinner-Eglantine gibi NX2Perf de **GNU Genel Kamu Lisansı v3.0 ya da sonrası** ile
 lisanslıdır (`LICENSE.txt`). PokeDinner-Eglantine 2.0.0'ın değiştirilmiş bir sürümüdür; neyin ne
-zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX2PERF.md`'dedir. Bu sürümün eksiksiz karşılık
-gelen kaynak kodu `https://github.com/EddizEge/NX2Perf`'te ve programın yanındaki `-source.zip`'tedir; üçüncü taraf
-kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
+zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX2PERF.md`'dedir. Programın kaynak kodu (yayın commit'i)
+https://github.com/EddizEge/NX2Perf adresinde ve programın yanındaki `-source.zip`'tedir; üçüncü
+taraf kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
 lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
-`LICENSES\` içinde; kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te (önceden
-derlenmişler, FFmpeg, OpenSSL, SDL3 ve sirit için bildirimler upstream kaynaklarını gösterir).
+`LICENSES\` içinde. Kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te. Dört
+kütüphane önceden derlenmiş paketlerden bağlanır ve kaynakları bu yayında **yoktur**: FFmpeg,
+OpenSSL, SDL3 ve sirit; `BUILDING_NX2PERF.md` ve bildirimler tam upstream commit'lerini ve indirme
+adreslerini verir. FFmpeg (LGPL-2.1-or-later) statik bağlıdır: değiştirilmiş bir FFmpeg kullanmak
+için programı `-source.zip`'ten kendi FFmpeg derlemenize karşı derleyin (`BUILDING_NX2PERF.md`).
+Yayın bağlamasında kullanılan PGO profili kaynak değil eğitim verisidir ve yayınlanmaz; onsuz
+yapılan derleme aynı çalışır ama bayt bayt aynı olmaz.
 
 Nintendo Switch ve Donkey Kong Bananza, Nintendo'nun ticari markalarıdır. Bu projenin Nintendo
 ile bir bağı yoktur. Yalnız sahip olduğunuz oyunlarla kullanın.

@@ -7,14 +7,15 @@ existing PokeDinner-Eglantine 2.0.0 installation, and launchers that start it wi
 we measured.
 
 It is not affiliated with the Eden project or with Franseven. Please do not report its problems
-to them; use this fork's issue tracker (`https://github.com/EddizEge/NX2Perf`).
+to them; use this fork's issue tracker: https://github.com/EddizEge/NX2Perf/issues
 
 - Base: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
 - This release: see `VERSION_NX2PERF.txt` in the package (tag, commit, build date).
-- Source: `https://github.com/EddizEge/NX2Perf` (the same commit as the program; GPLv3, see "License").
+- Source: https://github.com/EddizEge/NX2Perf (the same commit as the program; GPLv3, see "License").
 - Changes: `CHANGELOG_NX2PERF.md`. Every switch: `nx2_switches_NX2PERF.txt` (in the source:
   `dist/nx2_switches.txt`).
+- Türkçe: `BENIOKU_NX2PERF.md`.
 
 **Tested on one machine with one game.** Every number below comes from a Ryzen 7 5700X (8
 cores), 64 GB RAM, an NVIDIA GeForce RTX 4060 Ti and a 1440p 170 Hz display, playing Donkey
@@ -34,7 +35,19 @@ Kong Bananza. Other games, other CPUs and AMD or Intel GPUs were not tried.
 - Multicore CPU emulation on (the default). The frame pacing switches need it.
 - Optional: RivaTuner Statistics Server (RTSS) for the on-screen FPS / speed display.
 
+## Download and check
+
+The release has four zips and `SHA256SUMS.txt`. To play you need only the `-win64.zip`; `-pdb.zip`
+has the debug symbols (for crash reports), `-source.zip` and `-deps-source.zip` are the source
+code (see "License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt
+--ignore-missing`, or in a command prompt `certutil -hashfile <zip> SHA256` and compare with the
+file. The program is not signed: Windows SmartScreen may warn the first time.
+
 ## Install
+
+This is an unofficial, experimental build with no warranty (`NOTICE_NX2PERF.txt`). It uses your
+2.0.0 saves (below): **back up the user folder's `nand` folder (your saves) before the first
+start.**
 
 1. Open the folder of your PokeDinner-Eglantine 2.0.0 (the one with `eglantine.exe` and
    `eden-cli.exe`).
@@ -45,6 +58,12 @@ Kong Bananza. Other games, other CPUs and AMD or Intel GPUs were not tried.
    eden-cli keeps its settings in `config\sdl2-config.ini` there (the Qt program
    `eglantine.exe` uses `qt-config.ini`; the two are separate). Run the program once and close
    it if that file does not exist yet.
+4. Reactive flushing: the launchers cannot set it, `sdl2-config.ini` does, and the program's
+   default is on. For `start-recommended.bat` (the measured setup) turn it **off**: add
+   `use_reactive_flushing\default=false` and `use_reactive_flushing=false` under `[Renderer]`
+   (see "Reactive flushing"). `start-reactive-experimental.bat` is meant for it **on** (the
+   default, or `=true`). With the default left on, `start-recommended.bat` runs reactive
+   flushing without `RX_RT_FIT`, the slowest setup we measured at the game's opening.
 
 To uninstall, delete the files the zip added. Shader caches the new program built stay in the
 user folder; they are safe to keep.
@@ -75,9 +94,11 @@ error. Take the launchers from the release zip: they need Windows line endings (
   frame rate patch (`DK_DYN=1`; while it is applied, the two pacing lines above are set aside:
   they act with `DK_DYN=0` or when the patch does not apply); timed FSR3 generated frames (`FG_TIMED=1`, only does something
   with frame generation on); the RTSS display (`OSD=1`). The Bananza-specific lines are marked;
-  for other games use the safe launcher, or remove them.
+  for other games use the safe launcher, or remove them. It expects reactive flushing **off**
+  in `sdl2-config.ini` (Install, step 4).
 - **`start-safe.bat`** - every switch this fork added turned off (the shortcuts that are on by
-  default set to `0`, the opt-in ones cleared). This is as close to 2.0.0 as the program gets;
+  default set to `0`, the opt-in ones that change play cleared; a few diagnostic ones, such as
+  `AUTO_INPUT_FILE` or `VI2_REPLY`, are not cleared: do not set them in your system environment). This is as close to 2.0.0 as the program gets;
   use it to see whether a problem comes from the new switches. Changes without a switch (the
   accuracy fixes and upstream picks in the changelog) stay in.
 - **`start-reactive-experimental.bat`** - EXPERIMENTAL, the second choice next to the
@@ -85,8 +106,9 @@ error. Take the launchers from the release zip: they need Windows line endings (
   image for Bananza's opening render target instead of a copy per draw). On our machine it trades
   the opening for open areas: -7% FPS at the game's opening, +15% in the open area, against the
   same build with reactive flushing off. Not checked yet: together with frame generation, and the
-  image with `RX_RT_FIT=3`. Reactive flushing is a config setting, not a switch: see "Reactive
-  flushing" below.
+  image with `RX_RT_FIT=3`. Reactive flushing is a config setting, not a switch: it must be on
+  in `sdl2-config.ini` (the program's default; see "Reactive flushing" below). With it off,
+  `RX_RT_FIT=3` still acts, a combination that was not measured.
 
 eden-cli reads the switches only from its environment (the launchers).
 `nx2_switches_NX2PERF.txt` lists every switch with its default and what it does. (2.0.0's own
@@ -110,7 +132,7 @@ of them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
 | `OSD=1` | off | game FPS, display FPS (with frame generation's multiplier) and speed in RTSS |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (about 60) | **on** | per-draw shortcuts on the GPU thread; `=0` is the 2.0.0 code path, many accept `=2` to check themselves and log |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **on** | Bananza's terrain: indirect draws on the host GPU, merged; GPU-written parameters flushed in 256 KiB windows |
-| `RX_RT_FIT=3` | off | with reactive flushing: Bananza's opening renders into one image instead of copying it per draw, ordered by a barrier inside the render pass (experimental; `=1` ends the render pass instead, slower; both need `barrier_feedback_loops=true`) |
+| `RX_RT_FIT=3` | off | meant for reactive flushing (it acts without it too, not measured that way): Bananza's opening renders into one image instead of copying it per draw, ordered by a barrier inside the render pass (experimental; `=1` ends the render pass instead, slower; both need `barrier_feedback_loops=true`) |
 | `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | off | reactive flushing experiments; no gain measured, not recommended |
 | `RX_MASKED_TARGETS` | off | **known defect, do not turn on** |
 | `RX_COALESCE_LOOSE` | off | diagnostic only (it weakens the ordering reactive flushing gives): not for play |
@@ -209,13 +231,13 @@ hand; camera not exactly the same between runs).
 
 | Change | Arms (A -> B) | Scene, runs | Result |
 |---|---|---|---|
-| Everything, PokeDinner 2.0.0 -> NX2Perf | 2.0.0's `eglantine.exe` (Qt; handheld mode, GPU accuracy Fast, 1x) / this fork's `eden-cli` builds of 3-5 Nov (mostly TV mode) | 2.0.0: far view by hand, 25 s (31 Oct). Fork: automated runs of the opening and open area | 2.0.0: 17.3 FPS (median frame 58 ms). Fork: 42-53 FPS uncapped (3-4 Nov); 39-46 FPS with DK-DYN, frame generation off (5 Nov, build of commit `b5a994e3eb`). **Not a controlled A/B**: program, mode, scenes and runs differ, and the 2.0.0 scene is the heaviest one; in the same far view the fork's builds of 31 Oct - 1 Nov measured 19.7 and ~30.8 FPS (rows below). A rough indication only |
+| Everything, PokeDinner 2.0.0 -> NX2Perf | 2.0.0's `eglantine.exe` (Qt; handheld mode, GPU accuracy Fast, 1x) / this fork's `eden-cli` builds of 3-5 Nov (mostly TV mode) | 2.0.0: far view by hand, 25 s (31 Oct). Fork: automated runs of the opening and open area | 2.0.0: 17.3 FPS (median frame 58 ms). Fork: 42-53 FPS uncapped (3-4 Nov); 39-46 FPS with DK-DYN, frame generation off (5 Nov, build of commit `2d424d6efd`). **Not a controlled A/B**: program, mode, scenes and runs differ, and the 2.0.0 scene is the heaviest one; in the same far view the fork's builds of 31 Oct - 1 Nov measured 19.7 and ~30.8 FPS (rows below). A rough indication only |
 | GPU-written parameter flush window | same build (31 Oct, before most other changes), `PBFLUSH_WINDOW_KIB=0` -> default | far view, 2 x 25 s each | 18.0 -> 19.7 FPS (+9%; measured before `HLE_INDIRECT`, so it matters mostly with `HLE_INDIRECT=0`) |
 | Terrain indirect draws on the host GPU | same build (1 Nov), `HLE_INDIRECT=0` -> default | far view by hand, 2-4 runs each | ~20.8 -> ~30.8 FPS (~+48%; camera not identical) |
 | Back stages (cut a) | `BACK_STAGES=0` -> `1` | opening, 2 rounds x 2 x 25 s | +8.7% / +7.3% |
 | Per-draw shortcuts (the first set, 2 Nov; not all of them) | off -> on | opening, same runs (one sample of round 2 left out) | +7.5% / +6.8% |
 | Acquire peek | `ACQUIRE_PEEK=0` -> `1` | opening, same runs | +1.4% / +3.9% |
-| Profile-guided optimization (PGO) | LTO build -> LTO + PGO | opening, same runs | +21.5% / +15.8% (3 Nov build and profile; this release's program has its own profile, not measured this way) |
+| Profile-guided optimization (PGO) | LTO build -> LTO + PGO | opening, same runs | +21.5% / +15.8% (3 Nov build and profile; this release's program reuses that profile, see "Known issues"; not measured this way) |
 | Front macro JIT filter | off -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | opening, 2 rounds x 2 | 39.6 -> 42.1 FPS (+6%) |
 | Reactive flushing | off -> on | open area / opening, nightly automated runs (3-4 Nov builds) | +13 to +23% / -23 to -30% |
 | Reactive flushing with `RX_RT_FIT=1` | same build, reactive off -> on + `RX_RT_FIT=1` (DK-DYN on) | opening / open area, 2 runs each (5 Nov) | -23% / +13% |
@@ -244,8 +266,10 @@ benchmark.
   (`PRESENT_INTERVAL_WORD`, `MODE_PACE`, `DK_DYN`) are meant for Bananza only.
 - The OSD writes to RTSS's shared memory; if the program is killed (Task Manager), the text can
   stay on screen until RTSS is restarted.
-- A program built with profile-guided optimization is fastest on the paths it was trained on
-  (Bananza, the recommended switches). Other settings work, maybe a little slower.
+- A program built with profile-guided optimization is fastest on the paths it was trained on.
+  This release reuses the profile of an earlier training run (commit `c8bbd32fe9`, 3 Nov:
+  Bananza with the switches of that day, before `DK_DYN`, `FG_TIMED` and `RX_RT_FIT`, reactive
+  flushing off). Newer and other paths work, maybe a little slower.
 
 ## AI disclosure
 
@@ -262,13 +286,17 @@ upstream. The upstream commits picked into it are listed with their authors in t
 Like Eden and PokeDinner-Eglantine, NX2Perf is licensed under the **GNU General Public License
 v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantine 2.0.0; what
 was changed and when is in `NOTICE_NX2PERF.txt` (in the release zips) and
-`CHANGELOG_NX2PERF.md`. The complete
-corresponding source code of this release is at `https://github.com/EddizEge/NX2Perf` and in the `-source.zip` next to
-the program, with notes on how the third-party libraries are fetched (`BUILDING_NX2PERF.md`).
-Third-party components keep their own licenses: their notices and license texts are in
-`THIRD_PARTY_NOTICES_NX2PERF.txt` and `LICENSES\`; the source of the libraries built from source
-is in the `-deps-source.zip` (for the prebuilt ones, FFmpeg, OpenSSL, SDL3 and sirit, the notices
-name their upstream sources).
+`CHANGELOG_NX2PERF.md`. The source code of the program (the release commit) is at
+https://github.com/EddizEge/NX2Perf and in the `-source.zip` next to the program, with notes on
+how the third-party libraries are fetched (`BUILDING_NX2PERF.md`). Third-party components keep
+their own licenses: their notices and license texts are in `THIRD_PARTY_NOTICES_NX2PERF.txt` and
+`LICENSES\`. The source of the libraries built from source is in the `-deps-source.zip`. Four
+libraries are linked from prebuilt packages and their source is **not** in this release: FFmpeg,
+OpenSSL, SDL3 and sirit; `BUILDING_NX2PERF.md` and the notices give their exact upstream commits
+and download addresses. FFmpeg (LGPL-2.1-or-later) is linked statically: to use a modified
+FFmpeg, build the program from the `-source.zip` against your FFmpeg build
+(`BUILDING_NX2PERF.md`). The PGO profile used for the release link is training data, not
+source, and is not published; a rebuild without it works the same but is not byte-identical.
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. This project has no
 affiliation with Nintendo. Use it only with games you own.

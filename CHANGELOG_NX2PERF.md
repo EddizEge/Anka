@@ -142,22 +142,22 @@ For `use_reactive_flushing=true`; none of these was measured with frame generati
 
 | Commit | Author | Change |
 |---|---|---|
-| `c4bcb5c6b6` | gabrielskaminski | shader_recompiler: include all components in IsGeneric upper bound |
-| `cddcc29e19` | Dee1 | audio_core: unregister audio in/out managers before they are destroyed |
-| `c30d1fe6f2` | Dee1 | audio_core: keep audio in/out managers alive while their sessions are open |
-| `bad8b8be6e` | Franseven | shader: pack FP16 texture results with c0 in the low half |
-| `e92f58640b` | Franseven | ampere: emulate HMMA by default instead of rejecting the program |
-| `8fcd545413` | Franseven | shader: accumulate HMMA.1688/.16816 in f32, round every eight products |
-| `9e68d71c54` | snowstormxd | gpu: make register-write history opt-in in release builds |
-| `9fd333951b` | snowstormxd | macro: execute native parameters without a second FIFO copy |
-| `b1f345637d` | Takoroka | nx2: lower FRND with a constant buffer source |
-| `f41201ea87` | Franz | Prevent Memory Block ID Overflow and Validate Page Contiguity |
-| `50f66e2d1b` | Duck912 | video_core: read the framebuffer before recording the upscaled-output blit |
-| `9ccbf431d4` | rdenno | vk_texture_cache: give framebuffers the fewest layers of their attachments |
-| `47ef44ccc8` | rdenno | texture_cache: look up X8Z24 with UNORM, UINT, UNORM, UNORM components |
-| `85b0547f38` | ZnOw01 | video_core: bound-check macro position writes |
-| `5b7f569115` | Javier (Xenon-Hacks) | nx2: video decoder: keep post-stream release fences pending |
-| `5eebf45ab7` | Zoe L. | fix: avoid variable shadowing |
+| `4f9a1ab394` | gabrielskaminski | shader_recompiler: include all components in IsGeneric upper bound |
+| `9e3d502eb3` | Dee1 | audio_core: unregister audio in/out managers before they are destroyed |
+| `e2ca5fa32a` | Dee1 | audio_core: keep audio in/out managers alive while their sessions are open |
+| `f298aa60e0` | Franseven | shader: pack FP16 texture results with c0 in the low half |
+| `1ebe930a83` | Franseven | ampere: emulate HMMA by default instead of rejecting the program |
+| `85baca0639` | Franseven | shader: accumulate HMMA.1688/.16816 in f32, round every eight products |
+| `ee1299f1f9` | snowstormxd | gpu: make register-write history opt-in in release builds |
+| `c1d93d0599` | snowstormxd | macro: execute native parameters without a second FIFO copy |
+| `97f91db69d` | Takoroka | nx2: lower FRND with a constant buffer source |
+| `d662cb3eae` | Franz | Prevent Memory Block ID Overflow and Validate Page Contiguity |
+| `b0b61d1ef2` | Duck912 | video_core: read the framebuffer before recording the upscaled-output blit |
+| `ac206cde3c` | rdenno | vk_texture_cache: give framebuffers the fewest layers of their attachments |
+| `bfad43bba1` | rdenno | texture_cache: look up X8Z24 with UNORM, UINT, UNORM, UNORM components |
+| `0285c681f6` | ZnOw01 | video_core: bound-check macro position writes |
+| `02dc13a51c` | Javier (Xenon-Hacks) | nx2: video decoder: keep post-stream release fences pending |
+| `3be4fca0e0` | Zoe L. | fix: avoid variable shadowing |
 
 Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAGE_RESET_SKIP`,
 `ASYNC_SKIP`), elBart0 (`UBO_BIND_SKIP`, `KEY_CMP`), Duck912 / moceure's eden-nx2-android

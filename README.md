@@ -7,6 +7,12 @@
 -->
 <!-- lang: en-GB -->
 
+> **This is NX2Perf**, an unofficial performance fork of PokeDinner-Eglantine 2.0.0 for Donkey Kong
+> Bananza on a desktop PC; it is not affiliated with Eden or Franseven. Read
+> [README_NX2PERF.md](README_NX2PERF.md) (Turkish: [BENIOKU_NX2PERF.md](BENIOKU_NX2PERF.md)), get the program
+> from this repository's Releases, and report its problems here, not to the projects below.
+> The rest of this page is the upstream README, unchanged.
+
 <h1 align="center">
   <br>
   <a href="https://git.eden-emu.dev/eden-emu/eden"><img src="https://github.com/user-attachments/assets/35031845-4bfa-4916-8bf5-bc3bce67d5e2" alt="Eglantine" width="200"></a>
