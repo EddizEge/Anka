@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "core/perf_stats.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
 #include "video_core/present.h"
@@ -242,6 +243,10 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     present_manager.Present(frame);
 #ifdef HAS_LSFG
     scheduler.DispatchWork();
+    // Right before the game frame's count below: the OSD's multiplier reads the two together.
+    if (generated_frames != 0) {
+        Core::g_generated_frames.fetch_add(generated_frames, std::memory_order_relaxed);
+    }
 #endif
 
     gpu.RendererFrameEndNotify();

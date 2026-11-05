@@ -17,6 +17,9 @@ inline std::atomic<u64> g_output_frames{};
 /// Game frames (PerfStats::EndGameFrame), never reset: GetAndResetStats' game_frames is the title
 /// bar's (EDEN_NX2_OSD reads this one, yuzu_cmd/nx2_osd.cpp).
 inline std::atomic<u64> g_game_frames{};
+/// Images frame generation added (RendererVulkan::Composite), never reset: EDEN_NX2_OSD's
+/// multiplier. Stays 0 with frame generation off.
+inline std::atomic<u64> g_generated_frames{};
 
 struct PerfStatsResults {
     /// System FPS (LCD VBlanks) in Hz

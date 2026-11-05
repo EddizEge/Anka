@@ -274,6 +274,19 @@ TEST_CASE("Nx2RtssOsd: the text", "[common]") {
     for (const char c : Format({34.5, 120.0, 0.5})) {
         REQUIRE(static_cast<unsigned char>(c) < 0x80); // ASCII only
     }
+    // Frame generation: the multiplier after the display FPS, one decimal.
+    REQUIRE(Format({40.0, 120.0, 1.0, 3.0}) == "Oyun 40.0 FPS | Ekran 120 FPS (3.0x) | Hiz %100");
+    REQUIRE(Format({34.5, 120.0, 0.99, 3.4783}) ==
+            "Oyun 34.5 FPS | Ekran 120 FPS (3.5x) | Hiz %99");
+    REQUIRE(Format({20.0, 60.0, 0.8333, 3.0}) ==
+            "Oyun 20.0 FPS | Ekran 60 FPS (3.0x) | <C=FF5050>Hiz %83<C>");
+    REQUIRE(Format({30.0, 30.0, std::nullopt, 1.0}) ==
+            "Oyun 30.0 FPS | Ekran 30 FPS (1.0x) | Hiz -");
+    // None: the text as before.
+    REQUIRE(Format({40.0, 120.0, 1.0, std::nullopt}) == "Oyun 40.0 FPS | Ekran 120 FPS | Hiz %100");
+    for (const char c : Format({34.5, 120.0, 0.5, 3.5})) {
+        REQUIRE(static_cast<unsigned char>(c) < 0x80);
+    }
 }
 
 TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
@@ -295,6 +308,9 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     REQUIRE(r.display_fps == 120.0);
     REQUIRE(r.speed.has_value());
     REQUIRE(*r.speed > 0.9799 && *r.speed < 0.9801);
+    // Frame generation never ran: no multiplier, the text as before.
+    REQUIRE_FALSE(r.multiplier.has_value());
+    REQUIRE(Format(r) == "Oyun 34.0 FPS | Ekran 120 FPS | Hiz %98");
     // No present meanwhile, after presents timed the game: it stood still (a stall), 0, whatever
     // the clock says.
     Sample c = b;
@@ -321,4 +337,50 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     Sample h = b;
     h.seconds = 10.5;
     REQUIRE(Compute(a, h).game_fps == 68.0);
+}
+
+TEST_CASE("Nx2RtssOsd: the frame generation multiplier", "[common]") {
+    const Sample a{.seconds = 10.0,
+                   .game_frames = 1000,
+                   .output_frames = 4000,
+                   .generated_frames = 2500,
+                   .speed_frame_us = 5'000'000,
+                   .speed_game_us = 5'000'000};
+    // 1 s: 40 game frames, 80 generated (2 per frame): 3.0x, whatever the presents counted.
+    Sample b = a;
+    b.seconds = 11.0;
+    b.game_frames = 1040;
+    b.output_frames = 4118; // two still in the queue
+    b.generated_frames = 2580;
+    b.speed_frame_us = b.speed_game_us = 6'000'000;
+    const Rates r = Compute(a, b);
+    REQUIRE(r.multiplier.has_value());
+    REQUIRE(*r.multiplier == 3.0);
+    REQUIRE(Format(r) == "Oyun 40.0 FPS | Ekran 118 FPS (3.0x) | Hiz %100");
+    // A varying count (FSR3's pacing): 23 frames, 57 generated in 0.5 s: 80 / 23 = 3.478.
+    Sample c = a;
+    c.seconds = 10.5;
+    c.game_frames = 1023;
+    c.output_frames = 4080;
+    c.generated_frames = 2557;
+    REQUIRE(Format(Compute(a, c)).find("Ekran 160 FPS (3.5x) | ") != std::string::npos);
+    // On but adding nothing this window (the game at the target rate): 1.0x.
+    Sample d = b;
+    d.generated_frames = a.generated_frames;
+    REQUIRE(*Compute(a, d).multiplier == 1.0);
+    // No game frame in the window (a stall): no multiplier, though generation is on.
+    Sample e = a;
+    e.seconds = 11.0;
+    REQUIRE_FALSE(Compute(a, e).multiplier.has_value());
+    REQUIRE(Format(Compute(a, e)).find("Ekran 0 FPS | ") != std::string::npos);
+    // Generation off since the start (its counter 0): none, the text as before.
+    Sample f = a, g = b;
+    f.generated_frames = g.generated_frames = 0;
+    REQUIRE_FALSE(Compute(f, g).multiplier.has_value());
+    REQUIRE(Format(Compute(f, g)) == "Oyun 40.0 FPS | Ekran 118 FPS | Hiz %100");
+    // The first generated images inside the window count from 0.
+    Sample h = b;
+    h.generated_frames = 40;
+    f.generated_frames = 0;
+    REQUIRE(*Compute(f, h).multiplier == 2.0);
 }

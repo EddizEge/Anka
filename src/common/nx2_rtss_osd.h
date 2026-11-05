@@ -243,6 +243,7 @@ struct Sample {
     double seconds{};      // steady clock
     u64 game_frames{};     // Core::g_game_frames: guest frames composited
     u64 output_frames{};   // Core::g_output_frames: host presents, generated frames included
+    u64 generated_frames{}; // Core::g_generated_frames: frame generation's images
     u64 speed_frame_us{};  // Service::Nx2OsdSpeed totals: the presents' intervals
     u64 speed_game_us{};   //   and the game time they stepped
     s64 system_us{};       // CoreTiming's clock (the title bar's speed)
@@ -251,13 +252,17 @@ struct Sample {
 struct Rates {
     double game_fps{};
     double display_fps{};
-    std::optional<double> speed; // nullopt: no reading
+    std::optional<double> speed;      // nullopt: no reading
+    std::optional<double> multiplier; // images per game frame; nullopt: none shown
 };
 
 /// Rates over two samples (`from` the older): frames per second, and the speed from the game
 /// time the presents stepped (Nx2OsdSpeed). Once they have timed the game, a window without a
 /// present is a game standing still: 0 (its interval is counted at the present that ends it).
 /// Never timed by them: the emulated clock against the wall clock (single core), else none.
+/// The multiplier, once frame generation has made an image: (game frames + generated images) /
+/// game frames, both counted at each composite (not at the presents, which trail in the queue);
+/// none in a window without a game frame (a stall).
 constexpr Rates Compute(const Sample& from, const Sample& to) {
     Rates rates{};
     const double seconds = to.seconds - from.seconds;
@@ -266,6 +271,12 @@ constexpr Rates Compute(const Sample& from, const Sample& to) {
     }
     rates.game_fps = static_cast<double>(to.game_frames - from.game_frames) / seconds;
     rates.display_fps = static_cast<double>(to.output_frames - from.output_frames) / seconds;
+    const u64 game_frames = to.game_frames - from.game_frames;
+    if (to.generated_frames > 0 && game_frames > 0) {
+        rates.multiplier =
+            static_cast<double>(game_frames + (to.generated_frames - from.generated_frames)) /
+            static_cast<double>(game_frames);
+    }
     const u64 frame_us = to.speed_frame_us - from.speed_frame_us;
     if (frame_us > 0) {
         rates.speed = static_cast<double>(to.speed_game_us - from.speed_game_us) /
@@ -283,9 +294,14 @@ constexpr double SlowSpeed = 0.95;
 
 /// "Oyun 34.5 FPS | Ekran 120 FPS | Hiz %99" (ASCII: RTSS's font may lack Turkish letters); the
 /// speed in red (<C=FF5050>...<C>, RTSS's colour tags) below 95%, "Hiz -" without a reading.
+/// With frame generation the multiplier follows the display FPS: "Ekran 120 FPS (3.0x)".
 inline std::string Format(const Rates& rates) {
-    std::string text = fmt::format("Oyun {:.1f} FPS | Ekran {:.0f} FPS | ", rates.game_fps,
+    std::string text = fmt::format("Oyun {:.1f} FPS | Ekran {:.0f} FPS", rates.game_fps,
                                    rates.display_fps);
+    if (rates.multiplier) {
+        text += fmt::format(" ({:.1f}x)", *rates.multiplier);
+    }
+    text += " | ";
     if (!rates.speed) {
         text += "Hiz -";
     } else if (*rates.speed < SlowSpeed) {

@@ -144,6 +144,7 @@ private:
             .seconds = std::chrono::duration<double>(Clock::now().time_since_epoch()).count(),
             .game_frames = Core::g_game_frames.load(std::memory_order_relaxed),
             .output_frames = Core::g_output_frames.load(std::memory_order_relaxed),
+            .generated_frames = Core::g_generated_frames.load(std::memory_order_relaxed),
             .speed_frame_us = speed.frame_us,
             .speed_game_us = speed.game_us,
             .system_us = system_time_us ? system_time_us() : 0,
