@@ -748,3 +748,46 @@ TEST_CASE("Reactive render target fit modes", "[video_core][nx2_reactive]") {
         }
     }
 }
+
+TEST_CASE("Reactive loose fence coalescing", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // Made anyway: a fence real without the copy back always, a stubbed one unless loose.
+    for (int bits = 0; bits < 8; ++bits) {
+        const bool loose = (bits & 1) != 0;
+        const bool real = (bits & 2) != 0;
+        const bool stub = (bits & 4) != 0;
+        REQUIRE(Flush::CoalesceMadeAnyway(loose, real, stub) == (real || (!loose && stub)));
+    }
+    static_assert(Flush::CoalesceMadeAnyway(true, true, false));
+    static_assert(!Flush::CoalesceMadeAnyway(true, false, true));
+    static_assert(Flush::CoalesceMadeAnyway(false, false, true));
+    static_assert(!Flush::CoalesceMadeAnyway(false, false, false));
+    // FenceManager::CommitBufferNow before and after: the stubbed reasons are asked only when no
+    // real one and not loose; not loose, the answer is the old one for every input.
+    for (int bits = 0; bits < 128; ++bits) {
+        const bool should_flush = (bits & 1) != 0;
+        const bool committed = (bits & 2) != 0;
+        const bool query_flushes = (bits & 4) != 0;
+        const bool skip_limit = (bits & 8) != 0;
+        const bool fence_work = (bits & 16) != 0;
+        const bool operations = (bits & 32) != 0;
+        const bool loose = (bits & 64) != 0;
+        const bool old_made = should_flush || committed || query_flushes || skip_limit ||
+                              fence_work || operations;
+        const bool real_work = should_flush || committed || query_flushes;
+        bool asked = false;
+        const auto stubbed = [&] {
+            asked = true;
+            return skip_limit || fence_work || operations;
+        };
+        const bool stub_work = !real_work && !loose && stubbed();
+        const bool made = Flush::CoalesceMadeAnyway(loose, real_work, stub_work);
+        REQUIRE(asked == (!real_work && !loose));
+        if (!loose) {
+            REQUIRE(made == old_made);
+        } else {
+            REQUIRE(made == real_work);
+        }
+    }
+    REQUIRE(!Flush::CoalesceLoose()); // unset in the test environment
+}

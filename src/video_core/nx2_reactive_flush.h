@@ -196,6 +196,28 @@ private:
     return limit <= 1 || delay_fence || made_anyway || force || deferred + 1 >= limit;
 }
 
+/// EDEN_NX2_RX_COALESCE_LOOSE=1 (DIAGNOSTIC ONLY, with EDEN_NX2_RX_COALESCE: it weakens the
+/// ordering reactive flushing gives): a fence made for queued operations, query fence work or the
+/// skip limit alone (stubbed: no submission without the copy back) no longer counts as made
+/// anyway, so the copy back waits for a fence with a submission of its own (texture or query
+/// downloads), the <fences>th one or the first one after a frame ended. Such a fence's operations
+/// then run before the GPU-written data it would have carried lands in guest memory. It measures
+/// what the submissions the copy backs add cost. Off by default.
+[[nodiscard]] inline bool CoalesceLoose() noexcept {
+    static const bool enabled = Common::Nx2Reactive::ParseFlag(
+        Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_COALESCE_LOOSE"));
+    return enabled;
+}
+
+/// Whether a fence is made anyway for CommitBufferCopyBack: `real_work` when it would be a real
+/// fence without the copy back (another cache's downloads, query flushes), `stub_work` when it
+/// would be made, stubbed, for queued operations, query fence work or the skip limit; the latter
+/// counts unless CoalesceLoose.
+[[nodiscard]] constexpr bool CoalesceMadeAnyway(bool loose, bool real_work,
+                                                bool stub_work) noexcept {
+    return real_work || (!loose && stub_work);
+}
+
 /// EDEN_NX2_RX_ONE_SUBMIT=1: a fence with downloads to wait for is made real, and a real fence's
 /// Queue submits the command buffer (InnerFence::Queue: scheduler.Flush); SignalFence then called
 /// FlushCommands, which submits again whenever the rasterizer drew since its last own flush: an

@@ -401,18 +401,17 @@ private:
     }
 
     /// EDEN_NX2_RX_COALESCE: whether this fence commits the buffer cache's copy backs, else it
-    /// leaves them for a later one (nx2_reactive_flush.h). A fence made anyway (another cache's
-    /// downloads, query work or queued operations, the skip limit) takes them along.
+    /// leaves them for a later one (nx2_reactive_flush.h). A fence made anyway takes them along:
+    /// real for another cache's downloads or query flushes, or stubbed for query fence work,
+    /// queued operations or the skip limit (not with EDEN_NX2_RX_COALESCE_LOOSE).
     bool CommitBufferNow(bool delay_fence, const CacheFlushes& flushes) {
-        bool made_anyway = flushes.should_flush || flushes.committed != 0 ||
-                           query_cache.HasUncommittedFlushes() || skipped_fences >= 64;
-        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
-            made_anyway = made_anyway || query_cache.HasPendingFenceWork();
-        }
-        if (!made_anyway) {
-            std::scoped_lock lock{uncommitted_guard};
-            made_anyway = !uncommitted_operations.empty();
-        }
+        // A fence real without the copy back, or one made stubbed (asked only when it counts:
+        // EDEN_NX2_RX_COALESCE_LOOSE leaves the copy back off the latter, nx2_reactive_flush.h).
+        const bool real_work = flushes.should_flush || flushes.committed != 0 ||
+                               query_cache.HasUncommittedFlushes();
+        const bool stub_work = !real_work && !coalesce_loose && MadeStubbedAnyway();
+        const bool made_anyway =
+            Nx2Reactive::CoalesceMadeAnyway(coalesce_loose, real_work, stub_work);
         const bool force = coalesce_force.exchange(false, std::memory_order_relaxed);
         if (Nx2Reactive::CommitBufferCopyBack(coalesce_fences, delay_fence, made_anyway, force,
                                               deferred_fences)) {
@@ -424,6 +423,21 @@ private:
             Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FencesBufferDeferred, 1);
         }
         return false;
+    }
+
+    /// Whether a fence with nothing to download is made anyway (stubbed), as SkipEmptyFence
+    /// decides: the skip limit, query fence work or queued operations.
+    bool MadeStubbedAnyway() {
+        if (skipped_fences >= 64) {
+            return true;
+        }
+        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
+            if (query_cache.HasPendingFenceWork()) {
+                return true;
+            }
+        }
+        std::scoped_lock lock{uncommitted_guard};
+        return !uncommitted_operations.empty();
     }
 
     /// EDEN_NX2_REACTIVE_STATS: CommitCacheFlushes' time and what it committed.
@@ -478,6 +492,8 @@ private:
     const bool one_submit = Nx2Reactive::OneSubmit();
     /// EDEN_NX2_RX_COALESCE (<= 1: off): fences that may leave the buffer copy backs uncommitted
     const u64 coalesce_fences = Nx2Reactive::CoalesceFences();
+    /// EDEN_NX2_RX_COALESCE_LOOSE (diagnostic): only a fence real anyway takes the copy backs
+    const bool coalesce_loose = Nx2Reactive::CoalesceLoose();
     u64 deferred_fences{}; ///< Fences that left them since the last commit (GPU thread only)
     std::atomic<bool> coalesce_force{}; ///< A frame ended since (TickFrame): the next one commits
 
