@@ -1,0 +1,67 @@
+# Building NX2Perf
+
+The release program is `eden-cli` (target `yuzu-cmd`), built on Windows with Visual Studio 2022
+Build Tools (MSVC 14.44, its CMake and Ninja). The general build documentation of Eden is in
+`docs/`; this file lists what the NX2Perf release used.
+
+## Third-party libraries
+
+This source tree does not contain all of its dependencies. At configure time CMake's CPM
+(`CMakeModules/`, `cpmfile.json`) downloads them from the repositories and versions pinned in
+`cpmfile.json`, and checks them against the hashes given there. `-DCPM_SOURCE_CACHE=<dir>` keeps
+the downloads in one folder. For the release build these were fetched (name: version):
+
+boost 1.92.0, cubeb fa02160712, enet v1.3.18, ffmpeg (prebuilt, crueter-ci
+9.0.2-1790726865-946fcce07b), fmt 12.1.0, frozen 61dce5ae18, gamemode ce6fe122f3, httplib
+v0.46.0, libusb v1.0.29, lz4 ebb370ca83, nlohmann_json v3.12.0, nx_tzdb, openssl (prebuilt,
+crueter-ci 4.0.1-1788234794-b64f68a94e), opus a3f0ec02b3, reshade v6.8.0, sdl3 (prebuilt,
+crueter-ci 3.4.14-1788231389-147a8ee32d), simpleini v4.25, sirit (prebuilt, v1.0.7),
+spirv-headers vulkan-sdk-1.4.341.0, Vulkan-Headers v1.4.345, VulkanMemoryAllocator v3.3.0,
+Vulkan-Utility-Libraries v1.4.345, xbyak v7.40.1, zbic 11b08f2712, zlib v1.3.2, zstd 33618c8.
+
+The prebuilt packages come from the CI repositories named in `cpmfile.json` (`crueter-ci/...`,
+`eden-emulator/sirit`), which build them from the upstream sources of those projects. Other
+components are in the tree: `externals/` and `src/dynarmic`. Their licenses are in `LICENSES/`
+and in their own folders.
+
+The shaders need a `glslangValidator` (Khronos glslang); pass it with `-DGLSLANGVALIDATOR=`.
+
+## Configure and build
+
+From a Developer shell of Visual Studio 2022 (x64):
+
+```sh
+cmake -S . -B build-lto -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" "-DCMAKE_C_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" \
+  -DENABLE_LTO=ON -DENABLE_QT=OFF -DENABLE_WERROR=OFF -DENABLE_UPDATE_CHECKER=OFF \
+  -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF -DYUZU_TESTS=OFF \
+  -DCMAKE_INTERMEDIATE_DIR_STRATEGY=SHORT -DGLSLANGVALIDATOR=<path to glslangValidator.exe>
+cmake --build build-lto --target yuzu-cmd
+```
+
+This gives `build-lto/bin/eden-cli.exe`: link-time code generation, no profile. It behaves the
+same as the release program and is slower (about 16-22% in our measurements).
+
+## Profile-guided optimization (the release program)
+
+The release program is the same objects linked twice more with MSVC's PGO:
+
+1. Instrument: link `yuzu-cmd`'s objects again with `/LTCG /FASTGENPROFILE:PGD=eden-cli.pgd`
+   (the same link line otherwise; `/GENPROFILE` builds are too slow to play).
+2. Train: play Donkey Kong Bananza with the instrumented program and the recommended switches
+   (`dist/nx2perf/start-recommended.bat`), in the opening area and an open area; it writes
+   `.pgc` files next to the `.pgd`. `pgort140.dll` from the MSVC tools must be next to it.
+3. Optimize: `pgomgr /merge <file>.pgc eden-cli.pgd` for each `.pgc`, then link again with
+   `/LTCG /USEPROFILE:PGD=eden-cli.pgd`.
+
+The profile (`.pgd`) is training data from playing a game, not source code, and is not
+published. Without it, step 1-3 can be repeated with your own training run; the program is
+functionally the same either way.
+
+## Release package
+
+The release zips were made by a packaging script outside this tree. The program zip holds the
+program, the launchers from `dist/nx2perf/`, the README / BENIOKU / CHANGELOG / BUILDING files,
+`LICENSE.txt`, `LICENSES/`, a NOTICE file and `dist/nx2_switches.txt` (renamed so that it does
+not replace 2.0.0's own). The `-source.zip` is `git archive` of the same commit, and
+`SHA256SUMS.txt` lists the hashes of the zips.
