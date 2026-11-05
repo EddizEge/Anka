@@ -1842,6 +1842,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     }
 
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    if (texture_cache.Nx2InPassFeedback()) [[unlikely]] {
+        // EDEN_NX2_RX_RT_FIT=3: this draw samples a color target's image (CheckFeedbackLoop).
+        RecordInPassFeedbackBarrier(scheduler, false);
+    }
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {

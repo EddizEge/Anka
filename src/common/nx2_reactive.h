@@ -100,6 +100,9 @@ enum class Counter : u32 {
     RepeatViewAlias,        ///< A sampled or stored image with an alias written after it
     MaskedColorTargets,     ///< EDEN_NX2_RX_MASKED_TARGETS: color targets a draw left unmodified
     MaskedDepthTargets,     ///< EDEN_NX2_RX_MASKED_TARGETS: depth targets a draw left unmodified
+    Draws,                  ///< Guest draws (RasterizerVulkan::Draw / DrawIndirect calls)
+    FitInPassBarriers,      ///< EDEN_NX2_RX_RT_FIT=3: feedback barriers inside the render pass
+    FitInPassLightBarriers, ///< Of them, recorded by light draws
     Count,
 };
 
@@ -261,7 +264,8 @@ struct Window {
                        "buffer deferred {}, extra flushes {}) {} us (commit {} us, submit {} us); "
                        "submits {}; copy back pops {} us (lock wait {} us); light refusals: "
                        "feedback {}, target cpu modified {} sparse {} alias {}, image cpu modified "
-                       "{} alias {}; masked targets color {} depth {}",
+                       "{} alias {}; masked targets color {} depth {}; draws {}; rt fit in pass "
+                       "barriers {} (light {})",
                        w.Get(C::Fences), w.Get(C::FencesSkipped), w.Get(C::FencesReal),
                        w.Get(C::FencesBufferCommit), w.Get(C::FencesTextureCommit),
                        w.Get(C::FencesBufferDeferred), w.Get(C::FenceExtraFlushes),
@@ -270,7 +274,9 @@ struct Window {
                        w.Get(C::RepeatFeedback), w.Get(C::RepeatRtCpuModified),
                        w.Get(C::RepeatRtSparse), w.Get(C::RepeatRtAlias),
                        w.Get(C::RepeatViewCpuModified), w.Get(C::RepeatViewAlias),
-                       w.Get(C::MaskedColorTargets), w.Get(C::MaskedDepthTargets));
+                       w.Get(C::MaskedColorTargets), w.Get(C::MaskedDepthTargets),
+                       w.Get(C::Draws), w.Get(C::FitInPassBarriers),
+                       w.Get(C::FitInPassLightBarriers));
 }
 
 [[nodiscard]] inline std::string FormatWindow(const Window& w) {

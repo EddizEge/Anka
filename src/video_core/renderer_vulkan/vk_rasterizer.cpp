@@ -1270,6 +1270,11 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
         HandleTransformFeedback();
         query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
                                   maxwell3d->regs.zpass_pixel_count_enable);
+        if (texture_cache.Nx2InPassFeedback()) [[unlikely]] {
+            // EDEN_NX2_RX_RT_FIT=3: the anchor's feedback loop is this draw's (same pipeline,
+            // images and render targets).
+            RecordInPassFeedbackBarrier(scheduler, true);
+        }
         {
             Profile::Scope draw_scope{Profile::Zone::DrawRecord};
             draw_func();
@@ -1305,6 +1310,10 @@ bool RasterizerVulkan::TryLightDraw(bool is_indexed, bool indirect, bool invalid
     HandleTransformFeedback();
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
                               maxwell3d->regs.zpass_pixel_count_enable);
+    if (texture_cache.Nx2InPassFeedback()) [[unlikely]] {
+        // EDEN_NX2_RX_RT_FIT=3: as the uniform way above.
+        RecordInPassFeedbackBarrier(scheduler, true);
+    }
     {
         Profile::Scope draw_scope{Profile::Zone::DrawRecord};
         draw_func();
@@ -1401,6 +1410,9 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::Draws, 1);
+    }
     if (SplitOnB()) [[unlikely]] {
         DrawB(is_indexed, instance_count);
         return;
@@ -1560,6 +1572,9 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 }
 
 void RasterizerVulkan::DrawIndirect() {
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::Draws, 1);
+    }
     if (SplitOnB()) [[unlikely]] {
         DrawIndirectB();
         return;
@@ -5614,7 +5629,10 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
     anchor.image_hits = image_hits;
     anchor.record_count = scheduler.RecordCount();
     if (set_up) {
-        anchor.followable = !texture_cache.RenderTargetsNeedRepeat() && !pipeline.ViewsNeedRepeat();
+        // EDEN_NX2_RX_RT_FIT=3: C's light draws record no feedback barrier; a draw with one is
+        // repaired (set up in full: ConfigureDraw records it).
+        anchor.followable = !texture_cache.RenderTargetsNeedRepeat() &&
+                            !pipeline.ViewsNeedRepeat() && !texture_cache.Nx2InPassFeedback();
         if (!anchor.followable) {
             Profile::Add(Profile::Counter::LightRefusedTargets, 1);
             // B does not see this part of LightFollowable: its next draw in full. The light

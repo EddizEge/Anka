@@ -570,12 +570,18 @@ TEST_CASE("Reactive fence line", "[video_core][nx2_reactive]") {
     set(Reactive::Counter::RepeatViewAlias, 19);
     set(Reactive::Counter::MaskedColorTargets, 20);
     set(Reactive::Counter::MaskedDepthTargets, 21);
+    set(Reactive::Counter::Draws, 22);
+    set(Reactive::Counter::FitInPassBarriers, 23);
+    set(Reactive::Counter::FitInPassLightBarriers, 24);
     const std::string line = Reactive::FormatWindow(window);
     REQUIRE(Contains(line, "; fences 101 (skipped 2, real 3, buffer commits 4, texture commits 5, "
                            "buffer deferred 6, extra flushes 7) 8 us (commit 9 us, submit 10 us); "
                            "submits 11; copy back pops 12 us (lock wait 13 us); light refusals: "
                            "feedback 14, target cpu modified 15 sparse 16 alias 17, image cpu "
-                           "modified 18 alias 19; masked targets color 20 depth 21"));
+                           "modified 18 alias 19; masked targets color 20 depth 21; draws 22; "
+                           "rt fit in pass barriers 23 (light 24)"));
+    // The line ends with them (appended last: older parsers read the rest as before).
+    REQUIRE(line.ends_with("; draws 22; rt fit in pass barriers 23 (light 24)"));
     // Appended: the older part ends as before.
     REQUIRE(Contains(line, "latched images 0; fences 101"));
     // The first MAX_IMAGE_LOGS images keeping draws off the light way get a line, no more.
@@ -667,4 +673,78 @@ TEST_CASE("Reactive render target fit", "[video_core][nx2_reactive]") {
     static_assert(Flush::FitFeedbackBarrier(1));
     static_assert(!Flush::FitFeedbackBarrier(2));
     static_assert(!Flush::FitFeedbackBarrier(3));
+}
+
+TEST_CASE("Reactive render target fit modes", "[video_core][nx2_reactive]") {
+    namespace Flush = VideoCommon::Nx2Reactive;
+    // The switch's values: 0-3, anything else off.
+    for (u64 value = 0; value < 4; ++value) {
+        REQUIRE(Flush::RtFitMode(value) == value);
+    }
+    REQUIRE(Flush::RtFitMode(4) == 0);
+    REQUIRE(Flush::RtFitMode(5) == 0);
+    REQUIRE(Flush::RtFitMode(~u64{0}) == 0);
+    REQUIRE(Flush::RtFitMode(u64{1} << 32 | 3) == 0);
+    static_assert(Flush::RtFitMode(3) == 3);
+    // Mode 3: the barrier inside the render pass, never its end; 1 the end, never inside.
+    static_assert(!Flush::FitInPassBarrier(0));
+    static_assert(!Flush::FitInPassBarrier(1));
+    static_assert(!Flush::FitInPassBarrier(2));
+    static_assert(Flush::FitInPassBarrier(3));
+    // Ordered (barrier_feedback_loops needed, checked every full draw): 1 and 3, not 0 or 2.
+    static_assert(!Flush::FitOrdersFeedback(0));
+    static_assert(Flush::FitOrdersFeedback(1));
+    static_assert(!Flush::FitOrdersFeedback(2));
+    static_assert(Flush::FitOrdersFeedback(3));
+    // Lookups of every target: never off, always in 1 and 2 (as before), in 3 on a clip change.
+    static_assert(!Flush::FitForcesLookup(0, false));
+    static_assert(!Flush::FitForcesLookup(0, true));
+    static_assert(Flush::FitForcesLookup(1, false));
+    static_assert(Flush::FitForcesLookup(2, false));
+    static_assert(!Flush::FitForcesLookup(3, false));
+    static_assert(Flush::FitForcesLookup(3, true));
+    for (u32 mode = 0; mode < 8; ++mode) {
+        REQUIRE(Flush::FitInPassBarrier(mode) == (mode == 3));
+        REQUIRE(Flush::FitOrdersFeedback(mode) == (mode == 1 || mode == 3));
+        // At most one kind of barrier per mode.
+        REQUIRE(!(Flush::FitFeedbackBarrier(mode) && Flush::FitInPassBarrier(mode)));
+        for (const bool changed : {false, true}) {
+            const bool before = mode == 1 || mode == 2; // the old rule (rt_fit != 0, modes <= 2)
+            REQUIRE(Flush::FitForcesLookup(mode, changed) ==
+                    (before || (mode == 3 && changed)));
+        }
+    }
+    // TextureCache::CheckFeedbackLoop's answer per mode, for a draw sampling a color target's
+    // image (`color`) and / or the depth target's (`depth`): the render pass end (and the light
+    // way refused), or the barrier inside it. Off and 2: the fork's policy (depth only).
+    struct Answer {
+        bool end;
+        bool in_pass;
+    };
+    const auto check = [](u32 mode, bool color, bool depth) {
+        Answer answer{};
+        if (color && Flush::FitOrdersFeedback(mode)) {
+            if (Flush::FitFeedbackBarrier(mode)) {
+                return Answer{true, false};
+            }
+            answer.in_pass = true;
+        }
+        if (depth) {
+            answer.end = true;
+        }
+        if (answer.end) {
+            answer.in_pass = false; // the render pass end's barrier covers the color targets
+        }
+        return answer;
+    };
+    for (u32 mode = 0; mode < 4; ++mode) {
+        for (int bits = 0; bits < 4; ++bits) {
+            const bool color = (bits & 1) != 0;
+            const bool depth = (bits & 2) != 0;
+            const Answer answer = check(mode, color, depth);
+            REQUIRE(answer.end == (depth || (color && mode == 1)));
+            REQUIRE(answer.in_pass == (color && !depth && mode == 3));
+            REQUIRE(!(answer.end && answer.in_pass));
+        }
+    }
 }

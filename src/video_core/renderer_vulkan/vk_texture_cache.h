@@ -703,4 +703,11 @@ struct TextureCacheParams {
 
 using TextureCache = VideoCommon::TextureCache<TextureCacheParams>;
 
+/// EDEN_NX2_RX_RT_FIT=3 (TextureCache::Nx2InPassFeedback): orders a draw sampling the color
+/// target it renders into after the draws before it, inside the active render pass: color
+/// attachment writes before fragment shader reads, by region (the subpass self-dependency
+/// RenderPassCache::Get gives every render pass). `light`: recorded by a light draw (counted
+/// apart, EDEN_NX2_REACTIVE_STATS).
+void RecordInPassFeedbackBarrier(Scheduler& scheduler, bool light);
+
 } // namespace Vulkan

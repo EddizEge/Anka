@@ -511,15 +511,17 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
 
 template <class P>
 void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
+    // EDEN_NX2_RX_RT_FIT=3: this draw's, set below when it samples a color target's image.
+    nx2_in_pass_feedback = false;
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;
     }
 
-    // EDEN_NX2_RX_RT_FIT=1 checks every draw: the color feedback barrier is all that orders a
+    // EDEN_NX2_RX_RT_FIT=1 / 3 check every draw: the color feedback barrier is all that orders a
     // draw after the previous ones, and the cache key does not follow the views a draw samples.
     if (render_targets_serial == last_feedback_loop_serial &&
         texture_bindings_serial == last_feedback_texture_serial &&
-        !Nx2Reactive::FitFeedbackBarrier(rt_fit)) {
+        !Nx2Reactive::FitOrdersFeedback(rt_fit)) {
         if (last_feedback_loop_result) {
             runtime.BarrierFeedbackLoop();
         }
@@ -542,12 +544,18 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
             }
 
             const ImageId view_image_id = slot_image_views[view.id].image_id;
-            if (Nx2Reactive::FitFeedbackBarrier(rt_fit)) [[unlikely]] {
-                // EDEN_NX2_RX_RT_FIT=1: a draw sampling a color target's image (the target it
-                // renders into, RtFit) sees the previous draws' writes, as the alias copy did.
+            if (Nx2Reactive::FitOrdersFeedback(rt_fit)) [[unlikely]] {
+                // EDEN_NX2_RX_RT_FIT=1 / 3: a draw sampling a color target's image (the target it
+                // renders into, RtFit) sees the previous draws' writes, as the alias copy did: 1
+                // ends the render pass, 3 records a barrier inside it (ConfigureDraw, light
+                // draws) and looks on for a depth feedback loop (the view is a target's below).
                 for (size_t i = 0; i < NUM_RT; ++i) {
                     if ((rt_active_mask & (1u << i)) && view_image_id == rt_image_id[i]) {
-                        return true;
+                        if (Nx2Reactive::FitFeedbackBarrier(rt_fit)) {
+                            return true;
+                        }
+                        nx2_in_pass_feedback = true;
+                        break;
                     }
                 }
             }
@@ -581,6 +589,8 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     last_feedback_texture_serial = texture_bindings_serial;
     last_feedback_loop_result = requires_barrier;
     if (requires_barrier) {
+        // The render pass ends: its barrier covers the color targets too.
+        nx2_in_pass_feedback = false;
         runtime.BarrierFeedbackLoop();
     }
 }
@@ -661,7 +671,7 @@ bool TextureCache<P>::RescaleRenderTargets() {
         // up
         // EDEN_NX2_RX_RT_FIT: a surface clip write dirties only RenderTargets, and a target taken
         // for one clip (Nx2FindFitTarget) is looked up again for another.
-        const bool force = flags[Dirty::RenderTargetControl] || rt_fit != 0;
+        const bool force = flags[Dirty::RenderTargetControl] || Nx2FitForcesLookup();
         flags[Dirty::RenderTargetControl] = false;
 
         scale_rating = 0;
@@ -2778,13 +2788,28 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 }
 
 template <class P>
+bool TextureCache<P>::Nx2FitForcesLookup() {
+    if (rt_fit == 0) {
+        return false;
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const std::array<u32, 4> seen{clip.x.Value(), clip.width.Value(), clip.y.Value(),
+                                  clip.height.Value()};
+    const bool changed = seen != nx2_fit_clip || nx2_fit_clip_engine != maxwell3d;
+    nx2_fit_clip = seen;
+    nx2_fit_clip_engine = maxwell3d;
+    return Nx2Reactive::FitForcesLookup(rt_fit, changed);
+}
+
+template <class P>
 ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
     if (info.type != ImageType::e2D) {
         return ImageId{};
     }
-    if (Nx2Reactive::FitFeedbackBarrier(rt_fit) &&
+    if (Nx2Reactive::FitOrdersFeedback(rt_fit) &&
         !Settings::values.barrier_feedback_loops.GetValue()) {
-        // Mode 1 orders the draws with CheckFeedbackLoop's barrier, which this setting turns off.
+        // Modes 1 and 3 order the draws with CheckFeedbackLoop's barriers, which this setting
+        // turns off.
         return ImageId{};
     }
     const size_t size = CalculateGuestSizeInBytes(info);

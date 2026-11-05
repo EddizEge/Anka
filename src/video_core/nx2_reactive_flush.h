@@ -239,12 +239,20 @@ private:
 /// (~27k whole image copies a second with reactive flushing on). As one image, a draw reads it
 /// as a feedback loop. 1: a color feedback loop ends the render pass before the draw (the
 /// barrier makes the previous draws visible, as the copy did); 2 (diagnostic): no barrier, the
-/// fork's color feedback policy. Off (0) by default.
+/// fork's color feedback policy. 3: as 1, with a pipeline barrier inside the render pass instead
+/// of its end (the subpass self-dependency every render pass has, RenderPassCache::Get: color
+/// attachment writes before fragment shader reads, by region; the attachments are in the general
+/// layout), so the render pass and the light way go on (a light draw records the barrier too);
+/// a depth feedback loop still ends the render pass. By region covers a fragment reading the pixel
+/// it renders (what the spec defines for a feedback loop; other pixels are left to the driver, an
+/// immediate mode GPU waiting for every earlier fragment). Off (0) by default; another value: off.
+[[nodiscard]] constexpr u32 RtFitMode(u64 value) noexcept {
+    return value <= 3 ? static_cast<u32>(value) : 0U;
+}
+
+/// EDEN_NX2_RX_RT_FIT's mode (RtFitMode).
 [[nodiscard]] inline u32 RtFit() noexcept {
-    static const u32 mode = [] {
-        const u64 value = ReadCount("EDEN_NX2_RX_RT_FIT");
-        return value <= 2 ? static_cast<u32>(value) : 0U;
-    }();
+    static const u32 mode = RtFitMode(ReadCount("EDEN_NX2_RX_RT_FIT"));
     return mode;
 }
 
@@ -263,6 +271,24 @@ private:
 /// Whether a draw sampling a color target's image needs a feedback loop barrier (RtFit 1).
 [[nodiscard]] constexpr bool FitFeedbackBarrier(u32 mode) noexcept {
     return mode == 1;
+}
+
+/// Whether it gets the pipeline barrier inside the render pass instead (RtFit 3).
+[[nodiscard]] constexpr bool FitInPassBarrier(u32 mode) noexcept {
+    return mode == 3;
+}
+
+/// Whether RtFit orders a draw after the previous ones with a barrier (1, 3): that needs
+/// barrier_feedback_loops on, and the feedback loop check made at every draw set up in full.
+[[nodiscard]] constexpr bool FitOrdersFeedback(u32 mode) noexcept {
+    return FitFeedbackBarrier(mode) || FitInPassBarrier(mode);
+}
+
+/// Whether RescaleRenderTargets looks every render target up again (RtFit): modes 1 and 2 each
+/// time (a surface clip write dirties only RenderTargets), mode 3 only when the surface clip (or
+/// the engine) changed since its last call; a target whose registers changed is looked up anyway.
+[[nodiscard]] constexpr bool FitForcesLookup(u32 mode, bool clip_changed) noexcept {
+    return mode == 1 || mode == 2 || (mode == 3 && clip_changed);
 }
 
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads
