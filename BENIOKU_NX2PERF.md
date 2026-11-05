@@ -259,7 +259,8 @@ zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX
 gelen kaynak kodu `<KAYNAK_URL>`'de ve programın yanındaki `-source.zip`'tedir; üçüncü taraf
 kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
 lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
-`LICENSES\` içinde; programa giren kütüphanelerin kaynağı `-deps-source.zip`'te.
+`LICENSES\` içinde; kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te (önceden
+derlenmişler, FFmpeg, OpenSSL, SDL3 ve sirit için bildirimler upstream kaynaklarını gösterir).
 
 Nintendo Switch ve Donkey Kong Bananza, Nintendo'nun ticari markalarıdır. Bu projenin Nintendo
 ile bir bağı yoktur. Yalnız sahip olduğunuz oyunlarla kullanın.

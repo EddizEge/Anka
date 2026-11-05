@@ -266,8 +266,9 @@ was changed and when is in `NOTICE_NX2PERF.txt` (in the release zips) and
 corresponding source code of this release is at `<KAYNAK_URL>` and in the `-source.zip` next to
 the program, with notes on how the third-party libraries are fetched (`BUILDING_NX2PERF.md`).
 Third-party components keep their own licenses: their notices and license texts are in
-`THIRD_PARTY_NOTICES_NX2PERF.txt` and `LICENSES\`; the source of the libraries built into the
-program is in the `-deps-source.zip`.
+`THIRD_PARTY_NOTICES_NX2PERF.txt` and `LICENSES\`; the source of the libraries built from source
+is in the `-deps-source.zip` (for the prebuilt ones, FFmpeg, OpenSSL, SDL3 and sirit, the notices
+name their upstream sources).
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. This project has no
 affiliation with Nintendo. Use it only with games you own.

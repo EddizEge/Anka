@@ -53,7 +53,8 @@ same as the release program and is slower (about 16-22% in our measurements).
 
 The release program is the same objects linked twice more with MSVC's PGO.
 `dist/nx2perf/build/pgo_link.sh` does both links from yuzu-cmd's own link line (run it from Git
-Bash inside the Developer shell):
+Bash inside the Developer shell; give paths relative or as `D:/...`, not `/d/...`: they go to the
+MSVC tools unconverted):
 
 1. Instrument: `pgo_link.sh build-lto instrument eden-cli-pgi` links `yuzu-cmd`'s objects again
    with `/LTCG /FASTGENPROFILE:PGD=bin\eden-cli-pgi.pgd` (the same link line otherwise;
@@ -80,6 +81,8 @@ The release zips were made by a packaging script outside this tree. The program 
 program, the launchers from `dist/nx2perf/`, the README / BENIOKU / CHANGELOG / BUILDING files,
 `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_NX2PERF.txt` (the license texts and notices of
 the third-party components), a NOTICE file and `dist/nx2_switches.txt` (renamed so that it does
-not replace 2.0.0's own). The `-source.zip` is `git archive` of the same commit plus the NOTICE
-file, the `-deps-source.zip` the third-party sources CPM fetched, and `SHA256SUMS.txt` lists the
+not replace 2.0.0's own). The `-source.zip` is `git archive` of the same commit plus
+`GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),
+`SOURCE_NX2PERF.txt`, the NOTICE file and the third-party notices; the `-deps-source.zip` holds the
+third-party sources CPM fetched (not the prebuilt packages), and `SHA256SUMS.txt` lists the
 hashes of the zips.
