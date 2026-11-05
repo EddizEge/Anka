@@ -6,12 +6,12 @@ Tek bir program içerir: `eden-cli-nx2perf.exe` (komut satırı / SDL ön yüzü
 PokeDinner-Eglantine 2.0.0 kurulumunun yanına konur; başlatıcılar onu ölçtüğümüz ayarlarla açar.
 
 Eden projesiyle ya da Franseven'le bir bağı yoktur. Sorunlarını onlara bildirmeyin; bu çatalın
-sorun izleyicisini kullanın (`<KAYNAK_URL>`).
+sorun izleyicisini kullanın (`https://github.com/EddizEge/NX2Perf`).
 
 - Taban: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
 - Bu sürüm: paketteki `VERSION_NX2PERF.txt` (etiket, commit, derleme tarihi).
-- Kaynak: `<KAYNAK_URL>` (programla aynı commit; GPLv3, bkz. "Lisans").
+- Kaynak: `https://github.com/EddizEge/NX2Perf` (programla aynı commit; GPLv3, bkz. "Lisans").
 - Değişiklikler: `CHANGELOG_NX2PERF.md` (İngilizce). Bütün anahtarlar: `nx2_switches_NX2PERF.txt`
   (kaynakta `dist/nx2_switches.txt`).
 
@@ -256,7 +256,7 @@ commit'leri yazarlarıyla değişiklik günlüğünde listelenir.
 Eden ve PokeDinner-Eglantine gibi NX2Perf de **GNU Genel Kamu Lisansı v3.0 ya da sonrası** ile
 lisanslıdır (`LICENSE.txt`). PokeDinner-Eglantine 2.0.0'ın değiştirilmiş bir sürümüdür; neyin ne
 zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX2PERF.md`'dedir. Bu sürümün eksiksiz karşılık
-gelen kaynak kodu `<KAYNAK_URL>`'de ve programın yanındaki `-source.zip`'tedir; üçüncü taraf
+gelen kaynak kodu `https://github.com/EddizEge/NX2Perf`'te ve programın yanındaki `-source.zip`'tedir; üçüncü taraf
 kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
 lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
 `LICENSES\` içinde; kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te (önceden

@@ -7,12 +7,12 @@ existing PokeDinner-Eglantine 2.0.0 installation, and launchers that start it wi
 we measured.
 
 It is not affiliated with the Eden project or with Franseven. Please do not report its problems
-to them; use this fork's issue tracker (`<KAYNAK_URL>`).
+to them; use this fork's issue tracker (`https://github.com/EddizEge/NX2Perf`).
 
 - Base: PokeDinner-a-Eglantine-Fork 2.0.0, commit `70ecb39ef0`
   (https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork)
 - This release: see `VERSION_NX2PERF.txt` in the package (tag, commit, build date).
-- Source: `<KAYNAK_URL>` (the same commit as the program; GPLv3, see "License").
+- Source: `https://github.com/EddizEge/NX2Perf` (the same commit as the program; GPLv3, see "License").
 - Changes: `CHANGELOG_NX2PERF.md`. Every switch: `nx2_switches_NX2PERF.txt` (in the source:
   `dist/nx2_switches.txt`).
 
@@ -263,7 +263,7 @@ Like Eden and PokeDinner-Eglantine, NX2Perf is licensed under the **GNU General 
 v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantine 2.0.0; what
 was changed and when is in `NOTICE_NX2PERF.txt` (in the release zips) and
 `CHANGELOG_NX2PERF.md`. The complete
-corresponding source code of this release is at `<KAYNAK_URL>` and in the `-source.zip` next to
+corresponding source code of this release is at `https://github.com/EddizEge/NX2Perf` and in the `-source.zip` next to
 the program, with notes on how the third-party libraries are fetched (`BUILDING_NX2PERF.md`).
 Third-party components keep their own licenses: their notices and license texts are in
 `THIRD_PARTY_NOTICES_NX2PERF.txt` and `LICENSES\`; the source of the libraries built from source
