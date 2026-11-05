@@ -8,7 +8,7 @@ per-draw shortcuts are on and `=0` brings back the 2.0.0 code path.
 ## NX2Perf 1 (`2.0.0-nx2perf1`)
 
 Base: PokeDinner-Eglantine 2.0.0. Program: `eden-cli` (SDL front end), built with LTO and
-profile-guided optimization. About 390 commits, made between 30 October and 5 November 2026
+profile-guided optimization. About 390 commits, made between 31 October and 5 November 2026
 (modified by the NX2Perf maintainer; see `NOTICE_NX2PERF.txt` in the release zips).
 
 ### Donkey Kong Bananza terrain and the GPU command stream
