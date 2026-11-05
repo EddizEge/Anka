@@ -159,7 +159,9 @@ public:
                std::size_t cache_index_)
         : backing(std::move(backing_)), extent_offset(extent_offset_), extent_size(extent_size_),
           uncompressed_size(uncompressed_size_), name(std::move(name_)), cache(std::move(cache_)),
-          cache_index(cache_index_), cache_enabled(uncompressed_size <= cache->cap / 2) {}
+          cache_index(cache_index_),
+          // Members over 256 MiB spill to disk even with a raised cap (each would be one vector).
+          cache_enabled(uncompressed_size <= std::min(cache->cap, NupDecompressCache::DefaultCap) / 2) {}
 
     std::string GetName() const override {
         return name;
@@ -375,17 +377,17 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
     cache->cap = memory_cache_cap;
-    // sergio: hosts with plenty of RAM keep far more decompressed members, so area changes stop
-    // re-running zstd on files the 512 MiB default evicted. EDEN_NUP_CACHE_MIB overrides (6144 here).
+    // sergio: hosts with plenty of RAM can keep far more decompressed members, so area changes
+    // stop re-running zstd on files the 512 MiB default evicted. EDEN_NUP_CACHE_MIB raises it
+    // (e.g. 6144); the default stays 512 MiB.
     if (memory_cache_cap == NupDecompressCache::DefaultCap) {
-        std::size_t mib = 6144;
         if (const char* v = std::getenv("EDEN_NUP_CACHE_MIB"); v != nullptr && v[0] != 0) {
-            mib = static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
+            const auto mib = static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
+            if (mib >= 64) {
+                cache->cap = mib * 1024 * 1024;
+            }
+            LOG_INFO(Loader, "NUP decompression cache: {} MiB", cache->cap / (1024 * 1024));
         }
-        if (mib >= 64) {
-            cache->cap = mib * 1024 * 1024;
-        }
-        LOG_INFO(Loader, "NUP decompression cache: {} MiB", cache->cap / (1024 * 1024));
     }
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
