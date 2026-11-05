@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
@@ -196,6 +197,28 @@ private:
     return limit <= 1 || delay_fence || made_anyway || force || deferred + 1 >= limit;
 }
 
+/// EDEN_NX2_RX_COALESCE_LOOSE=1 (DIAGNOSTIC ONLY, with EDEN_NX2_RX_COALESCE: it weakens the
+/// ordering reactive flushing gives): a fence made for queued operations, query fence work or the
+/// skip limit alone (stubbed: no submission without the copy back) no longer counts as made
+/// anyway, so the copy back waits for a fence with a submission of its own (texture or query
+/// downloads), the <fences>th one or the first one after a frame ended. Such a fence's operations
+/// then run before the GPU-written data it would have carried lands in guest memory. It measures
+/// what the submissions the copy backs add cost. Off by default.
+[[nodiscard]] inline bool CoalesceLoose() noexcept {
+    static const bool enabled = Common::Nx2Reactive::ParseFlag(
+        Common::Nx2Reactive::GetEnv("EDEN_NX2_RX_COALESCE_LOOSE"));
+    return enabled;
+}
+
+/// Whether a fence is made anyway for CommitBufferCopyBack: `real_work` when it would be a real
+/// fence without the copy back (another cache's downloads, query flushes), else `stubbed()` when
+/// it would be made, stubbed, for queued operations, query fence work or the skip limit; the
+/// latter counts unless CoalesceLoose, and is asked only when it counts (it takes a lock).
+template <typename Stubbed>
+[[nodiscard]] constexpr bool CoalesceMadeAnyway(bool loose, bool real_work, Stubbed&& stubbed) {
+    return real_work || (!loose && stubbed());
+}
+
 /// EDEN_NX2_RX_ONE_SUBMIT=1: a fence with downloads to wait for is made real, and a real fence's
 /// Queue submits the command buffer (InnerFence::Queue: scheduler.Flush); SignalFence then called
 /// FlushCommands, which submits again whenever the rasterizer drew since its last own flush: an
@@ -239,12 +262,20 @@ private:
 /// (~27k whole image copies a second with reactive flushing on). As one image, a draw reads it
 /// as a feedback loop. 1: a color feedback loop ends the render pass before the draw (the
 /// barrier makes the previous draws visible, as the copy did); 2 (diagnostic): no barrier, the
-/// fork's color feedback policy. Off (0) by default.
+/// fork's color feedback policy. 3: as 1, with a pipeline barrier inside the render pass instead
+/// of its end (the subpass self-dependency every render pass has, RenderPassCache::Get: color
+/// attachment writes before fragment shader reads, by region; the attachments are in the general
+/// layout), so the render pass and the light way go on (a light draw records the barrier too);
+/// a depth feedback loop still ends the render pass. By region covers a fragment reading the pixel
+/// it renders (what the spec defines for a feedback loop; other pixels are left to the driver, an
+/// immediate mode GPU waiting for every earlier fragment). Off (0) by default; another value: off.
+[[nodiscard]] constexpr u32 RtFitMode(u64 value) noexcept {
+    return value <= 3 ? static_cast<u32>(value) : 0U;
+}
+
+/// EDEN_NX2_RX_RT_FIT's mode (RtFitMode).
 [[nodiscard]] inline u32 RtFit() noexcept {
-    static const u32 mode = [] {
-        const u64 value = ReadCount("EDEN_NX2_RX_RT_FIT");
-        return value <= 2 ? static_cast<u32>(value) : 0U;
-    }();
+    static const u32 mode = RtFitMode(ReadCount("EDEN_NX2_RX_RT_FIT"));
     return mode;
 }
 
@@ -263,6 +294,73 @@ private:
 /// Whether a draw sampling a color target's image needs a feedback loop barrier (RtFit 1).
 [[nodiscard]] constexpr bool FitFeedbackBarrier(u32 mode) noexcept {
     return mode == 1;
+}
+
+/// Whether it gets the pipeline barrier inside the render pass instead (RtFit 3).
+[[nodiscard]] constexpr bool FitInPassBarrier(u32 mode) noexcept {
+    return mode == 3;
+}
+
+/// Whether RtFit orders a draw after the previous ones with a barrier (1, 3): that needs
+/// barrier_feedback_loops on, and the feedback loop check made at every draw set up in full.
+[[nodiscard]] constexpr bool FitOrdersFeedback(u32 mode) noexcept {
+    return FitFeedbackBarrier(mode) || FitInPassBarrier(mode);
+}
+
+/// Whether RescaleRenderTargets looks every render target up again (RtFit): modes 1 and 2 each
+/// time (a surface clip write dirties only RenderTargets), mode 3 only when the surface clip (or
+/// the engine) changed since its last call; a target whose registers changed is looked up anyway.
+[[nodiscard]] constexpr bool FitForcesLookup(u32 mode, bool clip_changed) noexcept {
+    return mode == 1 || mode == 2 || (mode == 3 && clip_changed);
+}
+
+/// The surface clip (x, width, y, height) and engine RescaleRenderTargets last saw (RtFit).
+struct FitClipMemo {
+    std::array<u32, 4> clip{};
+    const void* engine{};
+
+    /// Notes what this call sees; whether it differs from the last call's.
+    constexpr bool Note(const std::array<u32, 4>& seen, const void* now) noexcept {
+        const bool changed = seen != clip || now != engine;
+        clip = seen;
+        engine = now;
+        return changed;
+    }
+};
+
+/// RescaleRenderTargets' `force` (every target looked up again): RenderTargetControl dirty, or
+/// FitForcesLookup. With RtFit on every call notes the clip, whatever else forces the lookups, so
+/// a target taken for one clip is looked up again when the next call sees another; off, nothing
+/// is noted (as before the switch).
+[[nodiscard]] constexpr bool FitLookupForced(u32 mode, bool control_dirty, FitClipMemo& memo,
+                                             const std::array<u32, 4>& clip,
+                                             const void* engine) noexcept {
+    if (mode == 0) {
+        return control_dirty;
+    }
+    const bool changed = memo.Note(clip, engine);
+    return control_dirty || FitForcesLookup(mode, changed);
+}
+
+/// What CheckFeedbackLoop does for a sampled view with RtFit: nothing more, end the render pass
+/// before the draw, or a barrier inside it.
+enum class FitFeedback : u32 {
+    None,
+    EndPass,
+    InPass,
+};
+
+/// For a view of a color target's image (`target_image`) the draw reads in its fragment stage
+/// alone (`fragment_read`: not another stage's view, not a storage image it writes): modes 1 and
+/// 3 order the draw after the previous ones, 1 by ending the render pass, 3 with a barrier inside
+/// it (the self-dependency's second scope: fragment shader reads), else by ending it too; 0 and 2
+/// leave it to the fork's check (a depth target's image ends the render pass there).
+[[nodiscard]] constexpr FitFeedback FitFeedbackFor(u32 mode, bool target_image,
+                                                   bool fragment_read) noexcept {
+    if (!target_image || !FitOrdersFeedback(mode)) {
+        return FitFeedback::None;
+    }
+    return FitInPassBarrier(mode) && fragment_read ? FitFeedback::InPass : FitFeedback::EndPass;
 }
 
 /// EDEN_NX2_RX_NO_COPYBACK=1 (DIAGNOSTIC ONLY, breaks reactive flushing's point): guest CPU reads

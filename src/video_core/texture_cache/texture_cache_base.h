@@ -217,8 +217,10 @@ public:
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
-    /// Handle feedback loops during draws.
-    void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
+    /// Handle feedback loops during draws. `first_fragment_view`: the index of the fragment
+    /// stage's first view (views are in stage order; EDEN_NX2_RX_RT_FIT=3 orders those alone
+    /// inside the render pass).
+    void CheckFeedbackLoop(std::span<const ImageViewInOut> views, size_t first_fragment_view);
 
     /// Get the sampler from the graphics/compute descriptor table in the specified index
     Sampler* GetSampler(u32 index, bool compute);
@@ -312,6 +314,13 @@ public:
     /// EDEN_NX2_LIGHT_DRAW: the same for the images a draw samples or stores to (FillImageViews):
     /// CPU-modified contents or an alias written after one of them.
     [[nodiscard]] bool ViewsNeedRepeat(std::span<const ImageViewInOut> views) const;
+
+    /// EDEN_NX2_RX_RT_FIT=3: whether the draw last set up in full (CheckFeedbackLoop) samples a
+    /// color target's image, and so it and the light draws after it get a feedback barrier inside
+    /// the render pass before they draw (Vulkan::RecordInPassFeedbackBarrier).
+    [[nodiscard]] bool Nx2InPassFeedback() const noexcept {
+        return nx2_in_pass_feedback;
+    }
 
     /// EDEN_NX2_REACTIVE_STATS: counts why an image keeps a draw off the light way (the two
     /// above answered yes) and logs the first images (an empty id: a feedback loop).
@@ -439,6 +448,11 @@ private:
     /// clip, if any (nx2_reactive_flush.h RtFit)
     [[nodiscard]] ImageId Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr);
 
+    /// RescaleRenderTargets' `force` (every render target looked up again): `control_dirty`
+    /// (RenderTargetControl), or EDEN_NX2_RX_RT_FIT's lookups (nx2_reactive_flush.h
+    /// FitLookupForced); with the switch notes the surface clip at every call
+    [[nodiscard]] bool Nx2FitForcesLookup(bool control_dirty);
+
     /// Iterates over all the images in a region calling func
     template <typename Func>
     void ForEachImageInRegion(DAddr cpu_addr, size_t size, Func&& func);
@@ -549,6 +563,8 @@ private:
     u64 last_feedback_loop_serial = 0;
     u64 last_feedback_texture_serial = 0;
     bool last_feedback_loop_result = false;
+    /// EDEN_NX2_RX_RT_FIT=3: see Nx2InPassFeedback
+    bool nx2_in_pass_feedback = false;
     FramebufferId last_framebuffer_id{};
     u64 last_framebuffer_serial = 0;
 
@@ -625,8 +641,12 @@ private:
     const bool no_rt_latch = Nx2Reactive::NoRtLatch();
     /// EDEN_NX2_RX_MASKED_TARGETS: a draw marks only the render targets it can write
     const bool masked_targets = Nx2Reactive::MaskedTargets();
-    /// EDEN_NX2_RX_RT_FIT (0: off; 1: with color feedback loop barriers; 2: without)
+    /// EDEN_NX2_RX_RT_FIT (0: off; 1: with color feedback loop barriers; 2: without; 3: with
+    /// them inside the render pass)
     const u32 rt_fit = Nx2Reactive::RtFit();
+    /// EDEN_NX2_RX_RT_FIT: the surface clip and engine RescaleRenderTargets last saw
+    /// (Nx2FitForcesLookup)
+    Nx2Reactive::FitClipMemo nx2_fit_clip{};
     /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
     /// per (image, alias) pair, synchronizations (Nx2ReportTop)
     struct Nx2RepeatCount {

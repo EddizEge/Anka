@@ -1349,6 +1349,33 @@ void TextureCacheRuntime::BarrierFeedbackLoop() {
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 
+void RecordInPassFeedbackBarrier(Scheduler& scheduler, bool light) {
+    if (!scheduler.IsRenderPassActive()) [[unlikely]] {
+        // Its first synchronization scope would be empty: the render pass that ended put its own
+        // barrier after the draws.
+        return;
+    }
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FitInPassBarriers, 1);
+        if (light) {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FitInPassLightBarriers, 1);
+        }
+    }
+    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+        // A subset of the self-dependency's scopes, and its dependency flags (required inside a
+        // render pass).
+        static constexpr VkMemoryBarrier barrier{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_DEPENDENCY_BY_REGION_BIT,
+                               barrier);
+    });
+}
+
 void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                                            std::span<const VideoCommon::ImageCopy> copies) {
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
