@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <span>
+#include <string>
 #include <type_traits>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
@@ -36,6 +37,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/engines/fermi_2d.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/descriptor_table.h"
 #include "video_core/texture_cache/image_base.h"
@@ -253,6 +255,12 @@ public:
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr cpu_addr, u64 size);
 
+    /// Images a guest CPU read latched forced_flushed and still has (EDEN_NX2_READ_LATCH_AGE or
+    /// EDEN_NX2_REACTIVE_STATS; 0 without both).
+    [[nodiscard]] size_t ReadLatchedImages() const noexcept {
+        return read_latches.Size();
+    }
+
     /// Remove images in a region
     void UnmapMemory(DAddr cpu_addr, size_t size);
 
@@ -304,6 +312,15 @@ public:
     /// EDEN_NX2_LIGHT_DRAW: the same for the images a draw samples or stores to (FillImageViews):
     /// CPU-modified contents or an alias written after one of them.
     [[nodiscard]] bool ViewsNeedRepeat(std::span<const ImageViewInOut> views) const;
+
+    /// EDEN_NX2_REACTIVE_STATS: counts why an image keeps a draw off the light way (the two
+    /// above answered yes) and logs the first images (an empty id: a feedback loop).
+    void Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const;
+
+    /// EDEN_NX2_REACTIVE_STATS: logs the images that kept draws off the light way most and the
+    /// alias pairs synchronized most since the last call, then forgets them (the rasterizer's
+    /// report, every ~10 s).
+    void Nx2ReportTop();
 
     /// EDEN_NX2_LIGHT_UNIFORM: how many times a memory write found an image (WriteMemory) so far.
     [[nodiscard]] u64 WriteHits() const noexcept {
@@ -418,6 +435,10 @@ private:
     /// Find or create a view for a render target with the given image parameters
     [[nodiscard]] ImageViewId FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr);
 
+    /// EDEN_NX2_RX_RT_FIT: the narrowest image with a render target's memory that holds the surface
+    /// clip, if any (nx2_reactive_flush.h RtFit)
+    [[nodiscard]] ImageId Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr);
+
     /// Iterates over all the images in a region calling func
     template <typename Func>
     void ForEachImageInRegion(DAddr cpu_addr, size_t size, Func&& func);
@@ -487,6 +508,10 @@ private:
 
     /// Bind an image view as render target, downloading resources preemtively if needed
     void BindRenderTarget(ImageViewId* old_id, ImageViewId new_id);
+
+    /// EDEN_NX2_REACTIVE_STATS: counts a render target download BindRenderTarget queued, by why
+    /// the image is forced_flushed, and logs the image at its first one.
+    void NoteReactiveRtDownload(ImageBase& image);
 
     /// Create a render target from a given image and image view parameters
     [[nodiscard]] std::pair<FramebufferId, ImageViewId> RenderTargetFromImage(
@@ -594,6 +619,36 @@ private:
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;
+    /// EDEN_NX2_READ_LATCH_AGE (0: off; nx2_reactive_flush.h)
+    const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    /// EDEN_NX2_RX_NO_RT_LATCH (diagnostic: CPU reads latch no image)
+    const bool no_rt_latch = Nx2Reactive::NoRtLatch();
+    /// EDEN_NX2_RX_MASKED_TARGETS: a draw marks only the render targets it can write
+    const bool masked_targets = Nx2Reactive::MaskedTargets();
+    /// EDEN_NX2_RX_RT_FIT (0: off; 1: with color feedback loop barriers; 2: without)
+    const u32 rt_fit = Nx2Reactive::RtFit();
+    /// EDEN_NX2_REACTIVE_STATS: per image, draws it kept off the light way and the last reason;
+    /// per (image, alias) pair, synchronizations (Nx2ReportTop)
+    struct Nx2RepeatCount {
+        u64 count{};
+        u32 reason{};
+        std::string text; ///< The image as first seen in the window (it may be deleted since)
+    };
+    struct Nx2PairCount {
+        u64 count{};
+        std::string text;
+    };
+    mutable std::mutex nx2_top_mutex;
+    mutable std::unordered_map<u32, Nx2RepeatCount> nx2_repeat_top;
+    std::unordered_map<u64, Nx2PairCount> nx2_alias_pairs;
+    [[nodiscard]] std::string Nx2ImageText(ImageId image_id) const;
+    /// The images GetFlushArea latched (nx2_read_latched), kept with the switch or the stats
+    const bool track_read_latches =
+        read_latch_age != 0 || ::Common::Nx2Reactive::StatsEnabled();
+    Nx2Reactive::ReadLatchList<ImageId> read_latches;
+    /// Clears the read latch of the images no CPU read saw for read_latch_age frames (TickFrame,
+    /// every AgeStep frames).
+    void AgeReadLatches();
     u64 image_view_epoch = 0; ///< See ImageViewEpoch
     std::atomic<u64> write_hits{}; ///< See WriteHits
 

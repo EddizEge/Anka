@@ -261,6 +261,28 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
     }
 }
 
+u64 StagingBufferPool::CachedBytes(MemoryUsage usage) const noexcept {
+    const StagingBuffersCache* cache = nullptr;
+    switch (usage) {
+    case MemoryUsage::DeviceLocal:
+        cache = &device_local_cache;
+        break;
+    case MemoryUsage::Upload:
+        cache = &upload_cache;
+        break;
+    case MemoryUsage::Download:
+        cache = &download_cache;
+        break;
+    default:
+        return 0;
+    }
+    u64 bytes = 0;
+    for (size_t log2 = 0; log2 < NUM_LEVELS; ++log2) {
+        bytes += u64{(*cache)[log2].entries.size()} << log2;
+    }
+    return bytes;
+}
+
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {
     ReleaseLevel(GetCache(usage), current_delete_level);
 }

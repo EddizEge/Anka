@@ -38,6 +38,7 @@ add_executable(tests
     video_core/nx2_mode_pace21.cpp
     video_core/nx2_front_same.cpp
     video_core/nx2_macro_jit.cpp
+    video_core/nx2_reactive.cpp
     video_core/nx2_record_list.cpp
     video_core/nx2_reg_replica.cpp
     video_core/nx2_root.cpp

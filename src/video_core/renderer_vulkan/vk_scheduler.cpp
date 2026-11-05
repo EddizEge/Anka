@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 
 #include "common/logging.h"
+#include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -399,6 +400,9 @@ void Scheduler::AllocateWorkerCommandBuffer() {
 }
 
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::Submits, 1);
+    }
     EndPendingOperations();
     InvalidateState();
 

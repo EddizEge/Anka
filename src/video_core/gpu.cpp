@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -299,7 +300,20 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
+        // EDEN_NX2_REACTIVE_STATS (common/nx2_reactive.h)
+        const bool stats = Common::Nx2Reactive::StatsEnabled();
+        const s64 start_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
+        if (stats) [[unlikely]] {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::CpuReads, 1);
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FlushAreaUs,
+                                     Common::Nx2Reactive::MicrosecondsSince(start_ns));
+            // No frame for 20 s (a hang, a loading screen): the line comes from here.
+            if (Common::Nx2Reactive::TakeReportDue(Common::Nx2Reactive::GetState(), start_ns,
+                                                   Common::Nx2Reactive::REPORT_PERIOD_NS)) {
+                Common::Nx2Reactive::Report(start_ns);
+            }
+        }
         if (raster_area.preemtive) {
             return raster_area;
         }
@@ -311,12 +325,19 @@ struct GPU::Impl {
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
         }
+        const s64 flush_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
         const u64 fence = RequestSyncOperation([this, &raster_area]() {
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::TickWorkFlushes, 1);
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        if (stats) [[unlikely]] {
+            const u64 wait_us = Common::Nx2Reactive::MicrosecondsSince(flush_ns);
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::SyncFlushes, 1);
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::SyncFlushUs, wait_us);
+            Common::Nx2Reactive::Max(Common::Nx2Reactive::Counter::SyncFlushMaxUs, wait_us);
+        }
         return raster_area;
     }
 

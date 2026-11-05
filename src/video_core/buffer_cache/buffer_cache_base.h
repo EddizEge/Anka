@@ -37,6 +37,7 @@
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -483,7 +484,11 @@ public:
 
     /// The guest CPU reads [addr, addr + size) (pages its reads are tracked on): without
     /// AsyncBufferDownloads, GPU writes there are still copied back at fences from now on.
-    void NoteCpuRead(DAddr addr, size_t size);
+    /// Returns whether part of it was not noted before.
+    bool NoteCpuRead(DAddr addr, size_t size);
+
+    /// 4 KiB pages in the CPU-read ranges (EDEN_NX2_REACTIVE_STATS; walks them).
+    [[nodiscard]] u64 CpuReadPages() const;
 
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
@@ -887,6 +892,14 @@ private:
     /// Copying every GPU-written range back instead (each written native storage binding is an
     /// 8 MiB window) dropped it from 60 to about 42 frames a second.
     SummarizedRangeSet<false> cpu_read_ranges;
+    /// EDEN_NX2_READ_LATCH_AGE (0: off): the frame each of cpu_read_ranges' pages was last read in
+    const u64 read_latch_age = Nx2Reactive::ReadLatchAge();
+    /// EDEN_NX2_RX_NO_COPYBACK (diagnostic: no CPU-read page, no copy back)
+    const bool no_copy_back = Nx2Reactive::NoCopyBack();
+    Nx2Reactive::ReadPageAges read_page_ages;
+    /// Drops the CPU-read pages not read for read_latch_age frames and makes the cores' reads
+    /// reach GetFlushArea again (TickFrame, every AgeStep frames).
+    void AgeCpuReads();
 
     /// Queues the parts of a GPU write to [addr, addr + size) that are copied back at the next
     /// fence.

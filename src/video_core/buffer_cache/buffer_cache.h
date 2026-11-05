@@ -13,6 +13,7 @@
 #include <vector>
 #include <fmt/ranges.h>
 
+#include "common/nx2_reactive.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/word_manager.h"
@@ -159,6 +160,9 @@ void BufferCache<P>::TickFrame() {
     // whole pages; make it exact again once it lets many queries through to nothing.
     if (gpu_modified_ranges.WantsRebuild()) {
         gpu_modified_ranges.Rebuild();
+    }
+    if (read_latch_age != 0 && frame_tick % Nx2Reactive::AgeStep(read_latch_age) == 0) [[unlikely]] {
+        AgeCpuReads();
     }
     ++frame_tick;
     delayed_destruction_ring.Tick();
@@ -790,6 +794,11 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     }
     Nx2Profile::Add(Nx2Profile::Counter::DownloadBytes, total_size_bytes);
     Nx2Profile::Add(Nx2Profile::Counter::DownloadCopies, downloads.size());
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferDownloads, downloads.size());
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferDownloadBytes,
+                                 total_size_bytes);
+    }
     auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes, true);
     boost::container::small_vector<BufferCopy, 4> normalized_copies;
     runtime.PreCopyBarrier();
@@ -891,15 +900,21 @@ bool BufferCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
 }
 
 template <class P>
-void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
+bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
     if (AsyncBufferDownloads()) {
-        return;
+        return false;
+    }
+    if (no_copy_back) [[unlikely]] {
+        return false;
+    }
+    if (read_latch_age != 0) [[unlikely]] {
+        read_page_ages.Note(addr, size, frame_tick);
     }
     size_t covered = 0;
     cpu_read_ranges.ForEachInRange(addr, size,
                                    [&](DAddr start, DAddr end) { covered += end - start; });
     if (covered >= size) {
-        return;
+        return false;
     }
     cpu_read_ranges.Add(addr, size);
     if (Nx2Profile::Enabled()) {
@@ -908,6 +923,28 @@ void BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
             LOG_INFO(HW_GPU, "CPU-read buffer pages noted: {} (latest {:#x})", noted, addr);
         }
     }
+    return true;
+}
+
+template <class P>
+void BufferCache<P>::AgeCpuReads() {
+    const u64 dropped = read_page_ages.Expire(frame_tick, read_latch_age, [this](DAddr page) {
+        cpu_read_ranges.Subtract(page, DEVICE_PAGESIZE);
+    });
+    Common::Nx2Reactive::BumpReadAreaEpoch();
+    if (dropped != 0 && Common::Nx2Reactive::StatsEnabled()) {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::LatchPagesDropped, dropped);
+    }
+}
+
+template <class P>
+u64 BufferCache<P>::CpuReadPages() const {
+    u64 pages = 0;
+    cpu_read_ranges.ForEach([&pages](DAddr start, DAddr end) {
+        pages += (Common::AlignUp(end, DEVICE_PAGESIZE) - Common::AlignDown(start, DEVICE_PAGESIZE)) /
+                 DEVICE_PAGESIZE;
+    });
+    return pages;
 }
 
 template <class P>

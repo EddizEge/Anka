@@ -72,6 +72,8 @@ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
         };
         if (iter->recompile) {
             const DoNotFastmemMarker marker{iter->location, static_cast<unsigned>(iter->inst_name)};
+            // EDEN_NX2_REACTIVE_STATS shows how many instructions left fastmem (fault path only).
+            ::Common::Nx2Reactive::CountFastmemFallback();
             do_not_fastmem.insert(marker);
             InvalidateBasicBlocks({std::get<0>(marker)});
         }

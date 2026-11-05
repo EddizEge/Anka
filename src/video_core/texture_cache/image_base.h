@@ -140,6 +140,13 @@ struct ImageBase {
     /// pages marked since it was last GPU-modified; cleared when it is unmarked (not GPU-modified
     /// or unregistered any more), so MarkModification marks them once, not on every draw.
     bool nx2_pages_set = false;
+    /// A guest CPU read (GetFlushArea) made this image forced_flushed, not its pitch linear
+    /// layout at creation: it is downloaded at every render target bind since.
+    bool nx2_read_latched = false;
+    /// EDEN_NX2_REACTIVE_STATS: its first queued render target download was logged.
+    bool nx2_rt_download_logged = false;
+    /// EDEN_NX2_READ_LATCH_AGE: frame_tick of the last guest CPU read (GetFlushArea) here.
+    u64 nx2_last_cpu_read = 0;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
 

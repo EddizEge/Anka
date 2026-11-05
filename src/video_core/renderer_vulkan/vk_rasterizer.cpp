@@ -28,9 +28,11 @@
 #include "common/assert.h"
 #include "shader_recompiler/exception.h"
 #include "common/logging.h"
+#include "common/nx2_reactive.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/nx2_reactive_flush.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/native_query_trace.h"
@@ -2157,27 +2159,44 @@ bool RasterizerVulkan::HoldsGpuWrittenData(DAddr addr, u64 size) {
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    // EDEN_NX2_REACTIVE_STATS: calls and the two cache mutexes' waits
+    const bool stats = Common::Nx2Reactive::StatsEnabled();
+    if (stats) [[unlikely]] {
+        Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FlushAreaCalls, 1);
+    }
+    const DAddr page_start = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+    const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+    // EDEN_NX2_FLUSH_FIRST_READ: newly noted pages the GPU wrote are flushed once (nx2_reactive_flush.h)
+    bool flush_buffer = false;
     {
         // Guest CPU reads of buffer memory decide which GPU-written buffer data is copied back.
         CheckBufferLockOffB("RasterizerVulkan::GetFlushArea");
+        const s64 lock_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
         std::scoped_lock lock{buffer_cache.mutex};
-        buffer_cache.NoteCpuRead(Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
-                                 Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) -
-                                     Common::AlignDown(addr, Core::DEVICE_PAGESIZE));
-    }
-    {
-        std::scoped_lock lock{texture_cache.mutex};
-        auto area = texture_cache.GetFlushArea(addr, size);
-        if (area) {
-            return *area;
+        if (stats) [[unlikely]] {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::BufferLockUs,
+                                     Common::Nx2Reactive::MicrosecondsSince(lock_ns));
+        }
+        const bool newly_noted = buffer_cache.NoteCpuRead(page_start, page_end - page_start);
+        if (VideoCommon::Nx2Reactive::FlushFirstRead()) [[unlikely]] {
+            flush_buffer = VideoCommon::Nx2Reactive::FirstReadFlushes(
+                true, newly_noted,
+                newly_noted && buffer_cache.IsRegionGpuModified(page_start, page_end - page_start));
+            if (flush_buffer && stats) {
+                Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::FirstReadFlushes, 1);
+            }
         }
     }
-    VideoCore::RasterizerDownloadArea new_area{
-        .start_address = Common::AlignDown(addr, Core::DEVICE_PAGESIZE),
-        .end_address = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE),
-        .preemtive = true,
-    };
-    return new_area;
+    {
+        const s64 lock_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
+        std::scoped_lock lock{texture_cache.mutex};
+        if (stats) [[unlikely]] {
+            Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::TextureLockUs,
+                                     Common::Nx2Reactive::MicrosecondsSince(lock_ns));
+        }
+        const auto area = texture_cache.GetFlushArea(addr, size);
+        return VideoCommon::Nx2Reactive::CombineFlushArea(area, page_start, page_end, flush_buffer);
+    }
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
@@ -2585,6 +2604,34 @@ void RasterizerVulkan::TickFrame() {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.TickFrame();
     }
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        ReportReactiveStats();
+    }
+}
+
+void RasterizerVulkan::ReportReactiveStats() {
+    namespace Reactive = Common::Nx2Reactive;
+    Reactive::Add(Reactive::Counter::Frames, 1);
+    const s64 now_ns = Reactive::NowNs();
+    if (!Reactive::TakeReportDue(Reactive::GetState(), now_ns, 0)) {
+        return;
+    }
+    {
+        CheckBufferLockOffB("RasterizerVulkan::ReportReactiveStats");
+        std::scoped_lock lock{buffer_cache.mutex};
+        Reactive::SetGauge(Reactive::Gauge::ReadPages, buffer_cache.CpuReadPages());
+    }
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        Reactive::SetGauge(Reactive::Gauge::LatchedImages, texture_cache.ReadLatchedImages());
+        texture_cache.Nx2ReportTop();
+    }
+    const u64 download_bytes = staging_pool.CachedBytes(MemoryUsage::Download);
+    Reactive::SetGauge(Reactive::Gauge::StagingDownloadBytes, download_bytes);
+    Reactive::SetGauge(Reactive::Gauge::StagingBytes,
+                       download_bytes + staging_pool.CachedBytes(MemoryUsage::Upload) +
+                           staging_pool.CachedBytes(MemoryUsage::DeviceLocal));
+    Reactive::Report(now_ns);
 }
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {

@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
@@ -451,6 +452,9 @@ void TextureCache<P>::TickFrame() {
     TickAsyncUnswizzle();
 
     runtime.TickFrame();
+    if (read_latch_age != 0 && frame_tick % Nx2Reactive::AgeStep(read_latch_age) == 0) [[unlikely]] {
+        AgeReadLatches();
+    }
     ++frame_tick;
 
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
@@ -511,8 +515,11 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
         return;
     }
 
+    // EDEN_NX2_RX_RT_FIT=1 checks every draw: the color feedback barrier is all that orders a
+    // draw after the previous ones, and the cache key does not follow the views a draw samples.
     if (render_targets_serial == last_feedback_loop_serial &&
-        texture_bindings_serial == last_feedback_texture_serial) {
+        texture_bindings_serial == last_feedback_texture_serial &&
+        !Nx2Reactive::FitFeedbackBarrier(rt_fit)) {
         if (last_feedback_loop_result) {
             runtime.BarrierFeedbackLoop();
         }
@@ -534,6 +541,16 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
                 continue;
             }
 
+            const ImageId view_image_id = slot_image_views[view.id].image_id;
+            if (Nx2Reactive::FitFeedbackBarrier(rt_fit)) [[unlikely]] {
+                // EDEN_NX2_RX_RT_FIT=1: a draw sampling a color target's image (the target it
+                // renders into, RtFit) sees the previous draws' writes, as the alias copy did.
+                for (size_t i = 0; i < NUM_RT; ++i) {
+                    if ((rt_active_mask & (1u << i)) && view_image_id == rt_image_id[i]) {
+                        return true;
+                    }
+                }
+            }
             {
                 bool is_continue = false;
                 for (size_t i = 0; i < 8; ++i)
@@ -545,7 +562,6 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
             if (depth_active && view.id == render_targets.depth_buffer_id)
                 continue;
 
-            const ImageId view_image_id = slot_image_views[view.id].image_id;
             {
                 bool is_continue = false;
                 for (size_t i = 0; i < 8; ++i)
@@ -643,7 +659,9 @@ bool TextureCache<P>::RescaleRenderTargets() {
         has_deleted_images = false;
         // Render target control is used on all render targets, so force look ups when this one is
         // up
-        const bool force = flags[Dirty::RenderTargetControl];
+        // EDEN_NX2_RX_RT_FIT: a surface clip write dirties only RenderTargets, and a target taken
+        // for one clip (Nx2FindFitTarget) is looked up again for another.
+        const bool force = flags[Dirty::RenderTargetControl] || rt_fit != 0;
         flags[Dirty::RenderTargetControl] = false;
 
         scale_rating = 0;
@@ -730,13 +748,42 @@ template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
     auto& flags = maxwell3d->dirty.flags;
+    // EDEN_NX2_RX_MASKED_TARGETS: only the targets this draw can write are modified by it.
+    const auto& regs = maxwell3d->regs;
+    const auto color_marked = [&](size_t index) {
+        if (!masked_targets) {
+            return true;
+        }
+        const auto& mask = regs.color_mask[regs.color_mask_common ? 0 : index];
+        const bool marked = Nx2Reactive::MarksTarget(
+            true, is_clear, Nx2Reactive::ColorMaskWrites(mask.R, mask.G, mask.B, mask.A));
+        if (!marked && render_targets.color_buffer_ids[index] &&
+            ::Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::MaskedColorTargets, 1);
+        }
+        return marked;
+    };
+    const auto depth_marked = [&] {
+        if (!masked_targets) {
+            return true;
+        }
+        const bool marked = Nx2Reactive::MarksTarget(
+            true, is_clear, regs.depth_write_enabled != 0 || regs.stencil_enable != 0);
+        if (!marked && render_targets.depth_buffer_id && ::Common::Nx2Reactive::StatsEnabled())
+            [[unlikely]] {
+            ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::MaskedDepthTargets, 1);
+        }
+        return marked;
+    };
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
             ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+            PrepareImageView(color_buffer_id, color_marked(index),
+                             is_clear && IsFullClear(color_buffer_id));
         }
         const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        PrepareImageView(depth_buffer_id, depth_marked(),
+                         is_clear && IsFullClear(depth_buffer_id));
         return;
     }
 
@@ -750,11 +797,12 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
 
     for (size_t index = 0; index < NUM_RT; ++index) {
         ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-        PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
+        PrepareImageView(color_buffer_id, color_marked(index),
+                         is_clear && IsFullClear(color_buffer_id));
     }
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
 
-    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+    PrepareImageView(depth_buffer_id, depth_marked(), is_clear && IsFullClear(depth_buffer_id));
 
     rt_active_mask = 0;
     rt_image_id = {};
@@ -936,7 +984,10 @@ template <class P>
 std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(DAddr cpu_addr,
                                                                                u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> area{};
-    ForEachImageInRegion(cpu_addr, size, [&](ImageId, ImageBase& image) {
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
+        if (read_latch_age != 0) [[unlikely]] {
+            image.nx2_last_cpu_read = frame_tick;
+        }
         if (False(image.flags & ImageFlagBits::GpuModified)) {
             return;
         }
@@ -948,11 +999,20 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
         }
         area->start_address = (std::min)(area->start_address, image.cpu_addr);
         area->end_address = (std::max)(area->end_address, image.cpu_addr_end);
+        if (no_rt_latch) [[unlikely]] {
+            return;
+        }
         for (auto image_view_id : image.image_view_ids) {
             auto& image_view = slot_image_views[image_view_id];
             image_view.flags |= ImageViewFlagBits::PreemtiveDownload;
         }
         area->preemtive &= image.info.forced_flushed;
+        if (!image.info.forced_flushed) {
+            image.nx2_read_latched = true;
+            if (track_read_latches) [[unlikely]] {
+                read_latches.Add(image_id);
+            }
+        }
         image.info.forced_flushed = true;
     });
     return area;
@@ -1365,8 +1425,88 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
 }
 
 template <class P>
+void TextureCache<P>::Nx2NoteRepeat(Common::Nx2Reactive::Counter reason, ImageId image_id) const {
+    namespace Reactive = Common::Nx2Reactive;
+    Reactive::Add(reason, 1);
+    if (image_id) {
+        std::scoped_lock lock{nx2_top_mutex};
+        Nx2RepeatCount& entry = nx2_repeat_top[image_id.index];
+        if (entry.count++ == 0) {
+            entry.text = Nx2ImageText(image_id);
+        }
+        entry.reason = static_cast<u32>(reason);
+    }
+    if (!image_id || !Reactive::TakeRepeatLog()) {
+        return;
+    }
+    const ImageBase& image = slot_images[image_id];
+    std::string aliases;
+    for (const AliasedImage& alias : image.aliased_images) {
+        const ImageBase& other = slot_images[alias.id];
+        aliases += fmt::format(" [{}x{} format {} gpu {:#x} tick {}]", other.info.size.width,
+                               other.info.size.height, other.info.format, other.gpu_addr,
+                               other.modification_tick);
+    }
+    LOG_INFO(HW_GPU,
+             "nx2 reactive: light refusal {}: image {} gpu {:#x} cpu {:#x}, {}x{}x{} format {}, "
+             "{} levels {} layers, flags {:#x}, forced flushed {}, read latched {}, tick {}, {} "
+             "aliases{}",
+             static_cast<u32>(reason), image_id.index, image.gpu_addr, image.cpu_addr,
+             image.info.size.width, image.info.size.height, image.info.size.depth,
+             image.info.format, image.info.resources.levels, image.info.resources.layers,
+             static_cast<u32>(image.flags), image.info.forced_flushed, image.nx2_read_latched,
+             image.modification_tick, image.aliased_images.size(), aliases);
+}
+
+template <class P>
+std::string TextureCache<P>::Nx2ImageText(ImageId image_id) const {
+    const ImageBase& image = slot_images[image_id];
+    return fmt::format("image {} gpu {:#x} cpu {:#x} {}x{}x{} format {} type {} {} levels {} "
+                       "layers flags {:#x} forced {} latched {} tick {} aliases {}",
+                       image_id.index, image.gpu_addr, image.cpu_addr, image.info.size.width,
+                       image.info.size.height, image.info.size.depth, image.info.format,
+                       static_cast<u32>(image.info.type), image.info.resources.levels,
+                       image.info.resources.layers, static_cast<u32>(image.flags),
+                       image.info.forced_flushed, image.nx2_read_latched, image.modification_tick,
+                       image.aliased_images.size());
+}
+
+template <class P>
+void TextureCache<P>::Nx2ReportTop() {
+    std::vector<std::pair<u64, std::string>> repeats;
+    std::vector<std::pair<u64, std::string>> pairs;
+    {
+        std::scoped_lock lock{nx2_top_mutex};
+        for (auto& [index, entry] : nx2_repeat_top) {
+            repeats.emplace_back(entry.count,
+                                 fmt::format("reason {}, {}", entry.reason, std::move(entry.text)));
+        }
+        for (auto& [key, entry] : nx2_alias_pairs) {
+            pairs.emplace_back(entry.count, std::move(entry.text));
+        }
+        nx2_repeat_top.clear();
+        nx2_alias_pairs.clear();
+    }
+    constexpr size_t TOP = 4;
+    const auto by_count = [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; };
+    std::ranges::sort(repeats, by_count);
+    std::ranges::sort(pairs, by_count);
+    for (size_t i = 0; i < (std::min)(TOP, repeats.size()); ++i) {
+        LOG_INFO(HW_GPU, "nx2 reactive: top light refusal {}: {} draws, {}", i, repeats[i].first,
+                 repeats[i].second);
+    }
+    for (size_t i = 0; i < (std::min)(TOP, pairs.size()); ++i) {
+        LOG_INFO(HW_GPU, "nx2 reactive: top alias sync {}: {} copies {}", i, pairs[i].first,
+                 pairs[i].second);
+    }
+}
+
+template <class P>
 bool TextureCache<P>::RenderTargetsNeedRepeat() const {
     if (Settings::values.barrier_feedback_loops.GetValue() && last_feedback_loop_result) {
+        if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatFeedback, ImageId{});
+        }
         return true;
     }
     // An alias with an older tick is left alone (SynchronizeAliases copies newer ones only), and
@@ -1375,11 +1515,22 @@ bool TextureCache<P>::RenderTargetsNeedRepeat() const {
         const ImageBase& image = slot_images[image_id];
         if (True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::SparseLayers |
                                 ImageFlagBits::UnwrittenSparse))) {
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                Nx2NoteRepeat(True(image.flags & ImageFlagBits::CpuModified)
+                                  ? Common::Nx2Reactive::Counter::RepeatRtCpuModified
+                                  : Common::Nx2Reactive::Counter::RepeatRtSparse,
+                              image_id);
+            }
             return true;
         }
-        return std::ranges::any_of(image.aliased_images, [&](const AliasedImage& alias) {
-            return slot_images[alias.id].modification_tick > image.modification_tick;
-        });
+        const bool newer_alias =
+            std::ranges::any_of(image.aliased_images, [&](const AliasedImage& alias) {
+                return slot_images[alias.id].modification_tick > image.modification_tick;
+            });
+        if (newer_alias && Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatRtAlias, image_id);
+        }
+        return newer_alias;
     };
     for (size_t index = 0; index < NUM_RT; ++index) {
         if ((rt_active_mask & (1u << index)) != 0 && repeats(rt_image_id[index])) {
@@ -1401,10 +1552,18 @@ bool TextureCache<P>::ViewsNeedRepeat(std::span<const ImageViewInOut> views) con
         }
         const ImageBase& image = slot_images[image_view.image_id];
         if (True(image.flags & ImageFlagBits::CpuModified)) {
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatViewCpuModified,
+                              image_view.image_id);
+            }
             return true;
         }
         for (const AliasedImage& alias : image.aliased_images) {
             if (slot_images[alias.id].modification_tick > image.modification_tick) {
+                if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                    Nx2NoteRepeat(Common::Nx2Reactive::Counter::RepeatViewAlias,
+                                  image_view.image_id);
+                }
                 return true;
             }
         }
@@ -2619,15 +2778,75 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
 }
 
 template <class P>
+ImageId TextureCache<P>::Nx2FindFitTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
+    if (info.type != ImageType::e2D) {
+        return ImageId{};
+    }
+    if (Nx2Reactive::FitFeedbackBarrier(rt_fit) &&
+        !Settings::values.barrier_feedback_loops.GetValue()) {
+        // Mode 1 orders the draws with CheckFeedbackLoop's barrier, which this setting turns off.
+        return ImageId{};
+    }
+    const size_t size = CalculateGuestSizeInBytes(info);
+    const std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, size);
+    if (!cpu_addr) {
+        return ImageId{};
+    }
+    const auto& clip = maxwell3d->regs.surface_clip;
+    const bool broken_views = runtime.HasBrokenTextureViewFormats();
+    const bool native_bgr = runtime.HasNativeBgr();
+    ImageId fit{};
+    u32 fit_width = info.size.width;
+    ForEachImageInRegion(*cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
+        // Same address and format, narrower, exactly the surface clip, and the same block
+        // linear layout (same blocks and tile spacing, a relaxed size subresource at level 0,
+        // layer 0): the target's memory as the guest renders it. Backed, not sparse.
+        constexpr ImageFlagBits unfit = ImageFlagBits::Remapped | ImageFlagBits::Unbacked |
+                                        ImageFlagBits::UnwrittenSparse |
+                                        ImageFlagBits::SparseLayers;
+        if (True(image.flags & unfit) || image.gpu_addr != gpu_addr ||
+            image.info.type != info.type || image.info.format != info.format ||
+            image.info.block != info.block ||
+            image.info.tile_width_spacing != info.tile_width_spacing ||
+            !Nx2Reactive::FitsTarget(clip.x, clip.width, clip.y, clip.height,
+                                     image.info.size.width, image.info.size.height, fit_width,
+                                     info.size.height)) {
+            return false;
+        }
+        const std::optional<SubresourceBase> base =
+            FindSubresource(info, image, gpu_addr, RelaxedOptions::Size, broken_views, native_bgr);
+        if (!base || base->level != 0 || base->layer != 0) {
+            return false;
+        }
+        fit = image_id;
+        fit_width = image.info.size.width;
+        return false;
+    });
+    if (fit) {
+        if (static u32 logged{}; logged++ < 16) {
+            LOG_INFO(HW_GPU, "nx2 rt fit: {}x{} target at {:#x} renders into image {}x{} (clip {}x{})",
+                     info.size.width, info.size.height, gpu_addr, slot_images[fit].info.size.width,
+                     slot_images[fit].info.size.height, clip.width.Value(), clip.height.Value());
+        }
+    }
+    return fit;
+}
+
+template <class P>
 ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAddr gpu_addr) {
     ImageId image_id{};
-    bool delete_state = has_deleted_images;
-    do {
-        has_deleted_images = false;
-        image_id = FindOrInsertImage(info, gpu_addr);
-        delete_state |= has_deleted_images;
-    } while (has_deleted_images);
-    has_deleted_images = delete_state;
+    if (rt_fit != 0) [[unlikely]] {
+        image_id = Nx2FindFitTarget(info, gpu_addr);
+    }
+    if (!image_id) {
+        bool delete_state = has_deleted_images;
+        do {
+            has_deleted_images = false;
+            image_id = FindOrInsertImage(info, gpu_addr);
+            delete_state |= has_deleted_images;
+        } while (has_deleted_images);
+        has_deleted_images = delete_state;
+    }
     if (!image_id) {
         return NULL_IMAGE_VIEW_ID;
     }
@@ -3214,6 +3433,9 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
+    if (image.nx2_read_latched && track_read_latches) [[unlikely]] {
+        read_latches.Remove(image_id);
+    }
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
@@ -3446,6 +3668,16 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         return lhs_image.modification_tick < rhs_image.modification_tick;
     });
     const auto& resolution = Settings::values.resolution_info;
+    if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+        std::scoped_lock lock{nx2_top_mutex};
+        for (const AliasedImage* const aliased : aliased_images) {
+            Nx2PairCount& entry = nx2_alias_pairs[(u64{image_id.index} << 32) | aliased->id.index];
+            if (entry.count++ == 0) {
+                entry.text = fmt::format("to {} from {}", Nx2ImageText(image_id),
+                                         Nx2ImageText(aliased->id));
+            }
+        }
+    }
     for (const AliasedImage* const aliased : aliased_images) {
         if (!resolution.active || !any_rescaled) {
             CopyImage(image_id, aliased->id, aliased->copies);
@@ -3625,9 +3857,57 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id) 
             False(slot_images[old_view.image_id].flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
             const PendingDownload new_download{true, 0, old_view.image_id};
             uncommitted_downloads.emplace_back(new_download);
+            if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+                NoteReactiveRtDownload(slot_images[old_view.image_id]);
+            }
         }
     }
     *old_id = new_id;
+}
+
+template <class P>
+void TextureCache<P>::AgeReadLatches() {
+    const u64 cleared = read_latches.Age([this](ImageId image_id) {
+        ImageBase& image = slot_images[image_id];
+        if (!Nx2Reactive::Expired(frame_tick, image.nx2_last_cpu_read, read_latch_age)) {
+            return false;
+        }
+        // Back to how a read found it: not forced_flushed (it was not pitch linear forced, or it
+        // would not have latched), its views not downloaded at a render target bind.
+        image.nx2_read_latched = false;
+        image.info.forced_flushed = false;
+        for (const ImageViewId view_id : image.image_view_ids) {
+            slot_image_views[view_id].flags &= ~ImageViewFlagBits::PreemtiveDownload;
+        }
+        return true;
+    });
+    if (cleared != 0 && ::Common::Nx2Reactive::StatsEnabled()) {
+        ::Common::Nx2Reactive::Add(::Common::Nx2Reactive::Counter::LatchImagesCleared, cleared);
+    }
+}
+
+template <class P>
+void TextureCache<P>::NoteReactiveRtDownload(ImageBase& image) {
+    namespace Reactive = Common::Nx2Reactive;
+    const bool latched = image.nx2_read_latched;
+    Reactive::Add(latched ? Reactive::Counter::RtDownloadsLatched
+                          : Reactive::Counter::RtDownloadsForced,
+                  1);
+    Reactive::Add(latched ? Reactive::Counter::RtDownloadBytesLatched
+                          : Reactive::Counter::RtDownloadBytesForced,
+                  image.unswizzled_size_bytes);
+    if (!image.nx2_rt_download_logged) {
+        image.nx2_rt_download_logged = true;
+        if (Reactive::TakeImageLog()) {
+            LOG_INFO(HW_GPU,
+                     "nx2 reactive: render target download ({}): gpu {:#x} cpu {:#x}, {}x{}x{} "
+                     "format {}, {} levels {} layers, {} bytes",
+                     latched ? "latched by a CPU read" : "pitch linear", image.gpu_addr,
+                     image.cpu_addr, image.info.size.width, image.info.size.height,
+                     image.info.size.depth, image.info.format, image.info.resources.levels,
+                     image.info.resources.layers, image.unswizzled_size_bytes);
+        }
+    }
 }
 
 template <class P>

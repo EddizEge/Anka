@@ -20,6 +20,7 @@
 #include "common/common_types.h"
 #include "common/heap_tracker.h"
 #include "common/logging.h"
+#include "common/nx2_reactive.h"
 #include "common/page_table.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -745,6 +746,9 @@ struct Memory::Impl {
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         // Any other calls threads go to syscore (their id is past the cores: up to 255).
         const size_t core = Core::HostCoreSlot(system.GetCurrentHostThreadID());
+        if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
+            Common::Nx2Reactive::CountSlowRead(core);
+        }
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
@@ -758,6 +762,13 @@ struct Memory::Impl {
             }
         };
         auto& current_area = rasterizer_read_areas[core];
+        // EDEN_NX2_READ_LATCH_AGE: the cached area is forgotten at each aging step, so this
+        // core's reads reach GetFlushArea again (the epoch stays 0 without the switch).
+        if (const u32 epoch = Common::Nx2Reactive::ReadAreaEpoch();
+            epoch != rasterizer_read_epochs[core]) [[unlikely]] {
+            rasterizer_read_epochs[core] = epoch;
+            current_area = {};
+        }
         gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             const DAddr end_address = address + size;
             if (current_area.start_address <= address && end_address <= current_area.end_address)
@@ -837,6 +848,7 @@ struct Memory::Impl {
     Common::PageTable* current_page_table = nullptr;
 
     std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::NUM_CPU_CORES> rasterizer_read_areas{};
+    std::array<u32, Core::Hardware::NUM_CPU_CORES> rasterizer_read_epochs{};
     std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
