@@ -35,9 +35,9 @@ oynanırken alındı. Başka oyunlar, başka işlemciler, AMD ya da Intel ekran 
 
 ## İndirme ve denetim
 
-Yayında dört zip ve `SHA256SUMS.txt` var. Oynamak için yalnız `-win64.zip` gerekir; `-pdb.zip`
-hata ayıklama sembolleridir (çökme raporları için), `-source.zip` ve `-deps-source.zip` kaynak
-koddur (bkz. "Lisans"). İndirmeyi denetlemek için Git Bash'te `sha256sum -c SHA256SUMS.txt
+Yayında beş zip ve `SHA256SUMS.txt` var. Oynamak için yalnız `-win64.zip` gerekir; `-pdb.zip`
+hata ayıklama sembolleridir (çökme raporları için), `-source.zip`, `-deps-source.zip` ve
+`-prebuilt-source.zip` kaynak koddur (bkz. "Lisans"). İndirmeyi denetlemek için Git Bash'te `sha256sum -c SHA256SUMS.txt
 --ignore-missing`, ya da komut isteminde `certutil -hashfile <zip> SHA256` yazıp dosyadakiyle
 karşılaştırın. Program imzasızdır: Windows SmartScreen ilk açılışta uyarabilir.
 
@@ -283,10 +283,15 @@ https://github.com/EddizEge/NX2Perf adresinde ve programın yanındaki `-source.
 taraf kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
 lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
 `LICENSES\` içinde. Kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te. Dört
-kütüphane önceden derlenmiş paketlerden bağlanır ve kaynakları bu yayında **yoktur**: FFmpeg,
-OpenSSL, SDL3 ve sirit; `BUILDING_NX2PERF.md` ve bildirimler tam upstream commit'lerini ve indirme
-adreslerini verir. FFmpeg (LGPL-2.1-or-later) statik bağlıdır: değiştirilmiş bir FFmpeg kullanmak
-için programı `-source.zip`'ten kendi FFmpeg derlemenize karşı derleyin (`BUILDING_NX2PERF.md`).
+kütüphane önceden derlenmiş paketlerden bağlanır: FFmpeg, OpenSSL, SDL3 ve sirit. Kaynakları
+`-prebuilt-source.zip`'tedir: tam commit'lerin upstream kaynak arşivleri, önceden derlenmiş
+paketleri üreten crueter-ci derleme betikleri (configure / CMake seçenekleriyle), FFmpeg'e
+derlemeden önce uygulanan yama ve sirit'in SPIRV-Headers dahil tam kaynağı (o zip'teki
+`README_PREBUILT_SOURCES.txt`). FFmpeg (LGPL-2.1-or-later, yamalı) statik bağlıdır: değiştirilmiş
+bir FFmpeg kullanmak için onu `BUILDING_NX2PERF.md`'deki gibi derleyip programı `-source.zip`'ten
+ona karşı bağlayın. OpenSSL paketi ayrıca Mozilla'nın CA sertifika listesini (MPL-2.0) programa
+derler; sirit'in deposunda BSD-3-Clause dosya başlıklarının yanında GPL-3.0 ve AGPL-3.0 lisans
+dosyaları da var: bkz. `THIRD_PARTY_NOTICES_NX2PERF.txt`.
 Yayın bağlamasında kullanılan PGO profili kaynak değil eğitim verisidir ve yayınlanmaz; onsuz
 yapılan derleme aynı çalışır ama bayt bayt aynı olmaz.
 

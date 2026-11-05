@@ -25,17 +25,24 @@ Vulkan-Utility-Libraries v1.4.345, xbyak v7.40.1, zbic 11b08f2712, zlib v1.3.2, 
 The prebuilt packages come from the CI repositories named in `cpmfile.json` (`crueter-ci/...`,
 `eden-emulator/sirit`), which build them from the upstream sources of those projects (the commit is the last part of
 each version above). The release's `-deps-source.zip` holds the sources of the libraries CPM built
-from source; for the four prebuilts it links their upstream sources
-(`THIRD_PARTY_NOTICES_NX2PERF.txt`). Other
+from source; the `-prebuilt-source.zip` holds the sources of the four prebuilts: for each, the
+upstream source archive of the exact commit and the crueter-ci recipe (build scripts) at the
+release tag the package was made from, FFmpeg's patch, and sirit's complete source with its
+SPIRV-Headers (its `README_PREBUILT_SOURCES.txt` lists commits, tags, options and hashes). Other
 components are in the tree: `externals/` and `src/dynarmic`. Their licenses are in `LICENSES/`
 and in their own folders.
 
-FFmpeg (LGPL-2.1-or-later) is linked statically. To link the program with a modified FFmpeg,
-build FFmpeg yourself with the configuration of `crueter-ci/FFmpeg` (static, without
-`--enable-gpl`), put its `include/` and `lib/` in place of the prebuilt package's in the CPM
-cache (`<CPM_SOURCE_CACHE>/ffmpeg/9.0.2-1790726865-946fcce07b-windows-amd64/`), and build as
-below. (Not tried for this release; `-DYUZU_USE_BUNDLED_FFMPEG=OFF` is the build system's own
-path for an FFmpeg built from source.)
+FFmpeg (LGPL-2.1-or-later) is linked statically. The prebuilt package is FFmpeg 9.0.2, commit
+946fcce07b6dcd0331c8cc609192aeff5e1924f8, with Eden's `0001-steamdeck.patch` applied
+(`patch -Np1` in the source root; it comments out the use of `VK_KHR_internally_synchronized_queues`),
+configured and built by `tools/configure.sh` / `tools/package.sh` of `crueter-ci/FFmpeg` at
+adbaa353e2 (release tag `9.0.2-1790726865-946fcce07b`; the Windows / amd64 / MSVC branch: static,
+`--disable-everything` plus the h264 / vp8 / vp9 / opus decoders and hardware decoding, without
+`--enable-gpl`). All of it is in the `-prebuilt-source.zip`. To link the program with a modified
+FFmpeg, build it the same way, put its `include/` and `lib/` in place of the prebuilt package's
+in the CPM cache (`<CPM_SOURCE_CACHE>/ffmpeg/9.0.2-1790726865-946fcce07b-windows-amd64/`), and
+build as below. (Not tried for this release; `-DYUZU_USE_BUNDLED_FFMPEG=OFF` is the build
+system's own path for an FFmpeg built from source.)
 
 The shaders need a `glslangValidator` (Khronos glslang; the release used glslang 16.6.0); pass
 it with `-DGLSLANGVALIDATOR=`.
@@ -91,5 +98,6 @@ the third-party components), a NOTICE file and `dist/nx2_switches.txt` (renamed 
 not replace 2.0.0's own). The `-source.zip` is `git archive` of the same commit plus
 `GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),
 `SOURCE_NX2PERF.txt`, the NOTICE file and the third-party notices; the `-deps-source.zip` holds the
-third-party sources CPM fetched (not the prebuilt packages), and `SHA256SUMS.txt` lists the
-hashes of the zips.
+third-party sources CPM fetched (not the prebuilt packages), the `-prebuilt-source.zip` the
+sources and build recipes of the prebuilt packages, and `SHA256SUMS.txt` lists the hashes of the
+zips.

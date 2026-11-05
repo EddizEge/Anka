@@ -37,9 +37,9 @@ Kong Bananza. Other games, other CPUs and AMD or Intel GPUs were not tried.
 
 ## Download and check
 
-The release has four zips and `SHA256SUMS.txt`. To play you need only the `-win64.zip`; `-pdb.zip`
-has the debug symbols (for crash reports), `-source.zip` and `-deps-source.zip` are the source
-code (see "License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt
+The release has five zips and `SHA256SUMS.txt`. To play you need only the `-win64.zip`; `-pdb.zip`
+has the debug symbols (for crash reports), `-source.zip`, `-deps-source.zip` and
+`-prebuilt-source.zip` are the source code (see "License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt
 --ignore-missing`, or in a command prompt `certutil -hashfile <zip> SHA256` and compare with the
 file. The program is not signed: Windows SmartScreen may warn the first time.
 
@@ -291,11 +291,15 @@ https://github.com/EddizEge/NX2Perf and in the `-source.zip` next to the program
 how the third-party libraries are fetched (`BUILDING_NX2PERF.md`). Third-party components keep
 their own licenses: their notices and license texts are in `THIRD_PARTY_NOTICES_NX2PERF.txt` and
 `LICENSES\`. The source of the libraries built from source is in the `-deps-source.zip`. Four
-libraries are linked from prebuilt packages and their source is **not** in this release: FFmpeg,
-OpenSSL, SDL3 and sirit; `BUILDING_NX2PERF.md` and the notices give their exact upstream commits
-and download addresses. FFmpeg (LGPL-2.1-or-later) is linked statically: to use a modified
-FFmpeg, build the program from the `-source.zip` against your FFmpeg build
-(`BUILDING_NX2PERF.md`). The PGO profile used for the release link is training data, not
+libraries are linked from prebuilt packages: FFmpeg, OpenSSL, SDL3 and sirit. Their source is in
+the `-prebuilt-source.zip`: the upstream source archives of the exact commits, the crueter-ci
+build scripts that made the prebuilt packages (with their configure / CMake options), the patch
+applied to FFmpeg before it was built, and sirit's complete source with its SPIRV-Headers
+(`README_PREBUILT_SOURCES.txt` in that zip). FFmpeg (LGPL-2.1-or-later, patched) is linked
+statically: to use a modified FFmpeg, build it as described in `BUILDING_NX2PERF.md` and link the
+program from the `-source.zip` against it. The OpenSSL package also compiles in Mozilla's CA
+certificate list (MPL-2.0), and sirit's repository carries GPL-3.0 and AGPL-3.0 license files
+next to its BSD-3-Clause file headers: see `THIRD_PARTY_NOTICES_NX2PERF.txt`. The PGO profile used for the release link is training data, not
 source, and is not published; a rebuild without it works the same but is not byte-identical.
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. This project has no
