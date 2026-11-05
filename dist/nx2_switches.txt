@@ -238,9 +238,11 @@
 # them was measured together with frame generation (README, "Reactive flushing").
 # RX_RT_FIT: a render target lookup takes the narrower image with the target's memory when
 # the guest's surface clip is exactly that image (Bananza's opening: one image instead of a
-# copy per draw). 1: a color feedback loop ends the render pass first (needs
-# barrier_feedback_loops=true in the config); 2 (diagnostic): no barrier. 0 off.
-#EDEN_NX2_RX_RT_FIT=1
+# copy per draw). Both 1 and 3 need barrier_feedback_loops=true in the config. 1: a color
+# feedback loop ends the render pass first. 3 (experimental): a barrier inside the render pass
+# instead (color attachment writes before fragment shader reads, by region), so the render pass
+# goes on; a depth feedback loop still ends it. 2 (diagnostic): no barrier. 0 off.
+#EDEN_NX2_RX_RT_FIT=3
 # FLUSH_FIRST_READ=1: a guest CPU read of a buffer page the GPU wrote flushes it once, at
 # that read (without it the first such read gets stale data).
 #EDEN_NX2_FLUSH_FIRST_READ=1
@@ -266,6 +268,11 @@
 #EDEN_NX2_RX_NO_COPYBACK=1
 # RX_NO_RT_LATCH=1: CPU reads latch no image (images never downloaded for them).
 #EDEN_NX2_RX_NO_RT_LATCH=1
+# RX_COALESCE_LOOSE=1 (with RX_COALESCE): a fence made only for queued operations, query fence
+# work or the skip limit no longer takes the buffer copy backs along; they wait for a fence
+# real for other work. It weakens the ordering reactive flushing gives; it measures what the
+# extra submissions cost.
+#EDEN_NX2_RX_COALESCE_LOOSE=1
 
 # --- frame generation and on-screen display ---
 # FG_TIMED=1: FSR3 frame generation blends each generated frame for the time it is shown

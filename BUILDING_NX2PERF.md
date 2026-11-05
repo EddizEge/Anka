@@ -64,6 +64,12 @@ Bash inside the Developer shell):
 3. Optimize: `pgo_link.sh build-lto optimize eden-cli-pgo <the .pgd> <folder of .pgc files>`
    runs `pgomgr /merge` for each `.pgc` and links again with `/LTCG /USEPROFILE:PGD=...`.
 
+The script takes `link.exe` and `pgomgr.exe` from the linker folder in yuzu-cmd's link line and
+adds `/CGTHREADS:8`; `PGO_LINK_EXTRA` adds options (for example `/PDBALTPATH:%_PDB%`, so the
+program names its `.pdb` without a build path). A profile need not come from the same commit: the
+linker applies an earlier training run's profile to the code that still matches it. Which profile
+the release program was linked with is written in `VERSION_NX2PERF.txt` in the program zip.
+
 The profile (`.pgd`) is training data from playing a game, not source code, and is not
 published. Without it, step 1-3 can be repeated with your own training run; the program is
 functionally the same either way.

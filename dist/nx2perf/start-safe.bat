@@ -62,6 +62,7 @@ set EDEN_NX2_RX_MASKED_TARGETS=
 set EDEN_NX2_REACTIVE_STATS=
 set EDEN_NX2_RX_NO_COPYBACK=
 set EDEN_NX2_RX_NO_RT_LATCH=
+set EDEN_NX2_RX_COALESCE_LOOSE=
 rem Shortcuts that are on by default: off (=0, the code path of 2.0.0).
 set EDEN_NX2_LIGHT_DRAW=0
 set EDEN_NX2_LIGHT_UNIFORM=0

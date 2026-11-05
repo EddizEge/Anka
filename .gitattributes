@@ -8,3 +8,5 @@ externals/* linguist-vendored
 
 # NX2Perf launchers: Windows line endings in the repository too (cmd needs CRLF)
 dist/nx2perf/*.bat -text
+# NX2Perf build scripts: Unix line endings in every checkout (bash)
+dist/nx2perf/build/*.sh text eol=lf

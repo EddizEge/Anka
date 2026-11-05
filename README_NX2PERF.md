@@ -80,10 +80,13 @@ error. Take the launchers from the release zip: they need Windows line endings (
   default set to `0`, the opt-in ones cleared). This is as close to 2.0.0 as the program gets;
   use it to see whether a problem comes from the new switches. Changes without a switch (the
   accuracy fixes and upstream picks in the changelog) stay in.
-- **`start-reactive-draft.bat`** - DRAFT, not measured as a whole. The recommended settings for
-  use with reactive flushing on, plus `RX_RT_FIT=1` (one image for Bananza's opening render
-  target instead of a copy per draw). Reactive flushing is a config setting, not a switch: see
-  "Reactive flushing" below.
+- **`start-reactive-experimental.bat`** - EXPERIMENTAL, the second choice next to the
+  recommended one: the recommended settings with reactive flushing on, plus `RX_RT_FIT=3` (one
+  image for Bananza's opening render target instead of a copy per draw). On our machine it trades
+  the opening for open areas: -7% FPS at the game's opening, +15% in the open area, against the
+  same build with reactive flushing off. Not checked yet: together with frame generation, and the
+  image with `RX_RT_FIT=3`. Reactive flushing is a config setting, not a switch: see "Reactive
+  flushing" below.
 
 eden-cli reads the switches only from its environment (the launchers).
 `nx2_switches_NX2PERF.txt` lists every switch with its default and what it does. (2.0.0's own
@@ -107,9 +110,10 @@ of them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
 | `OSD=1` | off | game FPS, display FPS (with frame generation's multiplier) and speed in RTSS |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (about 60) | **on** | per-draw shortcuts on the GPU thread; `=0` is the 2.0.0 code path, many accept `=2` to check themselves and log |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **on** | Bananza's terrain: indirect draws on the host GPU, merged; GPU-written parameters flushed in 256 KiB windows |
-| `RX_RT_FIT=1` | off | with reactive flushing: Bananza's opening renders into one image instead of copying it per draw (needs `barrier_feedback_loops=true`) |
+| `RX_RT_FIT=3` | off | with reactive flushing: Bananza's opening renders into one image instead of copying it per draw, ordered by a barrier inside the render pass (experimental; `=1` ends the render pass instead, slower; both need `barrier_feedback_loops=true`) |
 | `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | off | reactive flushing experiments; no gain measured, not recommended |
 | `RX_MASKED_TARGETS` | off | **known defect, do not turn on** |
+| `RX_COALESCE_LOOSE` | off | diagnostic only (it weakens the ordering reactive flushing gives): not for play |
 
 ## Donkey Kong Bananza dynamic frame rate (DK-DYN)
 
@@ -163,22 +167,37 @@ use_reactive_flushing=false
 ```
 
 matches our recommended setup; `=true` (or no such lines) is reactive flushing on, the setting
-`start-reactive-draft.bat` is meant for. To keep both, copy the .ini (for example to
+`start-reactive-experimental.bat` is meant for. To keep both, copy the .ini (for example to
 `sdl2-config-reactive.ini` in the same folder), change the copy, and write the copy's full path
 in a launcher's `CONFIG=` line.
 
 This release adds switches for reactive flushing (all off by default; `nx2_switches_NX2PERF.txt`,
-"reactive flushing"). `RX_RT_FIT=1` targets the cost found at the game's opening: there Bananza
+"reactive flushing"). `RX_RT_FIT` targets the cost found at the game's opening: there Bananza
 renders into a 2112x1179 image while it samples the same memory as a 2095x1179 one, and with
-reactive flushing every draw copied one into the other. With the switch the two are one image;
-a draw that reads it ends the render pass first, which needs `barrier_feedback_loops=true` under
-`[Renderer]` (the switch does nothing without it). **Not settled:** in the first runs with this
-release's code (5 Nov, DK-DYN on, frame generation off) reactive flushing with `RX_RT_FIT=1` was
-still 20% slower at the opening than reactive flushing off (34.3 vs 42.9 FPS, 2 runs each); the
-open area runs were not finished when this was written. Reactive flushing was **never measured
-together with frame generation**. `start-reactive-draft.bat` is therefore a draft; whether it
-becomes a recommended launcher is decided after those measurements. Do not turn on
-`RX_MASKED_TARGETS` (known defect: a texture blit ignores the mask).
+reactive flushing every draw copied one into the other. With the switch the two are one image,
+and a draw that reads it has to come after the draws that wrote it: `=1` ends the render pass
+before such a draw; `=3` records a barrier inside the render pass instead (color attachment
+writes before fragment shader reads, by region), so the render pass goes on. Both need
+`barrier_feedback_loops=true` under `[Renderer]` (the switch does nothing without it).
+
+Measured on 5 November (DK-DYN on, frame generation off, LTO + PGO builds, game FPS of two runs
+per arm; each row compares one build with reactive flushing off and on):
+
+| Arms (one build per row) | Opening | Open area |
+|---|---|---|
+| reactive off -> on + `RX_RT_FIT=1` | 43.4 / 42.9 -> 32.9 / 33.8 (-23%) | 46.4 / 46.8 -> 52.6 / 52.9 (+13%) |
+| reactive off -> on + `RX_RT_FIT=3` | 42.7 / 40.8 -> 38.4 / 39.0 (-7%) | 45.4 / 46.2 -> 52.4 / 52.5 (+15%) |
+
+`RX_RT_FIT=3` is clearly better than `=1` at the opening (+16%) and the same in the open area.
+Against reactive flushing off it is a trade that depends on the scene: a little slower at the
+opening, faster in open areas. That is why the release has two launchers for play:
+`start-recommended.bat` (reactive flushing off) and `start-reactive-experimental.bat` (on, with
+`RX_RT_FIT=3`). **Experimental:** reactive flushing was **never measured together with frame
+generation**, and the image with `RX_RT_FIT=3` has not been checked by eye yet (its barrier
+inside the render pass covers a fragment reading the pixel it renders, which is what the Vulkan
+spec defines for feedback loops). If you see wrong images with it, set `RX_RT_FIT=1` in the
+launcher or use the recommended one. Do not turn on `RX_MASKED_TARGETS` (known defect: a texture
+blit ignores the mask) or `RX_COALESCE_LOOSE` (diagnostic only).
 
 ## Measured results
 
@@ -199,7 +218,8 @@ hand; camera not exactly the same between runs).
 | Profile-guided optimization (PGO) | LTO build -> LTO + PGO | opening, same runs | +21.5% / +15.8% (3 Nov build and profile; this release's program has its own profile, not measured this way) |
 | Front macro JIT filter | off -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | opening, 2 rounds x 2 | 39.6 -> 42.1 FPS (+6%) |
 | Reactive flushing | off -> on | open area / opening, nightly automated runs (3-4 Nov builds) | +13 to +23% / -23 to -30% |
-| Reactive flushing with `RX_RT_FIT=1` | reactive off -> on + `RX_RT_FIT=1` (this release's code, DK-DYN on) | opening, 2 runs each (5 Nov) | 42.9 -> 34.3 FPS (-20%); open area not finished |
+| Reactive flushing with `RX_RT_FIT=1` | same build, reactive off -> on + `RX_RT_FIT=1` (DK-DYN on) | opening / open area, 2 runs each (5 Nov) | -23% / +13% |
+| Reactive flushing with `RX_RT_FIT=3` | same build, reactive off -> on + `RX_RT_FIT=3` (DK-DYN on) | opening / open area, 2 runs each (5 Nov) | -7% / +15% (`=3` against `=1`: +16% at the opening, the same in the open area) |
 | `DK_DYN_MIN_FPS=30` | unset (40) -> 30 | opening and open area, 2 runs per arm in each scene | -4% / -5% (FPS ranges overlap at the opening; more frames near 30 is the clearer sign): not recommended |
 
 With DK-DYN and FSR3 frame generation aiming at 120 (an earlier build of the recommended

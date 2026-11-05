@@ -54,6 +54,7 @@ set EDEN_NX2_RX_MASKED_TARGETS=
 set EDEN_NX2_REACTIVE_STATS=
 set EDEN_NX2_RX_NO_COPYBACK=
 set EDEN_NX2_RX_NO_RT_LATCH=
+set EDEN_NX2_RX_COALESCE_LOOSE=
 rem The recommended switches (README_NX2PERF.md, "Launchers").
 rem Split GPU thread: the back as stages (cut a), acquire peek, leaner front macro path.
 set EDEN_NX2_BACK_STAGES=1

@@ -99,6 +99,12 @@ For `use_reactive_flushing=true`; none of these was measured with frame generati
   target and samples the same memory as a 2095x1179 texture: one image instead of a whole copy
   per draw); a color feedback loop ends the render pass first (`barrier_feedback_loops=true`).
   `=2` (diagnostic) leaves the barrier out.
+- `RX_RT_FIT=3` (experimental; the reactive launcher's setting): as `=1`, but the feedback barrier
+  is recorded inside the render pass (color attachment writes before fragment shader reads, by
+  region), so the render pass and the light draw path go on; a depth feedback loop still ends
+  it, and render targets are looked up again only when the surface clip changes. Measured on 5
+  November: +16% at Bananza's opening against `=1`, the same in the open area. Its image has not
+  been checked by eye yet.
 - Experiments without a measured gain: `FLUSH_FIRST_READ` (a buffer page the GPU wrote is
   flushed at the guest's first CPU read), `READ_LATCH_AGE` (what CPU reads latched is dropped
   after that many frames unread), `RX_ONE_SUBMIT` (no empty second submission after a fence's
@@ -106,8 +112,10 @@ For `use_reactive_flushing=true`; none of these was measured with frame generati
   (pitch linear images stay downloaded at every bind).
 - `RX_MASKED_TARGETS`: a draw marks only the targets its masks let it write. Known defect (a
   texture blit ignores the mask): do not turn it on.
-- Diagnostics: `REACTIVE_STATS` (counters and a log line about every 10 s), `RX_NO_COPYBACK`,
-  `RX_NO_RT_LATCH`.
+- Diagnostics: `REACTIVE_STATS` (counters and a log line about every 10 s; with `RX_RT_FIT=3`
+  also draws and in-pass barriers), `RX_NO_COPYBACK`, `RX_NO_RT_LATCH`, `RX_COALESCE_LOOSE`
+  (with `RX_COALESCE`, copy backs skip fences made only for queued work; it weakens reactive
+  flushing's ordering and only measures what the extra submissions cost).
 
 ### On-screen display
 
@@ -173,9 +181,9 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 ### Not in this release
 
 - The Qt program (`eglantine.exe`).
-- A reactive flushing launcher that is recommended: `start-reactive-draft.bat` stays a draft
-  until reactive flushing with `RX_RT_FIT` is measured in the open area and with frame
-  generation.
+- A reactive flushing launcher that is checked: `start-reactive-experimental.bat`
+  (`RX_RT_FIT=3`) is the second choice next to the recommended one, experimental until it is
+  measured with frame generation and its image is checked.
 - The "M" stage of the split GPU thread work.
 
 ### Documentation

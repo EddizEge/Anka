@@ -78,10 +78,12 @@ Windows satır sonları (CRLF) gerekir.
   kısayollar `0`, isteğe bağlı olanlar boş). Programın 2.0.0'a en yakın hâli; bir sorunun yeni
   anahtarlardan gelip gelmediğini anlamak için. Anahtarı olmayan değişiklikler (değişiklik
   günlüğündeki doğruluk düzeltmeleri ve upstream'den alınanlar) yine içeridedir.
-- **`start-reactive-draft.bat`** (reaktif, TASLAK; bütün olarak ölçülmedi): reaktif boşaltma
-  açıkken kullanılmak üzere önerilen ayarlar, artı `RX_RT_FIT=1` (Bananza'nın açılışındaki
-  çizim hedefi için çizim başına bir kopya yerine tek görüntü). Reaktif boşaltma bir anahtar
-  değil, bir ayardır: aşağıda "Reaktif boşaltma".
+- **`start-reactive-experimental.bat`** (reaktif, DENEYSEL; önerilenin yanında ikinci seçenek):
+  reaktif boşaltma açıkken önerilen ayarlar, artı `RX_RT_FIT=3` (Bananza'nın açılışındaki çizim
+  hedefi için çizim başına bir kopya yerine tek görüntü). Bizim makinede açılışı geniş alanlara
+  değişir: reaktif kapalı aynı derlemeye göre oyunun açılışında FPS −%7, geniş alanda +%15. Henüz
+  denenmedi: kare üretmeyle birlikte çalışması ve `RX_RT_FIT=3`'ün görüntüsü. Reaktif boşaltma bir
+  anahtar değil, bir ayardır: aşağıda "Reaktif boşaltma".
 
 eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur. `nx2_switches_NX2PERF.txt` her
 anahtarı varsayılanı ve ne yaptığıyla listeler. (2.0.0'ın kendi `nx2_switches.txt`'sini yalnız Qt
@@ -105,9 +107,10 @@ Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (yaklaşık 230 y
 | `OSD=1` | kapalı | RTSS'de oyun FPS'i, ekran FPS'i (kare üretme çarpanıyla) ve hız |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (60 kadar) | **açık** | GPU iş parçacığında çizim başı kısayollar; `=0` 2.0.0'ın kod yolu, çoğu `=2` ile kendini denetleyip günlüğe yazar |
 | `HLE_INDIRECT`, `INDIRECT_BATCH`, `PBFLUSH_WINDOW_KIB` | **açık** | Bananza arazisi: dolaylı çizimler ana makinenin GPU'sunda ve birleşik; GPU'nun yazdığı parametreler 256 KiB'lık pencerelerle boşaltılır |
-| `RX_RT_FIT=1` | kapalı | reaktif boşaltmayla: Bananza'nın açılışı çizim başına kopya yerine tek görüntüye çizer (`barrier_feedback_loops=true` gerekir) |
+| `RX_RT_FIT=3` | kapalı | reaktif boşaltmayla: Bananza'nın açılışı çizim başına kopya yerine tek görüntüye çizer, sırayı çizim geçişinin içindeki bir bariyer sağlar (deneysel; `=1` bunun yerine çizim geçişini bitirir, daha yavaş; ikisi de `barrier_feedback_loops=true` ister) |
 | `FLUSH_FIRST_READ`, `READ_LATCH_AGE`, `RX_ONE_SUBMIT`, `RX_COALESCE`, `RX_PITCH_FORCED` | kapalı | reaktif boşaltma deneyleri; kazanç ölçülmedi, önerilmez |
 | `RX_MASKED_TARGETS` | kapalı | **bilinen kusur, açmayın** |
+| `RX_COALESCE_LOOSE` | kapalı | yalnız tanı (reaktif boşaltmanın sıralamasını zayıflatır): oyun için değil |
 
 ## Donkey Kong Bananza dinamik kare hızı (DK-DYN)
 
@@ -161,22 +164,36 @@ use_reactive_flushing=false
 ```
 
 bizim önerilen kurulumumuza karşılık gelir; `=true` (ya da bu satırların hiç olmaması) reaktif
-boşaltma açık demektir, `start-reactive-draft.bat` bunun içindir. İkisini birden tutmak için
+boşaltma açık demektir, `start-reactive-experimental.bat` bunun içindir. İkisini birden tutmak için
 .ini'yi kopyalayın (ör. aynı klasöre `sdl2-config-reactive.ini`), kopyayı değiştirin ve tam yolunu
 bir başlatıcının `CONFIG=` satırına yazın.
 
 Bu sürüm reaktif boşaltma için anahtarlar ekler (hepsi varsayılan kapalı;
-`nx2_switches_NX2PERF.txt`, "reactive flushing"). `RX_RT_FIT=1` açılışta bulunan bedeli hedefler:
+`nx2_switches_NX2PERF.txt`, "reactive flushing"). `RX_RT_FIT` açılışta bulunan bedeli hedefler:
 orada Bananza 2112x1179'luk bir görüntüye çizerken aynı belleği 2095x1179'luk bir doku olarak
 okuyor; reaktif boşaltmayla her çizim birini ötekine kopyalıyordu. Anahtarla ikisi tek görüntü
-olur; onu okuyan bir çizim önce çizim geçişini bitirir, bunun için `[Renderer]` altında
-`barrier_feedback_loops=true` gerekir (o olmadan anahtar bir şey yapmaz). **Kesinleşmedi:** bu
-sürümün koduyla ilk koşularda (5 Kasım, DK-DYN açık, kare üretme kapalı) `RX_RT_FIT=1`'li reaktif
-boşaltma açılışta reaktif kapalıya göre yine %20 yavaştı (34,3'e karşı 42,9 FPS, kol başına 2
-koşu); bu yazılırken geniş alan koşuları bitmemişti. Reaktif boşaltma kare üretmeyle birlikte
-**hiç ölçülmedi**. Bu yüzden `start-reactive-draft.bat` taslaktır; önerilen bir başlatıcı olup
-olmayacağına bu ölçümlerden sonra karar verilir. `RX_MASKED_TARGETS`'ı açmayın (bilinen kusur:
-bir doku kopyalaması maskeyi yok sayıyor).
+olur ve onu okuyan bir çizim, ona yazan çizimlerden sonra gelmelidir: `=1` böyle bir çizimden önce
+çizim geçişini bitirir; `=3` bunun yerine çizim geçişinin içine bir bariyer yazar (renk eki
+yazımları parça gölgelendirici okumalarından önce, bölgesel), çizim geçişi sürer. İkisi de
+`[Renderer]` altında `barrier_feedback_loops=true` ister (o olmadan anahtar bir şey yapmaz).
+
+5 Kasım'da ölçüldü (DK-DYN açık, kare üretme kapalı, LTO + PGO derlemeleri, kol başına iki koşunun
+oyun FPS'i; her satır tek bir derlemede reaktif kapalı ile açığı karşılaştırır):
+
+| Kollar (satır başına tek derleme) | Açılış | Geniş alan |
+|---|---|---|
+| reaktif kapalı -> açık + `RX_RT_FIT=1` | 43,4 / 42,9 -> 32,9 / 33,8 (−%23) | 46,4 / 46,8 -> 52,6 / 52,9 (+%13) |
+| reaktif kapalı -> açık + `RX_RT_FIT=3` | 42,7 / 40,8 -> 38,4 / 39,0 (−%7) | 45,4 / 46,2 -> 52,4 / 52,5 (+%15) |
+
+`RX_RT_FIT=3` açılışta `=1`'den açıkça iyi (+%16), geniş alanda aynı. Reaktif kapalıya göre ise
+sahneye bağlı bir takas: açılışta biraz yavaş, geniş alanlarda hızlı. Bu yüzden yayında oyun için
+iki başlatıcı var: `start-recommended.bat` (reaktif kapalı) ve `start-reactive-experimental.bat`
+(açık, `RX_RT_FIT=3` ile). **Deneysel:** reaktif boşaltma kare üretmeyle birlikte **hiç
+ölçülmedi** ve `RX_RT_FIT=3`'ün görüntüsüne henüz gözle bakılmadı (çizim geçişinin içindeki
+bariyeri, bir parçanın kendi çizdiği pikseli okumasını kapsar; Vulkan belirtiminin geri besleme
+döngüleri için tanımladığı budur). Yanlış görüntü görürseniz başlatıcıda `RX_RT_FIT=1` yapın ya
+da önerilen başlatıcıyı kullanın. `RX_MASKED_TARGETS`'ı (bilinen kusur: bir doku kopyalaması
+maskeyi yok sayıyor) ve `RX_COALESCE_LOOSE`'u (yalnız tanı) açmayın.
 
 ## Ölçülen sonuçlar
 
@@ -197,7 +214,8 @@ uzaktan bakış; kamera koşudan koşuya birebir aynı değil).
 | Profil güdümlü iyileştirme (PGO) | LTO derlemesi -> LTO + PGO | açılış, aynı koşular | +%21,5 / +%15,8 (3 Kasım derlemesi ve profili; bu sürümün programının kendi profili var, böyle ölçülmedi) |
 | Ön tarafın makro JIT süzgeci | kapalı -> `JIT_SAME=1` + `FRONT_MACRO_LEAN=1` | açılış, 2 tur x 2 | 39,6 -> 42,1 FPS (+%6) |
 | Reaktif boşaltma | kapalı -> açık | geniş alan / açılış, gece otomatik koşuları (3-4 Kasım derlemeleri) | +%13-23 / −%23-30 |
-| `RX_RT_FIT=1`'li reaktif boşaltma | reaktif kapalı -> açık + `RX_RT_FIT=1` (bu sürümün kodu, DK-DYN açık) | açılış, kol başına 2 koşu (5 Kasım) | 42,9 -> 34,3 FPS (−%20); geniş alan bitmedi |
+| `RX_RT_FIT=1`'li reaktif boşaltma | aynı derleme, reaktif kapalı -> açık + `RX_RT_FIT=1` (DK-DYN açık) | açılış / geniş alan, kol başına 2 koşu (5 Kasım) | −%23 / +%13 |
+| `RX_RT_FIT=3`'lü reaktif boşaltma | aynı derleme, reaktif kapalı -> açık + `RX_RT_FIT=3` (DK-DYN açık) | açılış / geniş alan, kol başına 2 koşu (5 Kasım) | −%7 / +%15 (`=3`, `=1`'e göre: açılışta +%16, geniş alanda aynı) |
 | `DK_DYN_MIN_FPS=30` | boş (40) -> 30 | açılış ve geniş alan, her sahnede kol başına 2 koşu | −%4 / −%5 (açılışta FPS aralıkları örtüşüyor; 30'a yakın karelerin artması daha açık işaret): önerilmez |
 
 DK-DYN ve 120'yi hedefleyen FSR3 kare üretmesiyle (önerilen kurulumun daha eski bir derlemesi),

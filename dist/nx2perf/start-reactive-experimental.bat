@@ -1,15 +1,17 @@
 @echo off
 setlocal
-rem NX2Perf - REACTIVE (DRAFT): recommended + reactive flushing + RX_RT_FIT=1. Not measured as a whole.
+rem NX2Perf - REACTIVE (EXPERIMENTAL): recommended + reactive flushing + RX_RT_FIT=3.
 rem NX2Perf launcher for eden-cli-nx2perf.exe (command line / SDL front end of PokeDinner-Eglantine).
 rem Put this file next to eden-cli-nx2perf.exe, in your PokeDinner-Eglantine 2.0.0 folder.
 rem Start: drag your game file onto this .bat, or write its path in GAME below.
-rem Reactive flushing copies GPU-written data back to the game. Earlier builds: +13 to +23 percent
-rem FPS in open areas, -23 to -30 percent at the game's opening. With RX_RT_FIT=1 (this release)
-rem the opening was still -20 percent in the first runs; open areas and frame generation were
-rem not measured with it (README, "Reactive flushing"). It is a config setting, not a switch:
-rem make a copy of your sdl2-config.ini with use_reactive_flushing=true and
-rem barrier_feedback_loops=true, and put its path in CONFIG below.
+rem The second choice next to start-recommended.bat. Reactive flushing copies GPU-written data
+rem back to the game. On our PC (5 Nov, DK_DYN on, frame generation off) it traded the opening
+rem for open areas: with RX_RT_FIT=3, -7 percent FPS at the game's opening and +15 percent in
+rem the open area against the same build with it off. Not checked yet: together with frame
+rem generation, and the image with RX_RT_FIT=3 (README, "Reactive flushing"). If you see wrong
+rem images, set RX_RT_FIT=1 below or use start-recommended.bat. Reactive flushing is a config
+rem setting, not a switch: make a copy of your sdl2-config.ini with use_reactive_flushing=true
+rem and barrier_feedback_loops=true, and put its path in CONFIG below.
 rem ---- your settings -------------------------------------------------------------------
 rem GAME: the game to start (a drag-and-drop file wins over this line).
 set "GAME="
@@ -58,6 +60,7 @@ set EDEN_NX2_RX_MASKED_TARGETS=
 set EDEN_NX2_REACTIVE_STATS=
 set EDEN_NX2_RX_NO_COPYBACK=
 set EDEN_NX2_RX_NO_RT_LATCH=
+set EDEN_NX2_RX_COALESCE_LOOSE=
 rem The recommended switches (README_NX2PERF.md, "Launchers").
 rem Split GPU thread: the back as stages (cut a), acquire peek, leaner front macro path.
 set EDEN_NX2_BACK_STAGES=1
@@ -77,9 +80,10 @@ set EDEN_NX2_FG_TIMED=1
 rem Game FPS, display FPS and speed in RivaTuner Statistics Server's overlay (OSD above).
 set EDEN_NX2_OSD=%OSD%
 rem Reactive flushing: Bananza's opening renders into one image instead of a copy per draw
-rem (needs barrier_feedback_loops=true in the CONFIG file). Do not add RX_MASKED_TARGETS
-rem (known defect).
-set EDEN_NX2_RX_RT_FIT=1
+rem (needs barrier_feedback_loops=true in the CONFIG file); 3 keeps the render pass going with a
+rem barrier inside it, 1 ends it (slower). Do not add RX_MASKED_TARGETS (known defect) or
+rem RX_COALESCE_LOOSE (diagnostic only).
+set EDEN_NX2_RX_RT_FIT=3
 if defined CONFIG goto withconfig
 "%~dp0eden-cli-nx2perf.exe" %FULLSCREEN% -g "%GAME%"
 goto ran
