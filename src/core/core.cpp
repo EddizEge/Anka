@@ -118,9 +118,19 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 
 namespace {
 
-// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main.
-bool IsSwitch2Program(const FileSys::VirtualFile& file) {
+// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main; a NUP holds the ExeFS. A
+// program_id still 0 is set from the main.npdm read here (a .nup started directly).
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64& program_id) {
     FileSys::ProgramMetadata metadata;
+    const auto load_npdm = [&](const FileSys::VirtualFile& npdm) {
+        if (npdm == nullptr || metadata.Load(npdm) != Loader::ResultStatus::Success) {
+            return false;
+        }
+        if (program_id == 0) {
+            program_id = metadata.GetTitleID();
+        }
+        return metadata.IsSwitch2();
+    };
     if (FileSys::NupContainer::IsNupFile(file)) {
         FileSys::NupContainer nup{file};
         if (nup.GetStatus() != Loader::ResultStatus::Success) {
@@ -136,13 +146,11 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file) {
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        return load_npdm(npdm);
     }
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
-    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-           metadata.IsSwitch2();
+    return load_npdm(npdm);
 }
 
 } // namespace
@@ -152,7 +160,7 @@ struct System::Impl {
         : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
           reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {}
 
-    u64 program_id;
+    u64 program_id{};
 
     void Initialize(System& system) {
         device_memory.emplace();
@@ -339,7 +347,7 @@ struct System::Impl {
 
         const bool switch2_program =
             virtual_filesystem != nullptr &&
-            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath));
+            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath), params.program_id);
 
         // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
         // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.
@@ -349,6 +357,9 @@ struct System::Impl {
             LOG_INFO(Core, "Switch 2 program: using the 12 GiB memory layout");
             Settings::values.memory_layout_mode.SetGlobal(false);
             Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
+        }
+        if (params.program_id != 0) {
+            program_id = params.program_id;
         }
 
         // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant
@@ -391,6 +402,7 @@ struct System::Impl {
         if (app_loader->ReadProgramId(params.program_id) != Loader::ResultStatus::Success) {
             LOG_ERROR(Core, "Failed to find program id for ROM!");
         }
+        program_id = params.program_id;
 
         std::string name = "Unknown program";
         if (app_loader->ReadTitle(name) != Loader::ResultStatus::Success) {
@@ -810,7 +822,10 @@ const Core::SpeedLimiter& System::SpeedLimiter() const {
 
 u64 System::GetApplicationProcessProgramID() const {
     const auto* const process = impl->kernel.ApplicationProcess();
-    return process != nullptr ? process->GetProgramId() : 0;
+    if (process != nullptr && process->GetProgramId() != 0) {
+        return process->GetProgramId();
+    }
+    return impl->program_id;
 }
 
 u64 System::GetProgramIdForProcessId(u64 process_id) const {
