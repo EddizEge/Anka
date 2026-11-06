@@ -6,6 +6,23 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
+## Anka 1.0.1 (`anka-v1.0.1`)
+
+- Reads **`.nup`** files (NUP, the "Unencrypted (Archival) Package" of the Eglantine nx2 project):
+  File > Load File, the game list (name, icon, version) and the launchers' `Games` folder;
+  `anka-cli.exe` opens a `.nup` path too. Read only: Anka does not make, edit or extract NUP
+  files. Only use NUP files made from your own dumps.
+- The NUP code comes from upstream Eglantine nx2 and keeps its authors in git: a55uka (the
+  container, the loader, the version in the game list), Sssnowyyy (large zstd parts decompressed
+  once, table bounds and directory cycles), Mcm190 (the platform from the update's ExeFS),
+  SavageCore (loader review), Dr. Sergio and Frizti (the decompression cache,
+  `EDEN_NUP_CACHE_MIB`, LayeredFS mods for NUP titles), 999sian (the program id of a `.nup`
+  started directly is known before boot; per-game settings are no longer replaced by the global
+  ones when the settings file is read again during the controller setup). Not taken from that
+  work: the NUP packer and editor, the extraction, and 999sian's pipeline cache changes.
+- A Donkey Kong Bananza `.nup` gets Anka's settings for that game like any other format (the Anka
+  tab, the dynamic frame rate, per-game settings).
+
 ## Anka 1.0.0 (`anka-v1.0.0`)
 
 Base: PokeDinner-Eglantine 2.0.0. Programs: `anka.exe` (the Qt menu program) and `anka-cli.exe`

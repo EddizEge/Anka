@@ -1,7 +1,7 @@
 # Anka
 
 **Anka — a Nintendo Switch 2 emulator for Windows, focused on performance.** Released as
-**Anka by EddizEge**; this release is **Anka 1.0.0**.
+**Anka by EddizEge**; this release is **Anka 1.0.1**.
 
 Not affiliated with Nintendo, the Eden project or Franseven; please report problems in this
 repository's Issues, not to them. https://github.com/EddizEge/Anka/issues
@@ -20,9 +20,9 @@ Anka runs on its own: unzip it into a new, empty folder (see "Install"). It ship
 - **`anka-cli.exe`**, the program without menus (SDL), with launchers (`start-*.bat`) that start
   it with the settings we measured. Our measurements were made with it.
 
-- This release: **Anka 1.0.0**; see `VERSION_ANKA.txt` in the package (tag, commit, configure
+- This release: **Anka 1.0.1**; see `VERSION_ANKA.txt` in the package (tag, commit, configure
   date).
-- Source: https://github.com/EddizEge/Anka, branch `anka`, tag `anka-v1.0.0` (the same commit as
+- Source: https://github.com/EddizEge/Anka, branch `anka`, tag `anka-v1.0.1` (the same commit as
   the program; GPLv3, see "License").
 - Changes: `CHANGELOG_ANKA.md`. Every switch: `nx2_switches_ANKA.txt` (in the source:
   `dist/nx2_switches.txt`).
@@ -56,9 +56,9 @@ brings Zelda support and per-game presets. No dates.
 
 ## Download and check
 
-The release has five zips and `SHA256SUMS.txt`. To play you need only `Anka-1.0.0-win64.zip`;
-`Anka-1.0.0-pdb.zip` has the debug symbols (for crash reports), `Anka-1.0.0-source.zip`,
-`Anka-1.0.0-deps-source.zip` and `Anka-1.0.0-prebuilt-source.zip` are the source code (see
+The release has five zips and `SHA256SUMS.txt`. To play you need only `Anka-1.0.1-win64.zip`;
+`Anka-1.0.1-pdb.zip` has the debug symbols (for crash reports), `Anka-1.0.1-source.zip`,
+`Anka-1.0.1-deps-source.zip` and `Anka-1.0.1-prebuilt-source.zip` are the source code (see
 "License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt --ignore-missing`, or
 in a command prompt `certutil -hashfile <zip> SHA256` and compare with the file. The program is
 not signed: Windows SmartScreen may warn the first time.
@@ -67,12 +67,29 @@ not signed: Windows SmartScreen may warn the first time.
 
 This is an experimental build with no warranty (`NOTICE_ANKA.txt`).
 
-1. Unzip `Anka-1.0.0-win64.zip` into a new, empty folder.
+1. Unzip `Anka-1.0.1-win64.zip` into a new, empty folder.
 2. Run **`anka.exe`** (its window title is "Anka by EddizEge").
 3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
    only use what you legally own).
 
 Then add your game folder to the game list ("Add New Game Directory") and start a game.
+
+Game files: `.nsp`, `.xci`, `.nsz`, `.xcz` and, since 1.0.1, **`.nup`** (see "NUP files").
+
+### NUP files
+
+Anka 1.0.1 reads `.nup` files: NUP, the "Unencrypted (Archival) Package" of the Eglantine nx2
+project, one file that holds a game's program, its update and its metadata (name, icon,
+version). Open one with **File > Load File**, or keep it in a game folder of the game list (it
+shows its name, icon and version), or put it in the `Games` folder for the launchers;
+`anka-cli.exe` opens a `.nup` path too. A Donkey Kong Bananza `.nup` gets Anka's settings for
+that game like any other format. Anka only reads NUP: it does not make, edit or extract one.
+Only use NUP files made from your own dumps.
+
+Compressed parts are decompressed on use; a cache of 512 MiB keeps them
+(`EDEN_NUP_CACHE_MIB=<n>`, 64 or more, sets another size), and a part larger than half of it is
+decompressed once into `user\cache\nup` (removed when the game closes: it needs that much free
+disk space).
 
 The zip holds `anka.exe`, `anka-cli.exe`, the Qt DLLs and plugins `anka.exe` needs, the Visual
 C++ runtime DLLs, the launchers and an empty `user\` folder. Because of that `user\` folder Anka
@@ -174,7 +191,7 @@ files in `Games`, and the `user` folder (your keys, firmware and saves).
 
 ### The second way: anka-cli and the launchers
 
-1. Put your game file (`.nsp`, `.xci`, `.nsz` or `.xcz`) in the `Games` folder (subfolders
+1. Put your game file (`.nsp`, `.xci`, `.nsz`, `.xcz` or `.nup`) in the `Games` folder (subfolders
    are fine), or drag it onto the launcher instead.
 2. Double-click `start-recommended.bat`.
 
@@ -460,7 +477,7 @@ Like Eden and PokeDinner-Eglantine, Anka is licensed under the **GNU General Pub
 v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantine 2.0.0; what
 was changed and when is in `NOTICE_ANKA.txt` (in the release zips) and `CHANGELOG_ANKA.md`. The
 source code of the program (the release commit) is at https://github.com/EddizEge/Anka and in
-`Anka-1.0.0-source.zip` (`SOURCE_ANKA.txt` in that zip names the repository), with
+`Anka-1.0.1-source.zip` (`SOURCE_ANKA.txt` in that zip names the repository), with
 notes on how the third-party libraries are fetched (`BUILDING_ANKA.md`). The Anka logo (`dist/anka.ico`, the
 program icon, and `dist/qt_themes/default/icons/256x256/anka.png`, used for the window and the
 About box: a phoenix rising, with flame wings and a flame crest) is our own design, generated by
@@ -472,9 +489,9 @@ Base and Qt SVG under LGPL-3.0, Qt Charts under GPL-3.0): the Qt DLLs and plugin
 program zip are the official, unmodified Qt 6.8.3 binaries, and you may replace them with your
 own build of Qt 6.8.3. QuaZip
 (LGPL-2.1 with a static linking exception) is compiled into it. The source of the libraries
-built from source, QuaZip included, is in `Anka-1.0.0-deps-source.zip`. Four libraries are
+built from source, QuaZip included, is in `Anka-1.0.1-deps-source.zip`. Four libraries are
 linked from prebuilt packages: FFmpeg, OpenSSL, SDL3 and sirit. Their source is in
-`Anka-1.0.0-prebuilt-source.zip`: the upstream source archives of the exact commits, the
+`Anka-1.0.1-prebuilt-source.zip`: the upstream source archives of the exact commits, the
 crueter-ci build scripts that made the prebuilt packages (with their configure / CMake options),
 the patch applied to FFmpeg before it was built, and sirit's complete source with its
 SPIRV-Headers (`README_PREBUILT_SOURCES.txt` in that zip). FFmpeg (LGPL-2.1-or-later, patched) is

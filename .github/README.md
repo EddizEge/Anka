@@ -15,7 +15,7 @@ this tree is the upstream project's own.
 
 ## Downloads and setup
 
-Download **`Anka-1.0.0-win64.zip`** from the
+Download **`Anka-1.0.1-win64.zip`** from the
 [Releases page](https://github.com/EddizEge/Anka/releases) (`SHA256SUMS.txt` there lets you
 check it).
 
@@ -23,7 +23,8 @@ Anka runs on its own. You need Windows 10 or 11 (64-bit) and a GPU with a curren
 driver; the zip carries everything else the programs need (the Qt 6.8.3 DLLs and plugins, the
 Visual C++ runtime DLLs).
 
-1. Unzip `Anka-1.0.0-win64.zip` into a new folder.
+1. Unzip `Anka-1.0.1-win64.zip` into a new folder. Anka 1.0.1 also reads `.nup` game files
+   (see the README).
 2. Run **`anka.exe`**.
 3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
    only use what you legally own).
@@ -156,9 +157,9 @@ See [`BUILDING_ANKA.md`](../BUILDING_ANKA.md).
 
 Anka is licensed under the **GNU General Public License v3.0 or later**
 ([`LICENSE.txt`](../LICENSE.txt)), like Eden and Eglantine. Each release has the complete
-corresponding source next to the program: `Anka-1.0.0-source.zip` (this repository at the
-release commit, tag `anka-v1.0.0`), `Anka-1.0.0-deps-source.zip` (the third-party libraries built
-from source) and `Anka-1.0.0-prebuilt-source.zip` (the sources and build scripts of the four
+corresponding source next to the program: `Anka-1.0.1-source.zip` (this repository at the
+release commit, tag `anka-v1.0.1`), `Anka-1.0.1-deps-source.zip` (the third-party libraries built
+from source) and `Anka-1.0.1-prebuilt-source.zip` (the sources and build scripts of the four
 prebuilt libraries: FFmpeg, OpenSSL, SDL3, sirit). `anka.exe` links Qt 6.8.3 dynamically
 (LGPL-3.0; Qt Charts GPL-3.0); the program zip carries the Qt DLLs, which you may replace with
 your own build of Qt 6.8.3. Third-party notices
