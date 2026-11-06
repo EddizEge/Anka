@@ -18,6 +18,7 @@ class ConfigureGraphicsAdvanced;
 
 namespace ConfigurationShared {
 class Builder;
+class Widget;
 }
 
 class ConfigureGraphicsAdvanced : public ConfigurationShared::Tab {
@@ -34,6 +35,10 @@ public:
 
     void ExposeComputeOption();
 
+    /// NX2Perf's "Recommended" (configure_nx2perf.h): the Reactive Flushing box, as if clicked.
+    /// False when the box can't change (a game is running).
+    bool SetReactiveFlushing(bool on);
+
 private:
     void Setup(const ConfigurationShared::Builder& builder);
     void changeEvent(QEvent* event) override;
@@ -46,4 +51,5 @@ private:
     std::vector<std::function<void(bool)>> apply_funcs;
 
     QWidget* checkbox_enable_compute_pipelines{};
+    ConfigurationShared::Widget* reactive_flushing{};
 };

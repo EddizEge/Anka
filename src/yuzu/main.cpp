@@ -31,6 +31,7 @@
 #endif
 
 #include "main_window.h"
+#include "nx2perf_session.h"
 
 #ifdef _WIN32
 #include <QScreen>
@@ -143,7 +144,11 @@ static void LoadNx2Switches(const char* argv0) {
 }
 
 int main(int argc, char* argv[]) {
+    // NX2Perf (nx2perf_session.h): the environment as given, for a restart, and the switches set
+    // outside the program (here or in nx2_switches.txt), which its settings leave alone.
+    Nx2PerfSession::CaptureStartEnvironment();
     LoadNx2Switches(argv[0]);
+    Nx2PerfSession::CaptureOutsideSwitches();
 
 #if YUZU_ROOM
     bool launch_room = false;
@@ -267,10 +272,16 @@ int main(int argc, char* argv[]) {
     // generating shaders
     setlocale(LC_ALL, "C");
 
-    MainWindow main_window{has_broken_vulkan};
-    // After settings have been loaded by GMainWindow, apply the filter
-    main_window.show();
+    int result = 0;
+    {
+        MainWindow main_window{has_broken_vulkan};
+        // After settings have been loaded by GMainWindow, apply the filter
+        main_window.show();
 
-    app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
-    return app.exec();
+        app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
+        result = app.exec();
+    }
+    // After the window and its config are gone (qt-config.ini written), not while they write.
+    Nx2PerfSession::RestartIfRequested();
+    return result;
 }

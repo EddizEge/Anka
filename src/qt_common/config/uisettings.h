@@ -18,6 +18,7 @@
 #include "common/common_types.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "core/nx2_perf_settings.h"
 #include "qt_common/config/qt_config.h"
 
 using Settings::Category;
@@ -230,6 +231,9 @@ struct Values {
 
     // misc
     Setting<bool> show_fw_warning{linkage, true, "show_fw_warning", Category::Miscellaneous};
+
+    // NX2Perf: the [NX2Perf] group (core/nx2_perf_settings.h), global only.
+    Core::Nx2PerfSettings::Switches nx2perf{};
 
     bool configuration_applied;
     bool reset_to_defaults;

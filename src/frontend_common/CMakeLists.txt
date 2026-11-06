@@ -14,7 +14,9 @@ add_library(frontend_common STATIC
     play_time_manager.cpp
     play_time_manager.h
     settings_generator.h settings_generator.cpp
-    mod_manager.h mod_manager.cpp)
+    mod_manager.h mod_manager.cpp
+    nx2_osd.cpp
+    nx2_osd.h)
 
 if (ENABLE_UPDATE_CHECKER)
     target_link_libraries(frontend_common PRIVATE httplib::httplib)

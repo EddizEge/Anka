@@ -2,13 +2,19 @@
 
 **NX2Perf** is an unofficial performance fork of **PokeDinner-Eglantine 2.0.0** (Franseven's
 fork of the Eden Nintendo Switch emulator), made to play **Donkey Kong Bananza** more smoothly
-on a desktop PC. It ships one program, `eden-cli-nx2perf.exe` (the command line / SDL front end),
-which you put next to an existing PokeDinner-Eglantine 2.0.0 installation, and three launchers
-that start it with the settings we measured.
+on a desktop PC. You unzip it into an existing PokeDinner-Eglantine 2.0.0 folder. It ships two
+programs:
 
-**Tested on one machine with one game.** Every result comes from a Ryzen 7 5700X (8 cores),
-64 GB RAM, an NVIDIA GeForce RTX 4060 Ti and a 1440p 170 Hz display, playing Donkey Kong
-Bananza. Other games, other CPUs and AMD or Intel GPUs were not tried.
+- **`eglantine-nx2perf.exe`**, the menu program (2.0.0's Qt front end with NX2Perf inside and an
+  **NX2Perf** settings tab): the easy way;
+- **`eden-cli-nx2perf.exe`**, the command line / SDL front end, with three launchers that start
+  it with the settings we measured.
+
+**Made for Donkey Kong Bananza, tested on one machine.** Every result comes from a Ryzen 7 5700X
+(8 cores), 64 GB RAM, an NVIDIA GeForce RTX 4060 Ti and a 1440p 170 Hz display, playing Donkey
+Kong Bananza with eden-cli and its launchers; the menu program runs the same code with the same
+settings but was not measured on its own. The Bananza-only settings turn themselves off in other
+games. Other games, other CPUs and AMD or Intel GPUs were not tried.
 
 NX2Perf is not affiliated with the Eden project, with Franseven or with Nintendo. Please do not
 report its problems to them.
@@ -20,7 +26,8 @@ upstream project's own.
 ## Requirements
 
 - Windows 10 or 11, 64-bit, a GPU with a current Vulkan driver, and the Microsoft Visual C++
-  2015-2022 x64 runtime (all as for 2.0.0).
+  2015-2022 x64 runtime (all as for 2.0.0). The menu program uses the Qt 6.8.3 DLLs of the 2.0.0
+  folder: Qt is not in the release.
 - A **working PokeDinner-Eglantine 2.0.0 installation** with your own keys and firmware, and
   your own game dump. **NX2Perf provides no games, keys or firmware**, and never will.
 
@@ -32,17 +39,20 @@ saves as 2.0.0.
 
 1. Unzip the `-win64.zip` from the release into your PokeDinner-Eglantine 2.0.0 folder, next to
    `eglantine.exe`. Nothing is overwritten; 2.0.0 keeps working as before.
-2. Put your game file (`.nsp`, `.xci`, `.nsz` or `.xcz`) in the new `Games` folder, or drag it
-   onto the launcher instead.
-3. Double-click `start-recommended.bat`.
+2. Start **`eglantine-nx2perf.exe`**. Your games are the same as in 2.0.0's game list (the same
+   user folder and `qt-config.ini`).
+3. Settings: **Emulation > Configure... > NX2Perf**. Everything is on at the first start. For
+   the setup we measured, press **Recommended**, then **OK**: it also turns reactive flushing
+   off. **All Off** turns the eight NX2Perf settings off. The two Bananza settings are only used
+   for Bananza.
 
-On the first start the launcher makes eden-cli's settings file (`config\sdl2-config.ini`) as a
-copy of the menu program's `qt-config.ini`, so your controller setup comes along; it never
-changes a settings file that already exists. This is done by `nx2perf-config.ps1` next to the
-launchers, a small, readable PowerShell script. The game starts in full screen: **quit with
-Alt+F4**.
+**The second way:** put your game in the new `Games` folder (or drag it onto a launcher) and
+double-click `start-recommended.bat`. On the first start the launcher makes eden-cli's settings
+file (`config\sdl2-config.ini`) as a copy of `qt-config.ini`, so your controller setup comes
+along; it never changes a settings file that already exists (`nx2perf-config.ps1`, a small,
+readable PowerShell script, does this). The game starts in full screen: **quit with Alt+F4**.
 
-## Which launcher?
+## Which launcher? (eden-cli)
 
 | Launcher | When to use it |
 |---|---|
@@ -79,8 +89,8 @@ Details and the method: "Measured results" in [`README_NX2PERF.md`](../README_NX
 ## Known limits
 
 - Measured with **Donkey Kong Bananza only**; the Bananza switches are meant for that game.
-- **No Qt (menu) version.** The release is the command line program `eden-cli`; keep 2.0.0's
-  `eglantine.exe` for its menus.
+- **The menu program was not measured** on its own (same code, same settings, same PGO profile
+  as eden-cli). It needs a 2.0.0 folder for its Qt DLLs.
 - AMD and Intel GPUs and other CPUs were not tried. More in "Known issues" in the README.
 
 ## License and source
@@ -90,12 +100,13 @@ NX2Perf is licensed under the **GNU General Public License v3.0 or later**
 complete corresponding source next to the program:
 
 - `-source.zip`: this repository at the release commit;
-- `-deps-source.zip`: the third-party libraries built from source;
+- `-deps-source.zip`: the third-party libraries built from source (QuaZip included);
 - `-prebuilt-source.zip`: the sources and build scripts of the four prebuilt libraries
   (FFmpeg, OpenSSL, SDL3, sirit).
 
-How to build it: [`BUILDING_NX2PERF.md`](../BUILDING_NX2PERF.md). Third-party notices are in
-`THIRD_PARTY_NOTICES_NX2PERF.txt` in the release zips.
+The menu program links Qt 6.8.3 dynamically (LGPL-3.0; Qt Charts GPL-3.0); its Qt DLLs are
+those of your 2.0.0 folder. How to build it: [`BUILDING_NX2PERF.md`](../BUILDING_NX2PERF.md).
+Third-party notices are in `THIRD_PARTY_NOTICES_NX2PERF.txt` in the release zips.
 
 ## Credits
 

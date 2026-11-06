@@ -63,7 +63,7 @@
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
 #include "yuzu_cmd/nx2_auto_script.h"
-#include "yuzu_cmd/nx2_osd.h"
+#include "frontend_common/nx2_osd.h"
 #include "yuzu_cmd/nx2_sampler.h"
 
 #ifdef _WIN32
@@ -258,7 +258,8 @@ struct SdlState {
     // Must outlive emu_window, which keeps a pointer to it.
     InputCommon::InputSubsystem input_subsystem{};
     std::unique_ptr<EmuWindow_SDL3> emu_window;
-    // EDEN_NX2_OSD (yuzu_cmd/nx2_osd.h): reads the system's clock, stopped before it shuts down.
+    // EDEN_NX2_OSD (frontend_common/nx2_osd.h): reads the system's clock, stopped before it
+    // shuts down.
     Nx2Osd::WriterPtr osd;
 };
 

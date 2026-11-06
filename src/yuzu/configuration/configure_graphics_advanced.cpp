@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <vector>
+#include <QCheckBox>
 #include <QLabel>
 #include <qnamespace.h>
 #include "common/settings.h"
@@ -59,6 +60,9 @@ void ConfigureGraphicsAdvanced::Setup(const ConfigurationShared::Builder& builde
         if (setting->Id() == Settings::values.enable_compute_pipelines.Id()) {
             checkbox_enable_compute_pipelines = widget;
         }
+        if (setting->Id() == Settings::values.use_reactive_flushing.Id()) {
+            reactive_flushing = widget;
+        }
     }
 
     for (const auto& [id, widget] : normal_hold) {
@@ -83,6 +87,15 @@ void ConfigureGraphicsAdvanced::changeEvent(QEvent* event) {
 
 void ConfigureGraphicsAdvanced::RetranslateUI() {
     ui->retranslateUi(this);
+}
+
+bool ConfigureGraphicsAdvanced::SetReactiveFlushing(bool on) {
+    if (reactive_flushing == nullptr || reactive_flushing->checkbox == nullptr ||
+        !reactive_flushing->checkbox->isEnabled()) {
+        return false;
+    }
+    reactive_flushing->checkbox->setChecked(on);
+    return true;
 }
 
 void ConfigureGraphicsAdvanced::ExposeComputeOption() {

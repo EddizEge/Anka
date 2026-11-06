@@ -1,10 +1,14 @@
 # NX2Perf
 
 NX2Perf is an unofficial performance fork of **PokeDinner-Eglantine 2.0.0** (Franseven's fork of
-the Eden emulator), made to play **Donkey Kong Bananza** more smoothly on a desktop PC. It ships
-one program, `eden-cli-nx2perf.exe` (the command line / SDL front end), that you put next to an
-existing PokeDinner-Eglantine 2.0.0 installation, and launchers that start it with the settings
-we measured.
+the Eden emulator), made to play **Donkey Kong Bananza** more smoothly on a desktop PC. You unzip
+it into an existing PokeDinner-Eglantine 2.0.0 folder. It ships two programs:
+
+- **`eglantine-nx2perf.exe`**, the menu program: the same Qt front end as 2.0.0's `eglantine.exe`
+  (game list, menus, settings) with NX2Perf's settings built in and an **NX2Perf** tab in its
+  settings. This is the easy way.
+- **`eden-cli-nx2perf.exe`**, the command line / SDL front end, with launchers (`start-*.bat`)
+  that start it with the settings we measured. Our measurements were made with it.
 
 It is not affiliated with the Eden project or with Franseven. Please do not report its problems
 to them; use this fork's issue tracker: https://github.com/EddizEge/NX2Perf/issues
@@ -18,17 +22,22 @@ to them; use this fork's issue tracker: https://github.com/EddizEge/NX2Perf/issu
   `dist/nx2_switches.txt`).
 - Türkçe: `BENIOKU_NX2PERF.md`.
 
-**Tested on one machine with one game.** Every number below comes from a Ryzen 7 5700X (8
-cores), 64 GB RAM, an NVIDIA GeForce RTX 4060 Ti and a 1440p 170 Hz display, playing Donkey
-Kong Bananza. Other games, other CPUs and AMD or Intel GPUs were not tried.
+**Made for Donkey Kong Bananza, tested on one machine.** Every number below comes from a Ryzen 7
+5700X (8 cores), 64 GB RAM, an NVIDIA GeForce RTX 4060 Ti and a 1440p 170 Hz display, playing
+Donkey Kong Bananza with `eden-cli-nx2perf.exe` and its launchers. The menu program runs the same
+emulator code with the same settings, but was not measured on its own. The Bananza-only settings
+turn themselves off in other games. Other games, other CPUs and AMD or Intel GPUs were not tried.
 
 ## What you need
 
 - Windows 10 or 11, 64-bit.
 - A working **PokeDinner-Eglantine 2.0.0** setup: your own keys, firmware and game dump,
   set up as for 2.0.0. NX2Perf provides none of these and never will.
-- The **Microsoft Visual C++ 2015-2022 x64** runtime (2.0.0 needs it too). The program imports
-  exactly the same DLLs as 2.0.0's `eden-cli.exe`; nothing else is to be installed.
+- The **Microsoft Visual C++ 2015-2022 x64** runtime (2.0.0 needs it too). `eden-cli-nx2perf.exe`
+  imports exactly the same DLLs as 2.0.0's `eden-cli.exe`. `eglantine-nx2perf.exe` uses the Qt
+  6.8.3 DLLs and plugins of the 2.0.0 folder (the Qt version 2.0.0 is built with): **Qt is not in
+  this package**, so the menu program only starts inside a 2.0.0 folder. Nothing else is to be
+  installed.
 - A GPU with a current **Vulkan** driver (as for 2.0.0). Only an NVIDIA RTX 4060 Ti was tried.
 - An x86-64 CPU. The build asks for no AVX2 (the only AVX2 code is in the Opus audio codec,
   which checks the CPU at run time), but only a Ryzen 7 5700X was tried. Many changes speed up
@@ -51,11 +60,64 @@ This is an unofficial, experimental build with no warranty (`NOTICE_NX2PERF.txt`
 start.**
 
 1. Unzip the NX2Perf `-win64.zip` into your PokeDinner-Eglantine 2.0.0 folder, next to
-   `eglantine.exe`. Nothing is overwritten: the program has its own name
-   (`eden-cli-nx2perf.exe`) and 2.0.0 keeps working as before.
-2. Put your game file (`.nsp`, `.xci`, `.nsz` or `.xcz`) in the new `Games` folder (subfolders
+   `eglantine.exe`. Nothing is overwritten: the new programs have their own names and 2.0.0
+   keeps working as before.
+2. Start **`eglantine-nx2perf.exe`** (its window title starts with "NX2Perf by EddizEge"). It
+   uses the same user folder and the same `qt-config.ini` as 2.0.0's `eglantine.exe`, so your
+   game list, controller and settings are already there.
+3. Settings: **Emulation > Configure... > NX2Perf**. On the first start everything there is on.
+   For the setup we measured, press **Recommended**, then **OK**: it also turns reactive
+   flushing off (2.0.0 has it on). Start your game from the list as usual.
+
+### The NX2Perf tab
+
+| Setting | Switches it sets (`EDEN_NX2_...`) | Games |
+|---|---|---|
+| Split GPU thread | `BACK_STAGES=1`, `BACK_CUTS=a` | all |
+| Acquire peek | `ACQUIRE_PEEK=1` | all |
+| Same-value filter in the macro JIT | `JIT_SAME=1` | all |
+| Lean front macro path | `FRONT_MACRO_LEAN=1` | all |
+| Timed frame generation | `FG_TIMED=1` (only does something with frame generation on) | all |
+| FPS overlay in RivaTuner | `OSD=1` (RTSS, if it runs) | all |
+| Dynamic frame rate | `DK_DYN=1` | Bananza only |
+| Frame pacing | `PRESENT_INTERVAL_WORD=12:16:4`, `MODE_PACE=2`, `PACE_SPIN_US=1500` | Bananza only |
+
+These are the switches `start-recommended.bat` sets ("Launchers", "Main switches"). The program
+sets them in its own environment just before a game starts. The two Bananza settings are set
+only when the game is Donkey Kong Bananza (title 040074A01BF12000, the one the dynamic frame rate
+patch checks); for any other game they stay off. **Recommended** turns all eight on and also
+turns *Enable Reactive Flushing* off (Graphics > Advanced; press OK to keep it): the setup we
+measured ("Reactive flushing"). **All Off** turns all eight off; the per-draw shortcuts this
+fork keeps on by default stay on (only `start-safe.bat` turns those off too, the closest to
+2.0.0).
+
+The switches are read once per session. A change counts from the next game you start; when that
+game needs other switches than the session's first game (you changed a setting, or you start
+Bananza after another game, or another game after Bananza), the program asks: **Restart**
+closes it and starts it again with that game, **Start Anyway** keeps the session's switches.
+
+A switch set outside the program wins: in your environment, a `.bat` of your own that starts
+the menu program, or a `nx2_switches.txt` (next to the program or in `%APPDATA%\eden`). The
+program leaves that variable as it is. A box whose switches are all set outside is greyed out;
+when only some are (one of the three frame pacing ones, say), the box still sets the others.
+The tooltip names the variables set outside, with their values.
+
+**Shared with 2.0.0:** both menu programs use the same `qt-config.ini`, so a setting you change
+in one (reactive flushing too) is used by the other. Only the `[NX2Perf]` group is new; 2.0.0's
+`eglantine.exe` leaves it alone.
+
+To uninstall, delete the files the zip added (`eglantine-nx2perf.exe`, `eden-cli-nx2perf.exe`,
+the three `start-*.bat`, `nx2perf-config.ps1`, the `*_NX2PERF.*` files, `LICENSES\`,
+`Games\PUT-YOUR-GAMES-HERE.txt`, `LICENSE.txt`; 2.0.0's zip has none of these). **`Games` holds your own game files:** move them before you
+delete that folder. The `[NX2Perf]` group in `qt-config.ini`, the launchers' settings files
+(`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) and the shader caches the new
+programs built stay in the user folder; they are safe to keep.
+
+### The second way: eden-cli and the launchers
+
+1. Put your game file (`.nsp`, `.xci`, `.nsz` or `.xcz`) in the new `Games` folder (subfolders
    are fine), or drag it onto the launcher instead.
-3. Double-click `start-recommended.bat`.
+2. Double-click `start-recommended.bat`.
 
 **On the first start** the launcher prepares the settings. NX2Perf uses the same user folder as
 2.0.0 (`user\` next to the program in a portable setup, otherwise `%APPDATA%\eden`): the same
@@ -71,12 +133,6 @@ start the launcher again. With more than one game in `Games`, the launcher lists
 for a number.
 
 The game starts in full screen; eden-cli has no menu. **Quit with Alt+F4.**
-
-To uninstall, delete the files the zip added (`eden-cli-nx2perf.exe`, the three `start-*.bat`,
-`nx2perf-config.ps1`, the `*_NX2PERF.*` files, `LICENSES\`, `Games\PUT-YOUR-GAMES-HERE.txt`).
-**`Games` holds your own game files:** move them before you delete that folder. The launchers'
-settings files (`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) and the shader caches
-the new program built stay in the user folder; they are safe to keep.
 
 ## Launchers
 
@@ -132,14 +188,16 @@ error. Take the launchers from the release zip: they need Windows line endings (
   below). With a `CONFIG=` file that has reactive flushing off, `RX_RT_FIT=3` still acts, a
   combination that was not measured.
 
-eden-cli reads the switches only from its environment (the launchers).
-`nx2_switches_NX2PERF.txt` lists every switch with its default and what it does. (2.0.0's own
-`nx2_switches.txt` is read by the Qt program only; the package does not replace it.)
+eden-cli reads the switches only from its environment (the launchers); it does not read the
+NX2Perf tab. `nx2_switches_NX2PERF.txt` lists every switch with its default and what it does.
+(`nx2_switches.txt` is read by the menu programs only, 2.0.0's and `eglantine-nx2perf.exe`; the
+package does not replace it.)
 
 ## Main switches
 
 All are environment variables named `EDEN_NX2_<NAME>`. The full list (about 230 new names, most
-of them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`.
+of them diagnostics or tuning knobs) is in `nx2_switches_NX2PERF.txt`. "Default" is the program
+without a launcher; the menu program sets the recommended ones from its NX2Perf tab.
 
 | Switch | Default | What it does |
 |---|---|---|
@@ -169,8 +227,9 @@ the ZendNevs fork (v2.0.5). Nothing is written to disk, no game file is changed,
 switch unset no module is touched. It only applies to Bananza (title 040074A01BF12000) and
 only if the expected instructions are found. `DK_DYN_MIN_FPS=<1-60>` moves the 40 fps limit.
 
-It is off by default in the program; `start-recommended.bat` turns it on (`DK_DYN=1` at its
-top). With it the game's frame time varies by design (any rate between 40 and 60, in steps of
+It is off by default in eden-cli; `start-recommended.bat` turns it on (`DK_DYN=1` at its
+top), and so does the menu program's NX2Perf tab (Dynamic frame rate, on by default, Bananza
+only). With it the game's frame time varies by design (any rate between 40 and 60, in steps of
 2); below 40 fps the game still drops to its 30 fps rule. While it is applied,
 `PRESENT_INTERVAL_WORD` and `MODE_PACE` are set aside and presents are paced to every vblank.
 
@@ -184,7 +243,8 @@ multiplier on the OSD. Two kinds exist:
   *Lossless Scaling* app. **NX2Perf does not include it**; put your own copy in the user
   folder's `lossless\` folder if you want this kind.
 
-To turn FSR3 frame generation on for eden-cli, close the program and add these lines under
+In the menu program, frame generation is in its graphics settings, as in 2.0.0. To turn FSR3
+frame generation on for eden-cli, close the program and add these lines under
 `[Renderer]` in `config\sdl2-config.ini` (the `\default=false` lines make eden-cli read the value):
 
 ```ini
@@ -210,8 +270,10 @@ use_reactive_flushing\default=false
 use_reactive_flushing=false
 ```
 
-matches our recommended setup; `=true` (or no such lines) is reactive flushing on. The
-launchers take care of it. `start-recommended.bat` writes these two lines into the
+matches our recommended setup; `=true` (or no such lines) is reactive flushing on. In the
+menu program it is *Enable Reactive Flushing* under Graphics > Advanced (the NX2Perf tab's
+Recommended button turns it off; `qt-config.ini` is shared with 2.0.0's `eglantine.exe`). The
+launchers take care of it for eden-cli. `start-recommended.bat` writes these two lines into the
 `sdl2-config.ini` it makes on the first start; it never changes an existing one, it only prints
 a note when reactive flushing is on there (change the two lines by hand, with the program
 closed, for the measured setup). `start-reactive-experimental.bat` uses its own copy,
@@ -278,10 +340,11 @@ benchmark.
 
 ## Known issues
 
-- **Only the command line program.** The Qt program (`eglantine.exe`) is not part of this
-  release: the build and the PGO profile are for `eden-cli`. Keep using 2.0.0's `eglantine.exe`
-  for its menus. The launchers copy its `qt-config.ini` once, on the first start; settings
-  changed there later do not reach eden-cli (`sdl2-config.ini`). To copy them again, rename
+- **The menu program was not measured.** `eglantine-nx2perf.exe` runs the same emulator code
+  with the same switches and the same PGO profile as `eden-cli-nx2perf.exe`, but every number
+  here comes from eden-cli. It needs the Qt 6.8.3 DLLs of a 2.0.0 folder.
+- The launchers copy `qt-config.ini` once, on the first start; settings changed in the menu
+  programs later do not reach eden-cli (`sdl2-config.ini`). To copy them again, rename
   `sdl2-config.ini` (and `sdl2-config-reactive.ini`) and start a launcher.
 - **Black blocks with a bright edge** appear in some places. They were seen in a session with
   frame generation and, before that, without it; the likely cause is an older rendering issue of
@@ -298,7 +361,8 @@ benchmark.
 - A program built with profile-guided optimization is fastest on the paths it was trained on.
   This release reuses the profile of an earlier training run (commit `c8bbd32fe9`, 3 Nov:
   Bananza with the switches of that day, before `DK_DYN`, `FG_TIMED` and `RX_RT_FIT`, reactive
-  flushing off). Newer and other paths work, maybe a little slower.
+  flushing off). Newer and other paths work, maybe a little slower. Both programs use it; the
+  menu program's own Qt code gets no profile.
 
 ## AI disclosure
 
@@ -319,7 +383,11 @@ was changed and when is in `NOTICE_NX2PERF.txt` (in the release zips) and
 https://github.com/EddizEge/NX2Perf and in the `-source.zip` next to the program, with notes on
 how the third-party libraries are fetched (`BUILDING_NX2PERF.md`). Third-party components keep
 their own licenses: their notices and license texts are in `THIRD_PARTY_NOTICES_NX2PERF.txt` and
-`LICENSES\`. The source of the libraries built from source is in the `-deps-source.zip`. Four
+`LICENSES\`. The menu program links Qt 6.8.3 dynamically (Qt Base and Qt SVG under LGPL-3.0, Qt
+Charts under GPL-3.0): its Qt DLLs are those of your 2.0.0 folder, not in this package, and you
+may replace them with your own build of Qt 6.8.3. QuaZip (LGPL-2.1 with a static linking
+exception) is compiled into it. The source of the libraries built from source, QuaZip
+included, is in the `-deps-source.zip`. Four
 libraries are linked from prebuilt packages: FFmpeg, OpenSSL, SDL3 and sirit. Their source is in
 the `-prebuilt-source.zip`: the upstream source archives of the exact commits, the crueter-ci
 build scripts that made the prebuilt packages (with their configure / CMake options), the patch

@@ -7,9 +7,30 @@ per-draw shortcuts are on and `=0` brings back the 2.0.0 code path.
 
 ## NX2Perf 1 (`2.0.0-nx2perf1`)
 
-Base: PokeDinner-Eglantine 2.0.0. Program: `eden-cli` (SDL front end), built with LTO and
-profile-guided optimization. About 390 commits, made between 31 October and 5 November 2026
+Base: PokeDinner-Eglantine 2.0.0. Programs: `eglantine-nx2perf.exe` (the Qt menu program) and
+`eden-cli-nx2perf.exe` (SDL front end), both built with LTO and profile-guided optimization. About 390 commits, made between 31 October and 5 November 2026
 (modified by the NX2Perf maintainer; see `NOTICE_NX2PERF.txt` in the release zips).
+
+### The menu program
+
+- `eglantine-nx2perf.exe`: 2.0.0's Qt front end built from this tree against Qt 6.8.3 (the
+  version 2.0.0 ships), so it runs with the Qt DLLs of a 2.0.0 folder; it shares 2.0.0's user
+  folder and `qt-config.ini`.
+- An **NX2Perf** tab in Configure: the switches of `start-recommended.bat` as eight settings
+  (split GPU thread, acquire peek, the macro JIT filter, the lean front macro path, timed frame
+  generation, the RTSS overlay, and for Donkey Kong Bananza only the dynamic frame rate and the
+  frame pacing), kept in a new `[NX2Perf]` group of `qt-config.ini`, all on at the first start.
+  "Recommended" also turns reactive flushing off (the measured setup); "All Off" turns the eight
+  off.
+- The program sets the switches in its environment before the first game of a session starts.
+  The Bananza ones only for Bananza (the title the dynamic frame rate patch checks). A switch set
+  outside the program (environment, launcher, `nx2_switches.txt`) wins and is left alone. The
+  switches are read once per session: a game that needs others restarts the program for it
+  (asked first).
+- The RTSS on-screen display (`OSD`) works in the menu program too (the writer moved from
+  eden-cli to `frontend_common`).
+- "NX2Perf by EddizEge" in the window title and the About dialog, with the project's address.
+  Upstream names and copyrights are unchanged.
 
 ### Donkey Kong Bananza terrain and the GPU command stream
 
@@ -175,12 +196,12 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 ### Build
 
 - `/QIntel-jcc-erratum` is a build option (`YUZU_MSVC_JCC_ERRATUM`).
-- Release program built with link-time code generation and profile-guided optimization
-  (`BUILDING_NX2PERF.md`).
+- Release programs built with link-time code generation and profile-guided optimization, the
+  menu program with eden-cli's profile (`BUILDING_NX2PERF.md`); the menu program against Qt 6.8.3.
 
 ### Not in this release
 
-- The Qt program (`eglantine.exe`).
+- Measurements of the menu program (`eglantine-nx2perf.exe`): every number is from eden-cli.
 - A reactive flushing launcher that is checked: `start-reactive-experimental.bat`
   (`RX_RT_FIT=3`) is the second choice next to the recommended one, experimental until it is
   measured with frame generation and its image is checked.

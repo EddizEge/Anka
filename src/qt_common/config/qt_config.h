@@ -34,6 +34,7 @@ protected:
     void ReadUIGamelistValues() override;
     void ReadUILayoutValues() override;
     void ReadMultiplayerValues() override;
+    void ReadNx2PerfValues();
 
     void SaveQtValues();
     void SaveQtPlayerValues(std::size_t player_index);
@@ -46,6 +47,7 @@ protected:
     void SaveUIGamelistValues() override;
     void SaveUILayoutValues() override;
     void SaveMultiplayerValues() override;
+    void SaveNx2PerfValues();
 
     std::vector<Settings::BasicSetting*>& FindRelevantList(Settings::Category category) override;
 

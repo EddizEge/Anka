@@ -42,6 +42,7 @@
 #include "set_play_time_dialog.h"
 #include "util/util.h"
 #include "yuzu/game/game_list.h"
+#include "yuzu/nx2perf_session.h"
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -1910,8 +1911,27 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const auto loader =
         Loader::GetLoader(*QtCommon::system, v_file, params.program_id, params.program_index);
 
-    if (loader != nullptr && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success &&
-        type == StartGameType::Normal) {
+    const bool has_title_id =
+        loader != nullptr && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success;
+
+    // NX2Perf (nx2perf_session.h): the EDEN_NX2_* switches for this title, before it loads (and
+    // before its per-game settings: a restart closes the program with the global ones).
+    switch (Nx2PerfSession::Prepare(this, title_id, filename, ui->action_Fullscreen->isChecked(),
+                                    params.applet_id != Service::AM::AppletId::Application)) {
+    case Nx2PerfSession::Boot::Go:
+        break;
+    case Nx2PerfSession::Boot::Restart:
+        // main() starts the program again with this game once the window is gone; a running game
+        // may make the window ask, and stay.
+        if (!close()) {
+            Nx2PerfSession::CancelRestart();
+        }
+        return;
+    case Nx2PerfSession::Boot::Cancel:
+        return;
+    }
+
+    if (has_title_id && type == StartGameType::Normal) {
         // Load per game settings
         const auto file_path =
             std::filesystem::path{Common::U16StringFromBuffer(filename.utf16(), filename.size())};
@@ -1953,6 +1973,14 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     QtCommon::emu_thread = std::make_unique<EmuThread>();
     emit EmulationStarting();
     QtCommon::emu_thread->start();
+
+    // The emulated clock as the OSD's speed fallback only single core, as in yuzu_cmd: multicore
+    // it is the wall clock.
+    nx2_osd = Nx2Osd::StartFromEnvironment(
+        Settings::values.use_multi_core.GetValue()
+            ? std::function<s64()>{}
+            : std::function<s64()>{
+                  [] { return QtCommon::system->CoreTiming().GetGlobalTimeUs().count(); }});
 
     // Register an ExecuteProgram callback such that Core can execute a sub-program
     QtCommon::system->RegisterExecuteProgramCallback(
@@ -2068,6 +2096,8 @@ bool MainWindow::OnShutdownBegin() {
         return false;
     }
 
+    nx2_osd.reset(); // reads the system's clock: stopped first
+
     if (ui->action_Fullscreen->isChecked()) {
         HideFullscreen();
     }
@@ -2133,6 +2163,7 @@ void MainWindow::OnEmulationStopTimeExpired() {
 
 void MainWindow::OnEmulationStopped() {
     shutdown_timer.stop();
+    nx2_osd.reset();
     if (QtCommon::emu_thread) {
         QtCommon::emu_thread->disconnect();
         if (!QtCommon::emu_thread->wait(QDeadlineTimer(10'000))) {
@@ -4123,7 +4154,8 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view title_version,
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
-    static const std::string yuzu_title = "Eglantine - PokeDinner fork by Franseven";
+    static const std::string yuzu_title =
+        "NX2Perf by EddizEge | Eglantine - PokeDinner fork by Franseven";
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);

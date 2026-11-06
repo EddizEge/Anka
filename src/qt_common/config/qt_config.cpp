@@ -77,6 +77,7 @@ void QtConfig::SaveAllValues() {
 void QtConfig::ReadQtValues() {
     if (global) {
         ReadUIValues();
+        ReadNx2PerfValues();
     }
     ReadQtControlValues();
 }
@@ -352,10 +353,31 @@ void QtConfig::ReadMultiplayerValues() {
     EndGroup();
 }
 
+// NX2Perf's settings (core/nx2_perf_settings.h): their own [NX2Perf] group, which the 2.0.0 program
+// sharing this file leaves as it is.
+void QtConfig::ReadNx2PerfValues() {
+    BeginGroup("NX2Perf");
+    UISettings::values.nx2perf = Core::Nx2PerfSettings::Load([this](std::string_view key, bool def) {
+        return ReadBooleanSetting(std::string{key}, std::make_optional(def));
+    });
+    EndGroup();
+}
+
+void QtConfig::SaveNx2PerfValues() {
+    BeginGroup("NX2Perf");
+    Core::Nx2PerfSettings::Save(UISettings::values.nx2perf,
+                                [this](std::string_view key, bool value, bool def) {
+                                    WriteBooleanSetting(std::string{key}, value,
+                                                        std::make_optional(def));
+                                });
+    EndGroup();
+}
+
 void QtConfig::SaveQtValues() {
     if (global) {
         LOG_DEBUG(Config, "Saving global Qt configuration values");
         SaveUIValues();
+        SaveNx2PerfValues();
     } else {
         LOG_DEBUG(Config, "Saving Qt configuration values");
     }

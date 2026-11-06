@@ -20,6 +20,7 @@
 #include "common/common_types.h"
 #include "common/settings_enums.h"
 #include "frontend_common/content_manager.h"
+#include "frontend_common/nx2_osd.h"
 #include "input_common/drivers/tas_input.h"
 #include "qt_common/config/qt_config.h"
 #include "qt_common/qt_common.h"
@@ -540,6 +541,8 @@ private:
 
     // Whether emulation is currently running in yuzu.
     bool emulation_running = false;
+    // EDEN_NX2_OSD (frontend_common/nx2_osd.h): from the game's start to its shutdown.
+    Nx2Osd::WriterPtr nx2_osd;
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)

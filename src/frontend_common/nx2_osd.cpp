@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "yuzu_cmd/nx2_osd.h"
+#include "frontend_common/nx2_osd.h"
 
 #include <array>
 #include <chrono>

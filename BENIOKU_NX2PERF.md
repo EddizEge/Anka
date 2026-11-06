@@ -2,8 +2,13 @@
 
 NX2Perf, **PokeDinner-Eglantine 2.0.0**'ın (Franseven'in Eden emülatörü çatalı) resmî olmayan bir
 performans çatalıdır; amacı **Donkey Kong Bananza**'yı masaüstü PC'de daha akıcı oynatmaktır.
-Tek bir program içerir: `eden-cli-nx2perf.exe` (komut satırı / SDL ön yüzü). Bu program mevcut bir
-PokeDinner-Eglantine 2.0.0 kurulumunun yanına konur; başlatıcılar onu ölçtüğümüz ayarlarla açar.
+Mevcut bir PokeDinner-Eglantine 2.0.0 klasörüne açılır. İki program içerir:
+
+- **`eglantine-nx2perf.exe`**, menülü program: 2.0.0'ın `eglantine.exe`'siyle aynı Qt ön yüzü
+  (oyun listesi, menüler, ayarlar); NX2Perf ayarları içinde, ayarlarında bir **NX2Perf** sekmesi
+  var. Kolay yol budur.
+- **`eden-cli-nx2perf.exe`**, komut satırı / SDL ön yüzü; başlatıcılar (`start-*.bat`) onu
+  ölçtüğümüz ayarlarla açar. Ölçümlerimiz bununla yapıldı.
 
 Eden projesiyle ya da Franseven'le bir bağı yoktur. Sorunlarını onlara bildirmeyin; bu çatalın
 sorun izleyicisini kullanın: https://github.com/EddizEge/NX2Perf/issues
@@ -17,17 +22,23 @@ sorun izleyicisini kullanın: https://github.com/EddizEge/NX2Perf/issues
   (kaynakta `dist/nx2_switches.txt`).
 - English: `README_NX2PERF.md`.
 
-**Tek makinede, tek oyunla denendi.** Aşağıdaki bütün sayılar Ryzen 7 5700X (8 çekirdek), 64 GB
-RAM, NVIDIA GeForce RTX 4060 Ti ve 1440p 170 Hz ekranlı bir makinede Donkey Kong Bananza
-oynanırken alındı. Başka oyunlar, başka işlemciler, AMD ya da Intel ekran kartları denenmedi.
+**Donkey Kong Bananza için yapıldı, tek makinede denendi.** Aşağıdaki bütün sayılar Ryzen 7 5700X
+(8 çekirdek), 64 GB RAM, NVIDIA GeForce RTX 4060 Ti ve 1440p 170 Hz ekranlı bir makinede Donkey
+Kong Bananza `eden-cli-nx2perf.exe` ve başlatıcılarıyla oynanırken alındı. Menülü program aynı
+emülatör kodunu aynı ayarlarla çalıştırır ama ayrıca ölçülmedi. Bananza'ya özel ayarlar başka
+oyunlarda kendiliğinden kapalı kalır. Başka oyunlar, başka işlemciler, AMD ya da Intel ekran
+kartları denenmedi.
 
 ## Gerekenler
 
 - Windows 10 ya da 11, 64 bit.
 - Çalışan bir **PokeDinner-Eglantine 2.0.0** kurulumu: kendi anahtarlarınız, firmware'iniz ve
   oyun dökümünüz, 2.0.0 için kurulduğu gibi. NX2Perf bunların hiçbirini sağlamaz, sağlamayacak.
-- **Microsoft Visual C++ 2015-2022 x64** çalışma zamanı (2.0.0 da ister). Program, 2.0.0'ın
-  `eden-cli.exe`'siyle birebir aynı DLL'leri kullanır; başka bir şey kurmak gerekmez.
+- **Microsoft Visual C++ 2015-2022 x64** çalışma zamanı (2.0.0 da ister). `eden-cli-nx2perf.exe`,
+  2.0.0'ın `eden-cli.exe`'siyle birebir aynı DLL'leri kullanır. `eglantine-nx2perf.exe` 2.0.0
+  klasöründeki Qt 6.8.3 DLL'lerini ve eklentilerini kullanır (2.0.0'ın derlendiği Qt sürümü):
+  **pakette Qt yoktur**, bu yüzden menülü program yalnız bir 2.0.0 klasörünün içinde açılır.
+  Başka bir şey kurmak gerekmez.
 - Güncel **Vulkan** sürücülü bir ekran kartı (2.0.0'daki gibi). Yalnız NVIDIA RTX 4060 Ti denendi.
 - x86-64 işlemci. Derleme AVX2 istemez (AVX2 kodu yalnız Opus ses kodlayıcısında var ve işlemciyi
   çalışırken denetliyor), ama yalnız Ryzen 7 5700X denendi. Değişikliklerin çoğu GPU iş
@@ -50,11 +61,66 @@ Bu resmî olmayan, deneysel bir derlemedir ve hiçbir garantisi yoktur (`NOTICE_
 klasörünü (kayıtlarınız) yedekleyin.**
 
 1. NX2Perf `-win64.zip`'ini PokeDinner-Eglantine 2.0.0 klasörüne, `eglantine.exe`'nin yanına
-   açın. Hiçbir dosyanın üstüne yazılmaz: programın kendi adı var (`eden-cli-nx2perf.exe`),
-   2.0.0 eskisi gibi çalışmaya devam eder.
-2. Oyun dosyanızı (`.nsp`, `.xci`, `.nsz` ya da `.xcz`) yeni `Games` klasörüne koyun (alt
+   açın. Hiçbir dosyanın üstüne yazılmaz: yeni programların kendi adları var, 2.0.0 eskisi gibi
+   çalışmaya devam eder.
+2. **`eglantine-nx2perf.exe`**'yi açın (pencere başlığı "NX2Perf by EddizEge" ile başlar).
+   2.0.0'ın `eglantine.exe`'siyle aynı kullanıcı klasörünü ve aynı `qt-config.ini`'yi kullanır;
+   oyun listeniz, kumandanız ve ayarlarınız zaten oradadır.
+3. Ayarlar: **Emulation > Configure... > NX2Perf**. NX2Perf ayarları programın içine
+   yerleşiktir; ayarlar penceresinde bir **NX2Perf** sekmesi vardır. İlk açılışta oradaki her şey
+   açıktır. Ölçtüğümüz kurulum için **Recommended**'a, sonra **OK**'a basın: reaktif boşaltmayı
+   da kapatır (2.0.0'da açıktır). Oyununuzu her zamanki gibi listeden açın.
+
+### NX2Perf sekmesi
+
+| Ayar | Koyduğu anahtarlar (`EDEN_NX2_...`) | Oyunlar |
+|---|---|---|
+| Split GPU thread (bölünmüş GPU iş parçacığı) | `BACK_STAGES=1`, `BACK_CUTS=a` | hepsi |
+| Acquire peek | `ACQUIRE_PEEK=1` | hepsi |
+| Same-value filter in the macro JIT | `JIT_SAME=1` | hepsi |
+| Lean front macro path | `FRONT_MACRO_LEAN=1` | hepsi |
+| Timed frame generation | `FG_TIMED=1` (yalnız kare üretme açıkken etkili) | hepsi |
+| FPS overlay in RivaTuner | `OSD=1` (RTSS çalışıyorsa) | hepsi |
+| Dynamic frame rate | `DK_DYN=1` | yalnız Bananza |
+| Frame pacing | `PRESENT_INTERVAL_WORD=12:16:4`, `MODE_PACE=2`, `PACE_SPIN_US=1500` | yalnız Bananza |
+
+Bunlar `start-recommended.bat`'ın koyduğu anahtarlardır ("Başlatıcılar", "Başlıca anahtarlar").
+Program onları bir oyun açılmadan hemen önce kendi ortamına koyar. İki Bananza ayarı yalnız oyun
+Donkey Kong Bananza olduğunda konur (başlık 040074A01BF12000, dinamik kare hızı yamasının
+denetlediği); başka her oyunda kapalı kalırlar. **Recommended** sekizini de açar ve *Enable
+Reactive Flushing*'i de kapatır (Graphics > Advanced; kalması için OK'a basın): ölçtüğümüz
+kurulum ("Reaktif boşaltma"). **All Off** sekizini kapatır; bu çatalın varsayılan açık tuttuğu
+çizim başına kısayollar açık kalır (onları da yalnız `start-safe.bat` kapatır; 2.0.0'a en yakın
+hâl).
+
+Anahtarlar oturum başına bir kez okunur. Bir değişiklik açtığınız sonraki oyundan itibaren
+geçerlidir; o oyun oturumun ilk oyunundan başka anahtarlar istiyorsa (bir ayarı değiştirdiniz,
+başka bir oyundan sonra Bananza'yı ya da Bananza'dan sonra başka bir oyunu açıyorsunuz) program
+sorar: **Restart** programı kapatıp o oyunla yeniden açar, **Start Anyway** oturumun anahtarlarıyla
+açar.
+
+Program dışında konan anahtar önceliklidir: ortamınızda, menülü programı açan kendi `.bat`'ınızda
+ya da bir `nx2_switches.txt`'de (programın yanında ya da `%APPDATA%\eden`'de). Program o
+değişkene dokunmaz. Anahtarlarının hepsi dışarıda konmuş kutu gri görünür; yalnız bir kısmı
+konmuşsa (ör. kare zamanlamasının üç anahtarından biri) kutu ötekileri yine koyar. İpucu dışarıda
+konan değişkenleri değerleriyle verir.
+
+**2.0.0 ile ortak:** iki menülü program aynı `qt-config.ini`'yi kullanır; birinde değiştirdiğiniz
+ayar (reaktif boşaltma da) ötekinde de geçerlidir. Yalnız `[NX2Perf]` grubu yenidir; 2.0.0'ın
+`eglantine.exe`'si ona dokunmaz.
+
+Kaldırmak için zip'in eklediği dosyaları silin (`eglantine-nx2perf.exe`, `eden-cli-nx2perf.exe`,
+üç `start-*.bat`, `nx2perf-config.ps1`, `*_NX2PERF.*` dosyaları, `LICENSES\`,
+`Games\PUT-YOUR-GAMES-HERE.txt`, `LICENSE.txt`; 2.0.0'ın zip'inde bunların hiçbiri yok). **`Games`'te kendi oyun dosyalarınız durur:** klasörü silmeden
+önce onları taşıyın. `qt-config.ini`'deki `[NX2Perf]` grubu, başlatıcıların ayar dosyaları
+(`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) ve yeni programların kurduğu
+gölgelendirici önbellekleri kullanıcı klasöründe kalır; durmalarında sakınca yok.
+
+### İkinci yol: eden-cli ve başlatıcılar
+
+1. Oyun dosyanızı (`.nsp`, `.xci`, `.nsz` ya da `.xcz`) yeni `Games` klasörüne koyun (alt
    klasörde de olabilir) ya da başlatıcının üstüne sürükleyin.
-3. `start-recommended.bat`'a çift tıklayın.
+2. `start-recommended.bat`'a çift tıklayın.
 
 **İlk açılışta** başlatıcı ayarları hazırlar. NX2Perf, 2.0.0 ile aynı kullanıcı klasörünü
 kullanır (taşınabilir kurulumda programın yanındaki `user\`, değilse `%APPDATA%\eden`): aynı
@@ -69,12 +135,6 @@ başlatıcılar bu adımı atlayıp oyunu açar. İki dosya da yoksa başlatıc�
 `Games`'te birden çok oyun varsa başlatıcı onları listeler ve numara sorar.
 
 Oyun tam ekran açılır; eden-cli'nin menüsü yoktur. **Alt+F4 ile çıkın.**
-
-Kaldırmak için zip'in eklediği dosyaları silin (`eden-cli-nx2perf.exe`, üç `start-*.bat`,
-`nx2perf-config.ps1`, `*_NX2PERF.*` dosyaları, `LICENSES\`, `Games\PUT-YOUR-GAMES-HERE.txt`).
-**`Games`'te kendi oyun dosyalarınız durur:** klasörü silmeden önce onları taşıyın. Başlatıcıların
-ayar dosyaları (`config\sdl2-config.ini`, `config\sdl2-config-reactive.ini`) ve yeni programın
-kurduğu gölgelendirici önbellekleri kullanıcı klasöründe kalır; durmalarında sakınca yok.
 
 ## Başlatıcılar
 
@@ -129,14 +189,15 @@ Windows satır sonları (CRLF) gerekir.
   kopyası olarak oluşturur (aşağıda "Reaktif boşaltma"). Reaktif boşaltması kapalı bir `CONFIG=`
   dosyasıyla da `RX_RT_FIT=3` etkilidir; bu bileşim ölçülmedi.
 
-eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur. `nx2_switches_NX2PERF.txt` her
-anahtarı varsayılanı ve ne yaptığıyla listeler. (2.0.0'ın kendi `nx2_switches.txt`'sini yalnız Qt
-programı okur; paket onu değiştirmez.)
+eden-cli anahtarları yalnız ortamından (başlatıcılardan) okur; NX2Perf sekmesini okumaz.
+`nx2_switches_NX2PERF.txt` her anahtarı varsayılanı ve ne yaptığıyla listeler. (`nx2_switches.txt`'yi
+yalnız menülü programlar okur, 2.0.0'ınki ve `eglantine-nx2perf.exe`; paket onu değiştirmez.)
 
 ## Başlıca anahtarlar
 
 Hepsi `EDEN_NX2_<AD>` adlı ortam değişkenleridir. Tam liste (yaklaşık 230 yeni ad, çoğu tanı ya da ince ayar)
-`nx2_switches_NX2PERF.txt`'de.
+`nx2_switches_NX2PERF.txt`'de. "Varsayılan", başlatıcısız programdır; menülü program önerilenleri
+NX2Perf sekmesinden koyar.
 
 | Anahtar | Varsayılan | Ne yapar |
 |---|---|---|
@@ -166,7 +227,8 @@ yazılmaz, hiçbir oyun dosyası değişmez; anahtar boşken hiçbir modüle dok
 (başlık 040074A01BF12000) ve yalnız beklenen komutlar bulunursa uygulanır. `DK_DYN_MIN_FPS=<1-60>`
 40 FPS sınırını değiştirir.
 
-Programda varsayılan kapalıdır; `start-recommended.bat` açar (başındaki `DK_DYN=1`). Açıkken
+eden-cli'de varsayılan kapalıdır; `start-recommended.bat` açar (başındaki `DK_DYN=1`), menülü
+programın NX2Perf sekmesi de (Dynamic frame rate; varsayılan açık, yalnız Bananza). Açıkken
 oyunun kare süresi bilerek değişkendir (40 ile 60 arası, 2'lik adımlarla). Yama uygulanınca
 `PRESENT_INTERVAL_WORD` ve `MODE_PACE` devre dışı kalır, sunumlar her vblank'e göre zamanlanır; 40 FPS'in altında oyun yine
 kendi 30 FPS kuralına iner.
@@ -181,7 +243,8 @@ göstergede gösterir. İki türü var:
   `Lossless.dll`'ini ister. **NX2Perf bunu içermez**; bu türü isterseniz kendi kopyanızı kullanıcı
   klasöründeki `lossless\` klasörüne koyun.
 
-eden-cli'de FSR3 kare üretmeyi açmak için programı kapatın ve `config\sdl2-config.ini`'de
+Menülü programda kare üretme, 2.0.0'daki gibi grafik ayarlarındadır. eden-cli'de FSR3 kare
+üretmeyi açmak için programı kapatın ve `config\sdl2-config.ini`'de
 `[Renderer]` altına şu satırları ekleyin (`\default=false` satırları eden-cli'nin değeri okumasını
 sağlar):
 
@@ -208,7 +271,9 @@ use_reactive_flushing=false
 ```
 
 bizim önerilen kurulumumuza karşılık gelir; `=true` (ya da bu satırların hiç olmaması) reaktif
-boşaltma açık demektir. Bunu başlatıcılar halleder. `start-recommended.bat` ilk açılışta
+boşaltma açık demektir. Menülü programda Graphics > Advanced altındaki *Enable Reactive
+Flushing*'tir (NX2Perf sekmesinin Recommended düğmesi onu kapatır; `qt-config.ini` 2.0.0'ın
+`eglantine.exe`'siyle ortaktır). eden-cli için bunu başlatıcılar halleder. `start-recommended.bat` ilk açılışta
 oluşturduğu `sdl2-config.ini`'ye bu iki satırı yazar; var olan dosyayı asla değiştirmez, orada
 reaktif boşaltma açıksa yalnız bir not yazar (ölçülen kurulum için iki satırı program kapalıyken
 elle değiştirin). `start-reactive-experimental.bat` kendi kopyasını kullanır:
@@ -273,11 +338,12 @@ değildir.
 
 ## Bilinen sorunlar
 
-- **Yalnız komut satırı programı.** Qt programı (`eglantine.exe`) bu sürümde yok: derleme ve PGO
-  profili `eden-cli` içindir. Menüleri için 2.0.0'ın `eglantine.exe`'sini kullanmayı sürdürün;
-  başlatıcılar onun `qt-config.ini`'sini ilk açılışta bir kez kopyalar; orada sonradan değiştirilen
-  ayarlar eden-cli'ye (`sdl2-config.ini`) geçmez. Yeniden kopyalatmak için `sdl2-config.ini`'nin
-  (ve `sdl2-config-reactive.ini`'nin) adını değiştirip bir başlatıcıyı açın.
+- **Menülü program ölçülmedi.** `eglantine-nx2perf.exe`, `eden-cli-nx2perf.exe` ile aynı emülatör
+  kodunu aynı anahtarlarla ve aynı PGO profiliyle çalıştırır; ama buradaki bütün sayılar
+  eden-cli'den. Bir 2.0.0 klasörünün Qt 6.8.3 DLL'lerine ihtiyaç duyar.
+- Başlatıcılar `qt-config.ini`'yi ilk açılışta bir kez kopyalar; menülü programlarda sonradan
+  değiştirilen ayarlar eden-cli'ye (`sdl2-config.ini`) geçmez. Yeniden kopyalatmak için
+  `sdl2-config.ini`'nin (ve `sdl2-config-reactive.ini`'nin) adını değiştirip bir başlatıcıyı açın.
 - **Parlak kenarlı siyah bloklar** bazı yerlerde görünüyor. Kare üretmeli bir oturumda ve ondan
   önce kare üretmesiz görüldüler; olası neden kare üretme değil, bu oyunun daha eski bir çizim
   sorunu (upstream için de bildirildi), ama kesinleşmedi. Görürseniz dünyada yerinde kalıp
@@ -292,7 +358,8 @@ değildir.
 - Profil güdümlü iyileştirmeyle derlenmiş program, eğitildiği yollarda en hızlıdır. Bu sürüm
   daha önceki bir eğitim koşusunun profilini yeniden kullanır (commit `c8bbd32fe9`, 3 Kasım:
   o günün anahtarlarıyla Bananza; `DK_DYN`, `FG_TIMED` ve `RX_RT_FIT`'ten önce, reaktif boşaltma
-  kapalı). Yeni ve başka yollar da çalışır, belki biraz yavaş.
+  kapalı). Yeni ve başka yollar da çalışır, belki biraz yavaş. İki program da bu profili kullanır;
+  menülü programın kendi Qt kodu profil almaz.
 
 ## Yapay zekâ beyanı
 
@@ -312,7 +379,10 @@ zaman değiştiği `NOTICE_NX2PERF.txt`'de (yayın zip'lerinde) ve `CHANGELOG_NX
 https://github.com/EddizEge/NX2Perf adresinde ve programın yanındaki `-source.zip`'tedir; üçüncü
 taraf kütüphanelerin nasıl indirildiği `BUILDING_NX2PERF.md`'de. Üçüncü taraf bileşenler kendi
 lisanslarını korur: bildirimleri ve lisans metinleri `THIRD_PARTY_NOTICES_NX2PERF.txt` ve
-`LICENSES\` içinde. Kaynaktan derlenen kütüphanelerin kaynağı `-deps-source.zip`'te. Dört
+`LICENSES\` içinde. Menülü program Qt 6.8.3'e dinamik bağlanır (Qt Base ve Qt SVG LGPL-3.0, Qt
+Charts GPL-3.0 ile): Qt DLL'leri 2.0.0 klasörünüzdekilerdir, bu pakette yoktur; onları kendi
+derlediğiniz Qt 6.8.3 ile değiştirebilirsiniz. QuaZip (LGPL-2.1, statik bağlama istisnasıyla)
+içine derlenmiştir. Kaynaktan derlenen kütüphanelerin, QuaZip dahil, kaynağı `-deps-source.zip`'te. Dört
 kütüphane önceden derlenmiş paketlerden bağlanır: FFmpeg, OpenSSL, SDL3 ve sirit. Kaynakları
 `-prebuilt-source.zip`'tedir: tam commit'lerin upstream kaynak arşivleri, önceden derlenmiş
 paketleri üreten crueter-ci derleme betikleri (configure / CMake seçenekleriyle), FFmpeg'e

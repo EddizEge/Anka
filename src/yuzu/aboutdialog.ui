@@ -87,6 +87,19 @@
         </widget>
        </item>
        <item>
+        <widget class="QLabel" name="labelNx2Perf">
+         <property name="text">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;NX2Perf by EddizEge&lt;/span&gt;&lt;br/&gt;Speed changes for Donkey Kong Bananza on PokeDinner-Eglantine 2.0.0, with its own settings tab (Configure, NX2Perf). &lt;a href=&quot;https://github.com/EddizEge/NX2Perf&quot;&gt;&lt;span style=&quot; text-decoration: underline; color:#039be5;&quot;&gt;github.com/EddizEge/NX2Perf&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+         <property name="openExternalLinks">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
         <widget class="QLabel" name="labelAbout">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
