@@ -353,23 +353,40 @@ void QtConfig::ReadMultiplayerValues() {
     EndGroup();
 }
 
-// NX2Perf's settings (core/nx2_perf_settings.h): their own [NX2Perf] group, which the 2.0.0 program
+// Anka's settings (core/nx2_perf_settings.h): their own [Anka] group, which the 2.0.0 program
 // sharing this file leaves as it is.
 void QtConfig::ReadNx2PerfValues() {
-    BeginGroup("NX2Perf");
-    UISettings::values.nx2perf = Core::Nx2PerfSettings::Load([this](std::string_view key, bool def) {
-        return ReadBooleanSetting(std::string{key}, std::make_optional(def));
-    });
+    BeginGroup("Anka");
+    // No [Anka] preset yet: Anka's first start on this file.
+    const bool first_start = ReadStringSetting("preset\\default").empty();
+    UISettings::values.nx2perf = Core::Nx2PerfSettings::Load(
+        [this](std::string_view key, bool def) {
+            return ReadBooleanSetting(std::string{key}, std::make_optional(def));
+        },
+        [this](std::string_view key, int def) {
+            return static_cast<int>(
+                ReadIntegerSetting(std::string{key}, std::make_optional(static_cast<s64>(def))));
+        });
     EndGroup();
+    // The first start selects Recommended, which is measured with Reactive Flushing off (like
+    // start-recommended.bat); it is saved with the other settings.
+    const auto reactive =
+        Core::Nx2PerfSettings::ReactiveFlushing(UISettings::values.nx2perf.preset);
+    if (first_start && reactive) {
+        Settings::values.use_reactive_flushing.SetValue(*reactive);
+    }
 }
 
 void QtConfig::SaveNx2PerfValues() {
-    BeginGroup("NX2Perf");
-    Core::Nx2PerfSettings::Save(UISettings::values.nx2perf,
-                                [this](std::string_view key, bool value, bool def) {
-                                    WriteBooleanSetting(std::string{key}, value,
-                                                        std::make_optional(def));
-                                });
+    BeginGroup("Anka");
+    Core::Nx2PerfSettings::Save(
+        UISettings::values.nx2perf,
+        [this](std::string_view key, bool value, bool def) {
+            WriteBooleanSetting(std::string{key}, value, std::make_optional(def));
+        },
+        [this](std::string_view key, int value, int def) {
+            WriteIntegerSetting(std::string{key}, value, std::make_optional(def));
+        });
     EndGroup();
 }
 

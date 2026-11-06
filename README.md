@@ -7,11 +7,9 @@
 -->
 <!-- lang: en-GB -->
 
-> **This is NX2Perf**, an unofficial performance fork of PokeDinner-Eglantine 2.0.0 for Donkey Kong
-> Bananza on a desktop PC; it is not affiliated with Eden or Franseven. Read
-> [README_NX2PERF.md](README_NX2PERF.md) (Turkish: [BENIOKU_NX2PERF.md](BENIOKU_NX2PERF.md)), get the program
-> from this repository's Releases, and report its problems here, not to the projects below.
-> The rest of this page is the upstream README, unchanged.
+> **This is Anka**, a Nintendo Switch 2 emulator for Windows; it is not affiliated with Eden,
+> Eglantine or Franseven. Read [README_ANKA.md](README_ANKA.md) and report problems here. The rest
+> of this page is the upstream README, unchanged.
 
 <h1 align="center">
   <br>

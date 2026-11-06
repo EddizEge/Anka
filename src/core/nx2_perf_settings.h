@@ -4,17 +4,18 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
 #include "core/loader/nx2_dk_dynamic_fps.h"
 
-// NX2Perf's settings in the Qt program (eglantine-nx2perf.exe): the EDEN_NX2_* switches the
-// recommended launcher sets (dist/nx2perf/start-recommended.bat), as on / off settings kept in the
-// [NX2Perf] group of qt-config.ini, all on until changed. The program sets the variables in its
-// own environment before a game boots (yuzu/nx2perf_session.h); eden-cli and the launchers don't
-// read these settings.
+// Anka's settings in the Qt program (anka.exe): the EDEN_NX2_* switches of the launchers
+// (dist/anka/start-*.bat), as a preset and on / off settings kept in the [Anka] group of
+// qt-config.ini, the Recommended preset until changed. The program sets the variables in its own
+// environment before a game boots (yuzu/nx2perf_session.h); anka-cli and the launchers don't read
+// these settings.
 //
 // Every switch is read once per process, most of them into a function's static the first time
 // a game reaches it (EDEN_NX2_BACK_STAGES, ACQUIRE_PEEK, PRESENT_INTERVAL_WORD, MODE_PACE,
@@ -22,6 +23,14 @@
 // So the variables are set once, at the first boot, and a later boot that would need others (a
 // changed setting, or Bananza after another game and back) restarts the program for that game.
 namespace Core::Nx2PerfSettings {
+
+/// The launchers' three setups, and Custom: a box changed by hand.
+enum class Preset : u8 {
+    Recommended = 0, ///< start-recommended.bat: all on, Reactive Flushing off
+    Reactive = 1,    ///< start-reactive-experimental.bat: all on, Reactive Flushing on, RX_RT_FIT=3
+    Safe = 2,        ///< start-safe.bat: all off, the per-draw shortcuts too (closest to 2.0.0)
+    Custom = 3,      ///< the boxes as set, nothing else
+};
 
 struct Switches {
     bool split_gpu_thread = true;  ///< EDEN_NX2_BACK_STAGES=1 + EDEN_NX2_BACK_CUTS=a
@@ -32,6 +41,7 @@ struct Switches {
     bool osd = true;               ///< EDEN_NX2_OSD=1
     bool dk_dyn = true;            ///< EDEN_NX2_DK_DYN=1, Bananza only
     bool dk_pacing = true;         ///< PRESENT_INTERVAL_WORD + MODE_PACE + PACE_SPIN_US, Bananza only
+    Preset preset = Preset::Recommended;
 
     bool operator==(const Switches&) const = default;
 };
@@ -41,12 +51,12 @@ constexpr Switches Recommended() {
     return Switches{};
 }
 
-/// Like 2.0.0 (start-safe.bat): none of the switches.
+/// Like 2.0.0 (start-safe.bat): none of the switches, and the per-draw shortcuts off.
 constexpr Switches AllOff() {
-    return Switches{false, false, false, false, false, false, false, false};
+    return Switches{false, false, false, false, false, false, false, false, Preset::Safe};
 }
 
-/// The keys of the [NX2Perf] group, one per setting.
+/// The keys of the [Anka] group, one per setting (the preset has its own, "preset").
 struct Key {
     std::string_view name;
     bool Switches::*field;
@@ -62,22 +72,82 @@ inline constexpr std::array<Key, 8> Keys{{
     {"bananza_frame_pacing", &Switches::dk_pacing},
 }};
 
-/// Reads every setting through `read(key, default)`; a missing key gives its default (on).
-template <typename Read>
-Switches Load(Read&& read) {
-    Switches switches{};
+/// The boxes of a preset (Custom: `current` as it is), with the preset set.
+constexpr Switches FromPreset(Preset preset, const Switches& current) {
+    Switches switches = preset == Preset::Safe ? AllOff() : Recommended();
+    if (preset == Preset::Custom) {
+        switches = current;
+    }
+    switches.preset = preset;
+    return switches;
+}
+
+/// Whether the boxes are the preset's (Custom always is).
+constexpr bool MatchesPreset(const Switches& switches) {
+    const Switches preset = FromPreset(switches.preset, switches);
     for (const Key& key : Keys) {
-        switches.*key.field = read(key.name, Recommended().*key.field);
+        if (switches.*key.field != preset.*key.field) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// After a box was changed by hand: Custom, unless the boxes are still the preset's.
+constexpr Switches AfterBoxChange(Switches switches) {
+    if (!MatchesPreset(switches)) {
+        switches.preset = Preset::Custom;
     }
     return switches;
 }
 
-/// Writes every setting through `write(key, value, default)`.
-template <typename Write>
-void Save(const Switches& switches, Write&& write) {
+/// The barrier feedback loops setting (Graphics > Advanced) a preset asks for: on for Reactive,
+/// which needs it (start-reactive-experimental.bat sets both); none for the others.
+constexpr std::optional<bool> BarrierFeedbackLoops(Preset preset) {
+    if (preset == Preset::Reactive) {
+        return true;
+    }
+    return std::nullopt;
+}
+
+/// The Reactive Flushing setting (Graphics > Advanced) a preset asks for; none for Safe and Custom
+/// (the launchers' safe one leaves the .ini as it is).
+constexpr std::optional<bool> ReactiveFlushing(Preset preset) {
+    switch (preset) {
+    case Preset::Recommended:
+        return false;
+    case Preset::Reactive:
+        return true;
+    default:
+        return std::nullopt;
+    }
+}
+
+/// Reads every setting through `read(key, default)` and the preset through
+/// `read_preset(key, default)`; missing keys give the first start's (Recommended). Boxes that are
+/// not their preset's (the file edited by hand) make it Custom.
+template <typename Read, typename ReadPreset>
+Switches Load(Read&& read, ReadPreset&& read_preset) {
+    Switches switches{};
+    for (const Key& key : Keys) {
+        switches.*key.field = read(key.name, Recommended().*key.field);
+    }
+    const int preset = read_preset("preset", static_cast<int>(Preset::Recommended));
+    switches.preset = preset >= 0 && preset <= static_cast<int>(Preset::Custom)
+                          ? static_cast<Preset>(preset)
+                          : Preset::Custom;
+    return AfterBoxChange(switches);
+}
+
+/// Writes every setting through `write(key, value, default)` and the preset through
+/// `write_preset(key, value, default)`.
+template <typename Write, typename WritePreset>
+void Save(const Switches& switches, Write&& write, WritePreset&& write_preset) {
     for (const Key& key : Keys) {
         write(key.name, switches.*key.field, Recommended().*key.field);
     }
+    write_preset("preset", static_cast<int>(switches.preset),
+                 static_cast<int>(Preset::Recommended));
 }
 
 /// The settings for Donkey Kong Bananza only take its title: the program id EDEN_NX2_DK_DYN's
@@ -93,18 +163,55 @@ struct Var {
     bool operator==(const Var&) const = default;
 };
 
-/// Every variable a setting can set, in the order they are set.
-inline constexpr std::array<std::string_view, 11> Names{
+/// The per-draw shortcuts this fork keeps on by default; the Safe preset turns them off (=0), as
+/// start-safe.bat does.
+inline constexpr std::array<std::string_view, 61> SafeOff{
+    "EDEN_NX2_LIGHT_DRAW",       "EDEN_NX2_LIGHT_UNIFORM",     "EDEN_NX2_LIGHT_UNIFORM_VALUES",
+    "EDEN_NX2_LIGHT_STORAGE",    "EDEN_NX2_UNIFORM_SYNC_SKIP", "EDEN_NX2_STORAGE_KEEP",
+    "EDEN_NX2_UBO_REUSE",        "EDEN_NX2_UBO_DIRECT",        "EDEN_NX2_UBO_STAGE",
+    "EDEN_NX2_UBO_BIND_SKIP",    "EDEN_NX2_SSBO_FAST",         "EDEN_NX2_SSBO_MEMO",
+    "EDEN_NX2_SYNC_SETS",        "EDEN_NX2_SYNC_SKIP",         "EDEN_NX2_SYNC_EXACT",
+    "EDEN_NX2_SYNC_MEMO",        "EDEN_NX2_VERTEX_SKIP",       "EDEN_NX2_VERTEX_FAST",
+    "EDEN_NX2_VERTEX_CLEAN",     "EDEN_NX2_LIGHT_SYNC_SKIP",   "EDEN_NX2_INDEX_SKIP",
+    "EDEN_NX2_INLINE_FIX",       "EDEN_NX2_TOUCH_SKIP",        "EDEN_NX2_TEX_TOUCH_SKIP",
+    "EDEN_NX2_ALIAS_LAZY",       "EDEN_NX2_USAGE_SKIP",        "EDEN_NX2_USAGE_RESET_SKIP",
+    "EDEN_NX2_GPU_WRITTEN_FILTER", "EDEN_NX2_MARK_WORDS",      "EDEN_NX2_INVAL_HULL",
+    "EDEN_NX2_INVAL_SKIP",       "EDEN_NX2_SMALL_WRITE",       "EDEN_NX2_RANGE_SKIP",
+    "EDEN_NX2_SLOT_SKIP",        "EDEN_NX2_QUERY_BOUNDS",      "EDEN_NX2_SHADER_BOUNDS",
+    "EDEN_NX2_DESC_REUSE",       "EDEN_NX2_DESC_HULL",         "EDEN_NX2_DESC_SECONDARY",
+    "EDEN_NX2_DESC_XLAT",        "EDEN_NX2_KEY_CMP",           "EDEN_NX2_NOTIFY_LAZY",
+    "EDEN_NX2_RESET_BATCH",      "EDEN_NX2_RESET_LAST",        "EDEN_NX2_RESET_RUNS",
+    "EDEN_NX2_RESET_SORT",       "EDEN_NX2_WRITE_BATCH",       "EDEN_NX2_BATCH_DIRECT",
+    "EDEN_NX2_CB_RUNS",          "EDEN_NX2_TICK_SKIP",         "EDEN_NX2_HLE_INDIRECT",
+    "EDEN_NX2_INDIRECT_BATCH",   "EDEN_NX2_LAYOUT_MEMO",       "EDEN_NX2_SAME_SKIP",
+    "EDEN_NX2_HSETP2_REG",       "EDEN_NX2_DIRTY_THUNK_SKIP",  "EDEN_NX2_FAST_PRIORITY_SCAN",
+    "EDEN_NX2_PBFLUSH_WINDOW_KIB", "EDEN_NX2_UPSCALE_SCAN",    "EDEN_NX2_UPSCALE_LEARN",
+    "EDEN_NX2_UPSCALE_HEADER",
+};
+
+/// The variables a setting or preset can set, besides SafeOff, in the order they are set.
+inline constexpr std::array<std::string_view, 12> Names{
     "EDEN_NX2_BACK_STAGES",   "EDEN_NX2_BACK_CUTS",
     "EDEN_NX2_ACQUIRE_PEEK",  "EDEN_NX2_JIT_SAME",
     "EDEN_NX2_FRONT_MACRO_LEAN", "EDEN_NX2_FG_TIMED",
     "EDEN_NX2_OSD",           "EDEN_NX2_DK_DYN",
     "EDEN_NX2_PRESENT_INTERVAL_WORD", "EDEN_NX2_MODE_PACE",
-    "EDEN_NX2_PACE_SPIN_US",
+    "EDEN_NX2_PACE_SPIN_US",  "EDEN_NX2_RX_RT_FIT",
 };
 
+/// Calls `f(name)` for every variable the settings can set (Names, then SafeOff).
+template <typename F>
+void ForEachName(F&& f) {
+    for (const std::string_view name : Names) {
+        f(name);
+    }
+    for (const std::string_view name : SafeOff) {
+        f(name);
+    }
+}
+
 /// The variables the settings ask for when the game is (or is not) Bananza, the same values as
-/// start-recommended.bat. The Bananza ones never for another game.
+/// the launcher of the preset. The Bananza ones never for another game.
 inline std::vector<Var> Wanted(const Switches& switches, bool bananza) {
     std::vector<Var> vars;
     if (switches.split_gpu_thread) {
@@ -134,6 +241,14 @@ inline std::vector<Var> Wanted(const Switches& switches, bool bananza) {
         vars.push_back({"EDEN_NX2_MODE_PACE", "2"});
         vars.push_back({"EDEN_NX2_PACE_SPIN_US", "1500"});
     }
+    if (switches.preset == Preset::Reactive) {
+        vars.push_back({"EDEN_NX2_RX_RT_FIT", "3"});
+    }
+    if (switches.preset == Preset::Safe) {
+        for (const std::string_view name : SafeOff) {
+            vars.push_back({name, "0"});
+        }
+    }
     return vars;
 }
 
@@ -149,6 +264,14 @@ std::vector<Var> Plan(const Switches& switches, bool bananza, SetOutside&& set_o
         }
     }
     return plan;
+}
+
+/// Whether settings just saved need a restart: only when this process already set its variables
+/// for a game (`applied`, the plan it set) and a game of the same kind would now get others.
+/// Before the first game nothing was set: the settings simply apply to it.
+inline bool NeedsRestart(const std::optional<std::vector<Var>>& applied,
+                         const std::vector<Var>& plan_now) {
+    return applied.has_value() && *applied != plan_now;
 }
 
 } // namespace Core::Nx2PerfSettings

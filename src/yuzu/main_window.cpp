@@ -1823,7 +1823,7 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
             tr("You are using the deconstructed ROM directory format for this game, which is an "
                "outdated format that has been superseded by others such as NCA, NAX, XCI, or "
                "NSP. Deconstructed ROM directories lack icons, metadata, and update "
-               "support.<br>For an explanation of the various Switch formats Eglantine supports, "
+               "support.<br>For an explanation of the various Switch formats Anka supports, "
                "out our user handbook. This message will not be shown again."));
     }
 
@@ -1890,7 +1890,7 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
-    LOG_INFO(Frontend, "Eglantine starting...");
+    LOG_INFO(Frontend, "Anka starting...");
 
     if (params.program_id == 0 ||
         params.program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
@@ -3578,6 +3578,14 @@ void MainWindow::OnConfigure() {
     UpdateStatusButtons();
     controller_dialog->refreshConfiguration();
     QtCommon::system->ApplySettings();
+
+    // Anka's settings this session already set for a game take effect after a restart.
+    if (Nx2PerfSession::OfferRestart(this, emulation_running ? current_game_path : QString{},
+                                     ui->action_Fullscreen->isChecked())) {
+        if (!close()) {
+            Nx2PerfSession::CancelRestart();
+        }
+    }
 }
 
 void MainWindow::OnConfigureTas() {
@@ -4155,7 +4163,7 @@ void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
     static const std::string yuzu_title =
-        "NX2Perf by EddizEge | Eglantine - PokeDinner fork by Franseven";
+        "Anka by EddizEge";
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);
@@ -4469,7 +4477,7 @@ void MainWindow::OnCheckGraphicsBackend() {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
         QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Eglantine to apply the X11 backend."));
+                                 tr("Restart Anka to apply the X11 backend."));
     }
 }
 #endif
@@ -4588,8 +4596,8 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Eglantine?");
-    return question(this, tr("Eglantine"), text);
+    const auto text = tr("Are you sure you want to close Anka?");
+    return question(this, tr("Anka"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -4677,7 +4685,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Eglantine"),
+        this, tr("Anka"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -4686,10 +4694,10 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Eglantine to not exit.\n\n"
+    const auto text = tr("The currently running application has requested Anka to not exit.\n\n"
                          "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Eglantine"), text);
+    return question(this, tr("Anka"), text);
 }
 
 void MainWindow::RequestGameExit() {

@@ -81,7 +81,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(input_tab.get(), tr("Controls"));
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
     ui->tabWidget->addTab(network_tab.get(), tr("Network"));
-    ui->tabWidget->addTab(nx2perf_tab.get(), tr("NX2Perf"));
+    ui->tabWidget->addTab(nx2perf_tab.get(), tr("Anka"));
     ui->tabWidget->addTab(system_tab.get(), tr("System"));
     ui->tabWidget->addTab(ui_tab.get(), tr("Game List"));
     ui->tabWidget->addTab(web_tab.get(), tr("Web"));
@@ -104,9 +104,11 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     connect(ui_tab.get(), &ConfigureUi::LanguageChanged, this, &ConfigureDialog::OnLanguageChanged);
     connect(general_tab.get(), &ConfigureGeneral::ExternalContentDirsChanged, this,
             &ConfigureDialog::ExternalContentDirsChanged);
-    // NX2Perf's "Recommended": the measured setup has Reactive Flushing off.
-    nx2perf_tab->SetReactiveFlushingOff(
-        [this] { return graphics_advanced_tab->SetReactiveFlushing(false); });
+    // Anka's presets: Recommended turns Reactive Flushing off, Recommended + Reactive Flushing on
+    // (with barrier feedback loops).
+    nx2perf_tab->SetReactiveFlushing([this](bool on, bool barrier_on) {
+        return graphics_advanced_tab->SetReactiveFlushing(on, barrier_on);
+    });
     connect(ui->selectorList, &QListWidget::itemSelectionChanged, this,
             &ConfigureDialog::UpdateVisibleTabs);
 
@@ -189,7 +191,7 @@ void ConfigureDialog::PopulateSelectionList() {
           {graphics_tab.get(), graphics_advanced_tab.get(), graphics_extensions_tab.get()}},
          {tr("Audio"), {audio_tab.get()}},
          {tr("Controls"), input_tab->GetSubTabs()},
-         {tr("NX2Perf"), {nx2perf_tab.get()}}},
+         {tr("Anka"), {nx2perf_tab.get()}}},
     };
 
     [[maybe_unused]] const QSignalBlocker blocker(ui->selectorList);

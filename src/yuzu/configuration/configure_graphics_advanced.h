@@ -35,9 +35,9 @@ public:
 
     void ExposeComputeOption();
 
-    /// NX2Perf's "Recommended" (configure_nx2perf.h): the Reactive Flushing box, as if clicked.
+    /// Anka's presets (configure_nx2perf.h): the Reactive Flushing box, as if clicked.
     /// False when the box can't change (a game is running).
-    bool SetReactiveFlushing(bool on);
+    bool SetReactiveFlushing(bool on, bool barrier_on);
 
 private:
     void Setup(const ConfigurationShared::Builder& builder);
@@ -52,4 +52,5 @@ private:
 
     QWidget* checkbox_enable_compute_pipelines{};
     ConfigurationShared::Widget* reactive_flushing{};
+    ConfigurationShared::Widget* barrier_feedback_loops{};
 };

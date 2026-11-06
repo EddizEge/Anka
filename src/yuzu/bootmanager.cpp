@@ -118,9 +118,8 @@ struct NullRenderWidget : public RenderWidget {
 GRenderWindow::GRenderWindow(MainWindow* parent,
                              std::shared_ptr<InputCommon::InputSubsystem> input_subsystem_)
     : QWidget(parent), input_subsystem{std::move(input_subsystem_)} {
-    setWindowTitle(QStringLiteral("NX2Perf by EddizEge | Eglantine %1 | %2-%3")
-                       .arg(QString::fromUtf8(Common::g_build_name),
-                            QString::fromUtf8(Common::g_scm_branch),
+    setWindowTitle(QStringLiteral("Anka by EddizEge | %1-%2")
+                       .arg(QString::fromUtf8(Common::g_scm_branch),
                             QString::fromUtf8(Common::g_scm_desc)));
     setAttribute(Qt::WA_AcceptTouchEvents);
     auto* layout = new QHBoxLayout(this);
@@ -863,7 +862,7 @@ bool GRenderWindow::InitializeOpenGL() {
     return true;
 #else
     QMessageBox::warning(this, tr("OpenGL not available!"),
-                         tr("Eglantine has not been compiled with OpenGL support."));
+                         tr("Anka has not been compiled with OpenGL support."));
     return false;
 #endif
 }

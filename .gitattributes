@@ -6,7 +6,7 @@ dist/qt_themes/* linguist-vendored
 externals/* linguist-vendored
 *.h linguist-language=cpp
 
-# NX2Perf launchers: Windows line endings in the repository too (cmd needs CRLF)
-dist/nx2perf/*.bat -text
-# NX2Perf build scripts: Unix line endings in every checkout (bash)
-dist/nx2perf/build/*.sh text eol=lf
+# Anka launchers: Windows line endings in the repository too (cmd needs CRLF)
+dist/anka/*.bat -text
+# Anka build scripts: Unix line endings in every checkout (bash)
+dist/anka/build/*.sh text eol=lf

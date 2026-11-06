@@ -1,36 +1,87 @@
-# NX2Perf changelog
+# Anka changelog
 
 Changes since **PokeDinner-Eglantine 2.0.0** (commit `70ecb39ef0`). The full history is in git
 (`git log 70ecb39ef0..`); this file groups it by topic. Most changes are behind `EDEN_NX2_*`
-switches (`nx2_switches_NX2PERF.txt`; in the source `dist/nx2_switches.txt`): the opt-in ones are off unless a launcher sets them, the
-per-draw shortcuts are on and `=0` brings back the 2.0.0 code path.
+switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the opt-in ones are
+off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
+and `=0` brings back the 2.0.0 code path.
 
-## NX2Perf 1 (`2.0.0-nx2perf1`)
+## Anka 1.0.0 (`anka-v1.0.0`)
 
-Base: PokeDinner-Eglantine 2.0.0. Programs: `eglantine-nx2perf.exe` (the Qt menu program) and
-`eden-cli-nx2perf.exe` (SDL front end), both built with LTO and profile-guided optimization. About 390 commits, made between 31 October and 5 November 2026
-(modified by the NX2Perf maintainer; see `NOTICE_NX2PERF.txt` in the release zips).
+Base: PokeDinner-Eglantine 2.0.0. Programs: `anka.exe` (the Qt menu program) and `anka-cli.exe`
+(the SDL program without menus), both built with LTO and profile-guided optimization. Measured
+in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
+6 November 2026 (modified by the Anka maintainer; see `NOTICE_ANKA.txt` in the release zips).
+
+### The name
+
+- The emulator is now called **Anka** ("Anka by EddizEge"): a Nintendo Switch 2 emulator for
+  Windows, focused on performance. Anka is the Zümrüdüanka of Turkish myth, the phoenix that rises
+  from its ashes: an emulator born from the ashes of yuzu.
+- Built on Eden, Eglantine (the PokeDinner fork by Franseven), yuzu and Sudachi; their copyrights
+  and credits are kept. It is not an official release of those projects and is not affiliated
+  with Nintendo. Upstream names, copyrights and licenses are unchanged.
+- Repository: https://github.com/EddizEge/Anka (branch `anka`, tag `anka-v1.0.0`).
+- A logo of its own: a phoenix rising, with flame wings and a flame crest, gold, orange and red
+  on a dark warm tile. `dist/anka.ico` is the program icon (16-256 px) and
+  `dist/qt_themes/default/icons/256x256/anka.png` the window and About image; both are made by
+  `dist/anka/anka_logo.py`.
+- Window titles: "Anka by EddizEge" (in a game: "Anka by EddizEge | <game> | <version> |
+  <GPU>"; anka-cli: "Anka by EddizEge | <branch>-<desc>"). The About dialog says "Anka is an
+  open-source Nintendo Switch 2 emulator for Windows, focused on performance.", links Source
+  Code, Report a problem and License to github.com/EddizEge/Anka, has a copyright, no-warranty
+  and GPLv3 line and the trademark line, and at the bottom "Built on Eden and Eglantine
+  (Franseven). Not an official release of those projects; please report Anka problems on its
+  GitHub page, not to them." The log line is "Anka settings for <title id> ...".
 
 ### The menu program
 
-- `eglantine-nx2perf.exe`: 2.0.0's Qt front end built from this tree against Qt 6.8.3 (the
-  version 2.0.0 ships), so it runs with the Qt DLLs of a 2.0.0 folder; it shares 2.0.0's user
-  folder and `qt-config.ini`.
-- An **NX2Perf** tab in Configure: the switches of `start-recommended.bat` as eight settings
-  (split GPU thread, acquire peek, the macro JIT filter, the lean front macro path, timed frame
-  generation, the RTSS overlay, and for Donkey Kong Bananza only the dynamic frame rate and the
-  frame pacing), kept in a new `[NX2Perf]` group of `qt-config.ini`, all on at the first start.
-  "Recommended" also turns reactive flushing off (the measured setup); "All Off" turns the eight
-  off.
-- The program sets the switches in its environment before the first game of a session starts.
-  The Bananza ones only for Bananza (the title the dynamic frame rate patch checks). A switch set
-  outside the program (environment, launcher, `nx2_switches.txt`) wins and is left alone. The
-  switches are read once per session: a game that needs others restarts the program for it
-  (asked first).
-- The RTSS on-screen display (`OSD`) works in the menu program too (the writer moved from
-  eden-cli to `frontend_common`).
-- "NX2Perf by EddizEge" in the window title and the About dialog, with the project's address.
-  Upstream names and copyrights are unchanged.
+- `anka.exe`: 2.0.0's Qt front end built from this tree against Qt 6.8.3 (the version 2.0.0
+  ships), so it runs with the Qt DLLs of a 2.0.0 folder (unzip it next to `eglantine.exe`;
+  nothing is overwritten). It shares 2.0.0's user folder, game list and `qt-config.ini`: a
+  setting changed in one menu program (Reactive Flushing too) is used by the other.
+- An **Anka** tab in Emulation > Configure...: the switches of `start-recommended.bat` as eight
+  settings in two groups. All games: split GPU thread, acquire peek, the same-value filter in
+  the macro JIT, the lean front macro path, timed frame generation, the FPS overlay in
+  RivaTuner. Donkey Kong Bananza only (off in other games): the dynamic frame rate and the
+  frame pacing. They are kept in a new `[Anka]` group of `qt-config.ini`, which 2.0.0's
+  `eglantine.exe` leaves alone.
+- A **Preset** box at the top of the tab, with a line under it about the choice:
+  - Recommended: all eight on, Reactive Flushing (Graphics > Advanced) off: the measured setup,
+    the same as `start-recommended.bat`. On Anka's first start (no `[Anka]` group yet) it is
+    chosen and Reactive Flushing is turned off in `qt-config.ini` (shared with 2.0.0's
+    `eglantine.exe`, which then also sees it off). Choosing it later turns Reactive Flushing off
+    too, while no game is running (otherwise the tab says to set it in Graphics > Advanced).
+  - Recommended + Reactive Flushing: all eight on, Reactive Flushing and barrier feedback loops
+    on (Graphics > Advanced; Reactive Flushing needs it) and `EDEN_NX2_RX_RT_FIT=3`.
+    Experimental: on our PC about 7% slower at the game's opening and about 15% faster in open
+    areas. The same as `start-reactive-experimental.bat`.
+  - Safe: all eight off, and the GPU shortcuts Anka keeps on by default off too
+    (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list of 61), in every game.
+    Graphics settings such as Reactive Flushing stay as they are; Anka's fixes and its changes
+    without a switch stay in.
+  - Custom: chosen by itself when a box is changed by hand.
+
+  Recommended was measured in Donkey Kong Bananza only. If another game shows image or speed
+  problems, try Safe first and report it with the game's name.
+- The program sets the switches in its environment before the first game of a session starts;
+  the Bananza ones only for Bananza (title id `040074A01BF12000`, the one the dynamic frame rate
+  patch checks). A switch set outside the program (the environment, a `.bat` of your own that
+  starts `anka.exe`, or `nx2_switches.txt` next to the program or in `%APPDATA%\eden`) wins and
+  is never changed. A box whose switches are all set outside is greyed out; one with some of
+  them set outside sets the rest; the tooltip names them with their values.
+- Automatic restart: the switches are read once per session, and settings take effect at the
+  first game started. Changing them with OK or Apply after a game was started asks "Restart
+  Anka now to apply?" (Restart Now / Later). Restart Now closes Anka and opens it again with
+  the running game (unsaved game progress is lost), or with the same command line when no game
+  is running. Before the first game nothing is asked. Starting a game that needs other
+  switches than the session's first game (Bananza after another game, or the other way round)
+  asks Restart (opens again with that game) / Start Anyway / Cancel.
+- Known limits: a game started from the Home Menu applet runs with the session's settings (no
+  question); Restart starts the game normally (its per-game settings, its first program). The
+  menu program was not measured: every number is from the program without menus.
+- The RTSS on-screen display (`OSD`) works in the menu program too (the writer moved from the
+  SDL program to `frontend_common`).
 
 ### Donkey Kong Bananza terrain and the GPU command stream
 
@@ -140,7 +191,7 @@ For `use_reactive_flushing=true`; none of these was measured with frame generati
 
 ### On-screen display
 
-- `OSD=1` (eden-cli on Windows): game FPS, display FPS with frame generation's multiplier, and
+- `OSD=1` (anka-cli and the menu program, on Windows): game FPS, display FPS with frame generation's multiplier, and
   the game's speed in RivaTuner Statistics Server's on-screen display every 0.5 s; the slot is
   emptied on every exit.
 
@@ -189,32 +240,36 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 - `EDEN_NX2_GPU_PROFILE` zones and counters for the split thread, its front and the back
   stages; `MODE_DIAG`, `PRESENT_DIAG`, `VI2_DIAG`, `HID_DIAG`, `INDIRECT_DIAG`, `FG_DIAG`,
   `VDEC_TRACE`, `EDEN_NX2_IPC_TRACE` (service request backtraces), root table diagnostics.
-- eden-cli: a timed key script on a virtual gamepad and an automatic exit for unattended
+- anka-cli: a timed key script on a virtual gamepad and an automatic exit for unattended
   measuring (`AUTO_INPUT_FILE`, `AUTO_EXIT`).
-- Unit tests for the new logic (`src/tests/`).
+- Unit tests for the new logic, the settings tab's presets included (`src/tests/`).
 
 ### Build
 
 - `/QIntel-jcc-erratum` is a build option (`YUZU_MSVC_JCC_ERRATUM`).
 - Release programs built with link-time code generation and profile-guided optimization, the
-  menu program with eden-cli's profile (`BUILDING_NX2PERF.md`); the menu program against Qt 6.8.3.
+  menu program with anka-cli's profile (`BUILDING_ANKA.md`); the menu program against Qt 6.8.3.
 
 ### Not in this release
 
-- Measurements of the menu program (`eglantine-nx2perf.exe`): every number is from eden-cli.
+- Measurements of the menu program (`anka.exe`): every number is from the program without
+  menus (then called eden-cli, now `anka-cli.exe`).
 - A reactive flushing launcher that is checked: `start-reactive-experimental.bat`
   (`RX_RT_FIT=3`) is the second choice next to the recommended one, experimental until it is
   measured with frame generation and its image is checked.
 - The "M" stage of the split GPU thread work.
+- Zelda support and per-game presets: planned for the next release (no date). From now on every
+  update goes into one emulator, Anka.
 
 ### Documentation
 
 - `NX2_NOTES.md` and `NX2_GPU_THREAD_SPLIT.md`: what was tried, measured and why.
-- `nx2_switches_NX2PERF.txt` (in the source `dist/nx2_switches.txt`): every switch with its default.
-- `README_NX2PERF.md` / `BENIOKU_NX2PERF.md`, this file, `BUILDING_NX2PERF.md`, the launchers in
-  `dist/nx2perf/`.
-- Launchers: they find the game in the `Games` folder next to them (asking which one when there
+- `nx2_switches_ANKA.txt` (in the source `dist/nx2_switches.txt`): every switch with its default.
+- `README_ANKA.md` / `BENIOKU_ANKA.md`, this file, `BUILDING_ANKA.md`, the launchers in
+  `dist/anka/`.
+- Launchers (`start-recommended.bat`, `start-reactive-experimental.bat`, `start-safe.bat`;
+  their messages start with `[Anka]`): they find the game in the `Games` folder next to them (asking which one when there
   are several), and on the first start make `config\sdl2-config.ini` as a copy of
   `qt-config.ini` (the recommended one turns reactive flushing off in that copy; the reactive one
   makes its own `sdl2-config-reactive.ini`). An existing `sdl2-config.ini` is never changed. The
-  edits are made by `nx2perf-config.ps1`, a small, readable PowerShell script next to them.
+  edits are made by `anka-config.ps1`, a small, readable PowerShell script next to them.

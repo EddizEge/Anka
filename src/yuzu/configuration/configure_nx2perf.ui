@@ -14,13 +14,74 @@
    <string>Form</string>
   </property>
   <property name="accessibleName">
-   <string>NX2Perf</string>
+   <string>Anka</string>
   </property>
   <layout class="QVBoxLayout" name="layout">
    <item>
     <widget class="QLabel" name="intro">
      <property name="text">
-      <string>NX2Perf by EddizEge: speed settings made and measured for Donkey Kong Bananza. They apply when a game starts; a change after this session's first game restarts the program for the next one (it asks first).</string>
+      <string>Anka's speed settings. They apply when a game starts; once a game has run in this session, a change needs a restart (Anka asks).</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="preset_row">
+     <item>
+      <widget class="QLabel" name="preset_label">
+       <property name="text">
+        <string>Preset</string>
+       </property>
+       <property name="buddy">
+        <cstring>preset</cstring>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="preset">
+       <item>
+        <property name="text">
+         <string>Recommended</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Recommended + Reactive Flushing</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Safe</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Custom</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="preset_spacer">
+       <property name="orientation">
+        <enum>Qt::Orientation::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>0</width>
+         <height>0</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="preset_text">
+     <property name="text">
+      <string/>
      </property>
      <property name="wordWrap">
       <bool>true</bool>
@@ -228,43 +289,6 @@
       </item>
      </layout>
     </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout" name="buttons">
-     <item>
-      <widget class="QPushButton" name="recommended">
-       <property name="toolTip">
-        <string>All on, and Reactive Flushing (Graphics, Advanced) off: the setup NX2Perf was measured with.</string>
-       </property>
-       <property name="text">
-        <string>Recommended</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QPushButton" name="all_off">
-       <property name="toolTip">
-        <string>Every setting above off. The GPU shortcuts NX2Perf keeps on by default stay on; start-safe.bat with eden-cli turns those off too.</string>
-       </property>
-       <property name="text">
-        <string>All Off</string>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <spacer name="buttons_spacer">
-       <property name="orientation">
-        <enum>Qt::Orientation::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>0</width>
-         <height>0</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-    </layout>
    </item>
    <item>
     <widget class="QLabel" name="status">

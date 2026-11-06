@@ -18,9 +18,10 @@ namespace Ui {
 class ConfigureNx2Perf;
 }
 
-// The NX2Perf tab: NX2Perf's settings (core/nx2_perf_settings.h), one box each. A box whose
-// variables were all set outside the program (yuzu/nx2perf_session.h) is greyed out: theirs is
-// used.
+// The Anka tab: a preset (the launchers' three setups, or Custom) and Anka's settings
+// (core/nx2_perf_settings.h), one box each; a box changed by hand makes the preset Custom. A box
+// whose variables were all set outside the program (yuzu/nx2perf_session.h) is greyed out: theirs
+// is used.
 class ConfigureNx2Perf : public QWidget {
     Q_OBJECT
 
@@ -30,9 +31,9 @@ public:
 
     void ApplyConfiguration();
 
-    /// "Recommended" also turns Reactive Flushing off in Graphics, Advanced, through this (false:
-    /// it could not, a game is running).
-    void SetReactiveFlushingOff(std::function<bool()> func);
+    /// A preset also sets Reactive Flushing in Graphics, Advanced, through this (false: it could
+    /// not, a game is running).
+    void SetReactiveFlushing(std::function<bool(bool, bool)> func);
 
 private:
     struct Row {
@@ -44,10 +45,15 @@ private:
     void changeEvent(QEvent* event) override;
     void RetranslateUI();
     void SetConfiguration();
+    Core::Nx2PerfSettings::Switches Current() const;
     void Show(const Core::Nx2PerfSettings::Switches& switches);
+    void ShowPreset();
+    void ChoosePreset(Core::Nx2PerfSettings::Preset chosen);
+    void BoxChanged();
     void MarkSetOutside();
 
     std::unique_ptr<Ui::ConfigureNx2Perf> ui;
     std::vector<Row> rows;
-    std::function<bool()> reactive_flushing_off;
+    Core::Nx2PerfSettings::Preset preset = Core::Nx2PerfSettings::Preset::Recommended;
+    std::function<bool(bool, bool)> reactive_flushing;
 };

@@ -8,6 +8,8 @@
 #include <utility>
 
 #include <QCheckBox>
+#include <QComboBox>
+#include <QSignalBlocker>
 #include <QStringList>
 
 #include "qt_common/config/uisettings.h"
@@ -37,26 +39,18 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
     SetConfiguration();
     MarkSetOutside();
 
-    connect(ui->recommended, &QPushButton::clicked, this, [this] {
-        Show(Perf::Recommended());
-        if (reactive_flushing_off && reactive_flushing_off()) {
-            ui->status->setText(tr("All on, and Reactive Flushing off in Graphics, Advanced. "
-                                   "Press OK to keep it."));
-        } else {
-            ui->status->setText(tr("All on. Reactive Flushing (Graphics, Advanced) can only be "
-                                   "turned off with no game running. Press OK to keep it."));
-        }
-    });
-    connect(ui->all_off, &QPushButton::clicked, this, [this] {
-        Show(Perf::AllOff());
-        ui->status->setText(tr("All off. Press OK to keep it."));
-    });
+    // The preset's item order is Perf::Preset's (configure_nx2perf.ui).
+    connect(ui->preset, &QComboBox::activated, this,
+            [this](int index) { ChoosePreset(static_cast<Perf::Preset>(index)); });
+    for (const Row& row : rows) {
+        connect(row.box, &QCheckBox::toggled, this, [this] { BoxChanged(); });
+    }
 }
 
 ConfigureNx2Perf::~ConfigureNx2Perf() = default;
 
-void ConfigureNx2Perf::SetReactiveFlushingOff(std::function<bool()> func) {
-    reactive_flushing_off = std::move(func);
+void ConfigureNx2Perf::SetReactiveFlushing(std::function<bool(bool, bool)> func) {
+    reactive_flushing = std::move(func);
 }
 
 void ConfigureNx2Perf::changeEvent(QEvent* event) {
@@ -69,6 +63,7 @@ void ConfigureNx2Perf::changeEvent(QEvent* event) {
 
 void ConfigureNx2Perf::RetranslateUI() {
     ui->retranslateUi(this);
+    ShowPreset();
     MarkSetOutside();
 }
 
@@ -76,18 +71,75 @@ void ConfigureNx2Perf::SetConfiguration() {
     Show(UISettings::values.nx2perf);
 }
 
+Perf::Switches ConfigureNx2Perf::Current() const {
+    Perf::Switches switches{};
+    for (const Row& row : rows) {
+        switches.*row.field = row.box->isChecked();
+    }
+    switches.preset = preset;
+    return switches;
+}
+
 void ConfigureNx2Perf::Show(const Perf::Switches& switches) {
     for (const Row& row : rows) {
+        const QSignalBlocker blocker{row.box};
         row.box->setChecked(switches.*row.field);
+    }
+    preset = switches.preset;
+    ShowPreset();
+}
+
+void ConfigureNx2Perf::ShowPreset() {
+    {
+        const QSignalBlocker blocker{ui->preset};
+        ui->preset->setCurrentIndex(static_cast<int>(preset));
+    }
+    switch (preset) {
+    case Perf::Preset::Recommended:
+        ui->preset_text->setText(tr("All settings on, Reactive Flushing off (Graphics, Advanced): "
+                                    "the setup Anka was measured with. Like start-recommended.bat."));
+        break;
+    case Perf::Preset::Reactive:
+        ui->preset_text->setText(
+            tr("All settings on, Reactive Flushing and barrier feedback loops on, RX_RT_FIT=3. "
+               "Experimental: on our PC faster in open areas, slower at the opening. Like "
+               "start-reactive-experimental.bat."));
+        break;
+    case Perf::Preset::Safe:
+        ui->preset_text->setText(tr("All settings below off, and the GPU shortcuts Anka keeps on by "
+                                    "default off too (the variables start-safe.bat sets to 0). "
+                                    "Graphics settings stay as they are."));
+        break;
+    case Perf::Preset::Custom:
+        ui->preset_text->setText(tr("Your own choice of the settings below."));
+        break;
+    }
+}
+
+void ConfigureNx2Perf::ChoosePreset(Perf::Preset chosen) {
+    ui->status->clear();
+    Show(Perf::FromPreset(chosen, Current()));
+    const auto reactive = Perf::ReactiveFlushing(chosen);
+    if (!reactive) {
+        return;
+    }
+    const bool barrier_on = Perf::BarrierFeedbackLoops(chosen).value_or(false);
+    if (!reactive_flushing || !reactive_flushing(*reactive, barrier_on)) {
+        ui->status->setText(tr("Reactive Flushing (Graphics, Advanced) can only be changed with no "
+                               "game running; set it there afterwards."));
+    }
+}
+
+void ConfigureNx2Perf::BoxChanged() {
+    const Perf::Switches switches = Perf::AfterBoxChange(Current());
+    if (switches.preset != preset) {
+        preset = switches.preset;
+        ShowPreset();
     }
 }
 
 void ConfigureNx2Perf::ApplyConfiguration() {
-    Perf::Switches switches = UISettings::values.nx2perf;
-    for (const Row& row : rows) {
-        switches.*row.field = row.box->isChecked();
-    }
-    UISettings::values.nx2perf = switches;
+    UISettings::values.nx2perf = Current();
 }
 
 void ConfigureNx2Perf::MarkSetOutside() {

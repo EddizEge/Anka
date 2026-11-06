@@ -2,7 +2,7 @@ Put your game files (.nsp .xci .nsz .xcz) in this folder, then double-click star
 Subfolders are searched too; with more than one game the launcher asks which one to start.
 Oyun dosyalarinizi (.nsp .xci .nsz .xcz) bu klasore koyun, sonra start-recommended.bat'a cift tiklayin.
 Alt klasorlere de bakilir; birden cok oyun varsa baslatici hangisinin acilacagini sorar.
-This folder is for the launchers (eden-cli). The menu program eglantine-nx2perf.exe uses its own
+This folder is for the launchers (anka-cli.exe). The menu program anka.exe uses its own
 game list, the same as 2.0.0's eglantine.exe (Add New Game Directory there).
-Bu klasor baslaticilar (eden-cli) icindir. Menulu program eglantine-nx2perf.exe kendi oyun listesini
+Bu klasor baslaticilar (anka-cli.exe) icindir. Menulu program anka.exe kendi oyun listesini
 kullanir, 2.0.0'in eglantine.exe'siyle ayni (orada Add New Game Directory).

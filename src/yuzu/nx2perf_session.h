@@ -11,7 +11,7 @@
 
 class QWidget;
 
-// NX2Perf's settings (core/nx2_perf_settings.h, the NX2Perf tab) as EDEN_NX2_* variables in this
+// Anka's settings (core/nx2_perf_settings.h, the Anka tab) as EDEN_NX2_* variables in this
 // process's environment. The switches are read once per process, so the variables are set once,
 // before the first game boots; a later game that needs others (another title class for the
 // Bananza settings, or changed settings) is started in a new process, asked first.
@@ -40,7 +40,14 @@ enum class Boot {
 /// session has (a restart would boot it as an application).
 Boot Prepare(QWidget* parent, u64 program_id, const QString& game, bool fullscreen, bool applet);
 
-/// The window refused to close after Prepare asked for a restart: no restart at exit.
+/// After settings were saved (OK or Apply): when this process already set its variables for a
+/// game and they now differ, asks "Restart Anka now to apply?". True: the caller closes the
+/// window, main() starts the program again, with `running_game` if one runs, else with the same
+/// command line. Before the first game: false, no question (the settings apply to it).
+bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen);
+
+/// The window refused to close after Prepare / OfferRestart asked for a restart: no restart at
+/// exit.
 void CancelRestart();
 
 /// main(), after the event loop: starts the program again with the game, if Prepare asked.

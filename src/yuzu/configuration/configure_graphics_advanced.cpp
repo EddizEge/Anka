@@ -63,6 +63,9 @@ void ConfigureGraphicsAdvanced::Setup(const ConfigurationShared::Builder& builde
         if (setting->Id() == Settings::values.use_reactive_flushing.Id()) {
             reactive_flushing = widget;
         }
+        if (setting->Id() == Settings::values.barrier_feedback_loops.Id()) {
+            barrier_feedback_loops = widget;
+        }
     }
 
     for (const auto& [id, widget] : normal_hold) {
@@ -89,12 +92,16 @@ void ConfigureGraphicsAdvanced::RetranslateUI() {
     ui->retranslateUi(this);
 }
 
-bool ConfigureGraphicsAdvanced::SetReactiveFlushing(bool on) {
+bool ConfigureGraphicsAdvanced::SetReactiveFlushing(bool on, bool barrier_on) {
     if (reactive_flushing == nullptr || reactive_flushing->checkbox == nullptr ||
         !reactive_flushing->checkbox->isEnabled()) {
         return false;
     }
     reactive_flushing->checkbox->setChecked(on);
+    if (barrier_on && barrier_feedback_loops != nullptr &&
+        barrier_feedback_loops->checkbox != nullptr) {
+        barrier_feedback_loops->checkbox->setChecked(true);
+    }
     return true;
 }
 

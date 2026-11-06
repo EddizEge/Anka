@@ -29,7 +29,7 @@ const ConnectionError ErrorManager::UNABLE_TO_CONNECT(
 const ConnectionError ErrorManager::ROOM_IS_FULL(
     QT_TR_NOOP("Unable to connect to the room because it is already full."));
 const ConnectionError ErrorManager::COULD_NOT_CREATE_ROOM(
-    QT_TR_NOOP("Creating a room failed. Please retry. Restarting Eden might be necessary."));
+    QT_TR_NOOP("Creating a room failed. Please retry. Restarting Anka might be necessary."));
 const ConnectionError ErrorManager::HOST_BANNED(
     QT_TR_NOOP("The host of the room has banned you. Speak with the host to unban you "
                "or try a different room."));
