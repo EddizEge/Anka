@@ -1,6 +1,6 @@
 @echo off
 setlocal DisableDelayedExpansion
-rem Anka - SAFE: every switch this fork added turned off (as close to 2.0.0 as it gets).
+rem Anka - SAFE: the shortcuts Anka keeps on by default set to 0, its opt-in switches cleared.
 rem Anka launcher for anka-cli.exe (Anka's program without menus).
 rem Put this file next to anka-cli.exe, in your PokeDinner-Eglantine 2.0.0 folder.
 rem Start: put your game (.nsp .xci .nsz .xcz) in the Games folder next to this file and double-click
