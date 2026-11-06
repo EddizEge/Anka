@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include <optional>
 #include <string_view>
 
 #include <QString>
 
 #include "common/common_types.h"
+#include "core/nx2_perf_settings.h"
 
 class QWidget;
 
@@ -17,8 +19,9 @@ class QWidget;
 // Bananza settings, or changed settings) is started in a new process, asked first.
 namespace Nx2PerfSession {
 
-/// main(), first thing: the environment a restart gives the new process (before
-/// nx2_switches.txt is loaded: the new process loads it itself).
+/// main(), first thing: after a restart, waits until the old process has exited (it still
+/// holds the log file and saves the settings on its way out); then the environment a restart
+/// gives the new process (before nx2_switches.txt is loaded: the new process loads it itself).
 void CaptureStartEnvironment();
 
 /// main(), after nx2_switches.txt is loaded: the variables set outside the program (a launcher,
@@ -45,6 +48,31 @@ Boot Prepare(QWidget* parent, u64 program_id, const QString& game, bool fullscre
 /// window, main() starts the program again, with `running_game` if one runs, else with the same
 /// command line. Before the first game: false, no question (the settings apply to it).
 bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen);
+
+/// Graphics settings the Anka tab chose while a game ran. They cannot change in a running game
+/// (the game keeps the ones it started with), so they wait: until "Restart Now" or, after
+/// "Later", until the game stops.
+struct PendingGraphics {
+    std::optional<bool> reactive_flushing;
+    std::optional<bool> barrier_feedback_loops;
+    std::optional<Core::Nx2PerfSettings::FrameGen> frame_gen;
+};
+
+/// Adds to the waiting graphics settings (a later choice replaces an earlier one).
+void AddPendingGraphics(const PendingGraphics& pending);
+
+/// Whether graphics settings are waiting for the game to stop.
+bool HasPendingGraphics();
+
+/// After the game stopped (MainWindow::OnEmulationStopped): writes the waiting graphics settings
+/// to the global settings. True when it wrote something: the caller saves the config.
+bool ApplyPendingGraphics();
+
+/// The frame generation choice the global Graphics settings amount to.
+Core::Nx2PerfSettings::FrameGen CurrentFrameGen();
+
+/// Writes a frame generation choice to the global Graphics settings (no game running).
+void ApplyFrameGen(Core::Nx2PerfSettings::FrameGen choice);
 
 /// The window refused to close after Prepare / OfferRestart asked for a restart: no restart at
 /// exit.

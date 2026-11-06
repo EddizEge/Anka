@@ -2237,6 +2237,10 @@ void MainWindow::OnEmulationStopped() {
     game_list->setEnabled(true);
 
     Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
+    // Anka's graphics settings chosen while the game ran (a running game keeps its own).
+    if (Nx2PerfSession::ApplyPendingGraphics()) {
+        config->SaveAllValues();
+    }
     QtCommon::system->HIDCore().ReloadInputDevices();
     UpdateStatusButtons();
 }

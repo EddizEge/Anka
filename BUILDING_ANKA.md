@@ -3,8 +3,8 @@
 Anka 1.0.0 has two programs, built on Windows with Visual Studio 2022 Build Tools (MSVC
 14.44.35207, its CMake and Ninja) from the same build folder: the program without menus (target
 `yuzu-cmd`, SDL; the build names it `eden-cli.exe`) and the menu program (target `yuzu`, Qt; the
-build names it `eglantine.exe`). The release package names them `anka-cli.exe` and `anka.exe`,
-so they never replace 2.0.0's own `eden-cli.exe` and `eglantine.exe`. The general build
+build names it `eglantine.exe`). The release package names them `anka-cli.exe` and `anka.exe`.
+The general build
 documentation of Eden is in `docs/`; this file lists what the Anka release used.
 
 ## Third-party libraries
@@ -32,11 +32,11 @@ static linking exception).
 The menu program is built against **Qt 6.8.3 for MSVC 2022 x64, shared** (the official Qt
 binaries: `qtbase`, `qtcharts` and `qtsvg` 6.8.3 for `win64_msvc2022_64`, from the Qt online
 installer or its repository), the same Qt version PokeDinner-Eglantine 2.0.0 ships its DLLs of.
-The release `anka.exe` uses those DLLs from the 2.0.0 folder; the release zips carry no Qt. Point
-CMake at it with `-DYUZU_USE_BUNDLED_QT=OFF -DQt6_DIR=<Qt>/lib/cmake/Qt6 -DCMAKE_PREFIX_PATH=<Qt>`.
-Not the Qt CPM would fetch (`qt6` in `cpmfile.json`, Eden-CI's static Qt 6.11.1): it does not
-link with MSVC 14.44 (unresolved `__std_rotate` and similar STL symbols), and it would be Qt
-6.11 next to 2.0.0's 6.8.3 DLLs. Switching an existing build folder from one Qt to another:
+The program zip carries the Qt 6.8.3 DLLs and plugins `anka.exe` needs, so it runs on its own.
+Point CMake at it with
+`-DYUZU_USE_BUNDLED_QT=OFF -DQt6_DIR=<Qt>/lib/cmake/Qt6 -DCMAKE_PREFIX_PATH=<Qt>`. Not the Qt
+CPM would fetch (`qt6` in `cpmfile.json`, Eden-CI's static Qt 6.11.1): it does not link with
+MSVC 14.44 (unresolved `__std_rotate` and similar STL symbols). Switching an existing build folder from one Qt to another:
 configure with `-U 'Qt6*' -U 'QT_*'` and delete the `*_autogen` folders, so moc runs again.
 
 The prebuilt packages come from the CI repositories named in `cpmfile.json` (`crueter-ci/...`,
@@ -135,16 +135,18 @@ functionally the same either way.
 
 ## Release package
 
-The release zips were made by a packaging script outside this tree. `Anka-1.0.0-win64.zip` holds
-the two programs `anka.exe` and `anka-cli.exe` (no Qt DLLs: the menu program uses 2.0.0's), the
+The release zips were made by a packaging script outside this tree. `Anka-1.0.0-win64.zip` is a
+standalone install, unzipped into a new, empty folder. It holds the two programs `anka.exe` and
+`anka-cli.exe`, the Qt 6.8.3 DLLs and plugins `anka.exe` needs, the Visual C++ runtime DLLs, an
+empty `user/` folder (so the programs start in portable mode and keep everything in it), the
 launchers from `dist/anka/` (`start-recommended.bat`, `start-reactive-experimental.bat`,
 `start-safe.bat`) with `anka-config.ps1` (the small PowerShell script they call with `-File` to
 prepare the `.ini` files on the first start), an empty `Games` folder with its note
-(`dist/anka/Games/PUT-YOUR-GAMES-HERE.txt`), `README_ANKA.md`, `BENIOKU_ANKA.md`,
-`CHANGELOG_ANKA.md`, `BUILDING_ANKA.md`, `LICENSE.txt`, `LICENSES/`,
-`THIRD_PARTY_NOTICES_ANKA.txt` (the license texts and notices of the third-party components),
-`NOTICE_ANKA.txt`, `VERSION_ANKA.txt` and `dist/nx2_switches.txt` as `nx2_switches_ANKA.txt`
-(renamed so that it does not replace 2.0.0's own); no name in it is one of 2.0.0's files.
+(`dist/anka/Games/PUT-YOUR-GAMES-HERE.txt`), `README_ANKA.md`, `CHANGELOG_ANKA.md`,
+`BUILDING_ANKA.md`, `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_ANKA.txt` (the license
+texts and notices of the third-party components), `NOTICE_ANKA.txt`, `VERSION_ANKA.txt` and
+`dist/nx2_switches.txt` as `nx2_switches_ANKA.txt` (a reference copy that no program reads under
+that name).
 `Anka-1.0.0-pdb.zip` holds the two programs' debug symbols. `Anka-1.0.0-source.zip` is
 `git archive` of the same commit (tag `anka-v1.0.0` of https://github.com/EddizEge/Anka) plus
 `GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),

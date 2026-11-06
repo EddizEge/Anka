@@ -109,6 +109,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     nx2perf_tab->SetReactiveFlushing([this](bool on, bool barrier_on) {
         return graphics_advanced_tab->SetReactiveFlushing(on, barrier_on);
     });
+    nx2perf_tab->SetGameRunning(system.IsPoweredOn());
     connect(ui->selectorList, &QListWidget::itemSelectionChanged, this,
             &ConfigureDialog::UpdateVisibleTabs);
 

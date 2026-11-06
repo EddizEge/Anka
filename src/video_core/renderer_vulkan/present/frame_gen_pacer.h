@@ -17,7 +17,10 @@ struct FrameGenPlan {
 
 class FrameGenPacer {
 public:
-    [[nodiscard]] FrameGenPlan Plan(size_t capacity);
+    /// refresh_period: the display's refresh period in seconds (FrameGen::RefreshPeriod), 0 when
+    /// unknown; in target-rate mode it caps the target and the generation level
+    /// (frame_gen_pacer_rules.h).
+    [[nodiscard]] FrameGenPlan Plan(size_t capacity, f32 refresh_period);
 
     void Reset();
 
@@ -33,7 +36,8 @@ private:
 
     void Stabilize(Clock::time_point now);
     void DeferEvaluations(Clock::duration amount);
-    void UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate, size_t ceiling);
+    void UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate, f32 refresh_hz,
+                     size_t ceiling);
 
     std::optional<Clock::time_point> last_frame;
     std::optional<Clock::time_point> stable_until;
@@ -44,8 +48,6 @@ private:
     f32 last_interval{};
     f32 output_credit{};
     f32 probe_base_rate{};
-    f32 unloaded_base_rate{};
-    size_t issued_generations{};
     size_t probe_previous_limit{};
     size_t limit{};
     u32 probe_failures{};

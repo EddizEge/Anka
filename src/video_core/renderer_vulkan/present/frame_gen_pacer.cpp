@@ -3,10 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen_pacer.h"
+#include "video_core/renderer_vulkan/present/frame_gen_pacer_rules.h"
 
 namespace Vulkan {
 
@@ -22,7 +22,6 @@ constexpr f32 PROBE_THROUGHPUT_TOLERANCE = 0.95f;
 constexpr f32 PROBE_BASE_COLLAPSE_RATIO = 0.70f;
 constexpr f32 PROBE_MARGINAL_GAIN = 1.15f;
 constexpr f32 TARGET_SATISFIED_RATIO = 0.95f;
-constexpr f32 UNLOADED_BASE_RETENTION = 0.75f;
 constexpr f32 CREDIT_EPSILON = 1.0e-4f;
 constexpr u32 MAX_PROBE_FAILURES = 4;
 
@@ -46,7 +45,7 @@ constexpr auto PROBE_STEP_DELAY = std::chrono::milliseconds(250);
 
 } // Anonymous namespace
 
-FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
+FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 refresh_period) {
     const size_t ceiling = std::min(capacity, Settings::FrameGenMaxGenerations());
     if (ceiling == 0) {
         Reset();
@@ -54,7 +53,6 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
     }
 
     const Clock::time_point now = Clock::now();
-    const size_t previous_generations = std::exchange(issued_generations, 0);
     last_interval = 0.0f;
     if (!last_frame) {
         last_frame = now;
@@ -70,7 +68,9 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
         return {};
     }
 
-    const f32 target_rate = static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue());
+    const f32 refresh_hz = FrameGenPacerRules::RefreshHz(refresh_period);
+    const f32 target_rate = FrameGenPacerRules::EffectiveTarget(
+        static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue()), refresh_hz);
 
     if (smoothed_interval > 0.0f) {
         f32 burst_threshold = BURST_CADENCE_RATIO / smoothed_interval;
@@ -95,14 +95,6 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
                                   (interval_seconds - smoothed_interval) * INTERVAL_SMOOTHING
                             : interval_seconds;
 
-    if (previous_generations == 0) {
-        const f32 measured = 1.0f / smoothed_interval;
-        unloaded_base_rate =
-            unloaded_base_rate > 0.0f
-                ? unloaded_base_rate + (measured - unloaded_base_rate) * INTERVAL_SMOOTHING
-                : measured;
-    }
-
     if (stable_until) {
         if (now < *stable_until) {
             return {};
@@ -113,11 +105,10 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
     if (target_rate == 0.0f) {
         limit = std::min(Settings::FrameGenGenerations(), ceiling);
         output_credit = 0.0f;
-        issued_generations = limit;
         return {.generations = limit, .warm = limit > 0};
     }
 
-    UpdateLimit(now, 1.0f / smoothed_interval, target_rate, ceiling);
+    UpdateLimit(now, 1.0f / smoothed_interval, target_rate, refresh_hz, ceiling);
 
     const size_t allowed = std::min(limit, ceiling);
     const f32 desired_outputs = smoothed_interval * target_rate;
@@ -138,12 +129,11 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
         output_credit = std::fmod(output_credit, 1.0f);
     }
 
-    issued_generations = generations;
     return {.generations = generations, .warm = true};
 }
 
 void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate,
-                                size_t ceiling) {
+                                f32 refresh_hz, size_t ceiling) {
     limit = std::min(limit, ceiling);
 
     if (probe_until) {
@@ -163,8 +153,10 @@ void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target
         const bool collapsed_for_marginal_gain =
             base_rate < probe_base_rate * PROBE_BASE_COLLAPSE_RATIO &&
             current_output < previous_output * PROBE_MARGINAL_GAIN;
-        const bool emulation_slowed = unloaded_base_rate > 0.0f &&
-                                      base_rate < unloaded_base_rate * UNLOADED_BASE_RETENTION;
+        // The game's own frame rate must not drop with the step: more frames on screen with
+        // fewer real ones (vsync holding the game to a lower divisor) is not a gain
+        const bool emulation_slowed =
+            !FrameGenPacerRules::ProbeKeepsGameRate(probe_base_rate, base_rate);
 
         if (throughput_regressed || collapsed_for_marginal_gain || emulation_slowed) {
             limit = probe_previous_limit;
@@ -179,7 +171,7 @@ void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target
     }
 
     if (base_rate * static_cast<f32>(limit + 1) >= target_rate * TARGET_SATISFIED_RATIO ||
-        limit >= ceiling) {
+        limit >= ceiling || !FrameGenPacerRules::CanStepUp(base_rate, limit, refresh_hz)) {
         deficit_since.reset();
         return;
     }
@@ -233,8 +225,6 @@ void FrameGenPacer::Reset() {
     last_interval = 0.0f;
     output_credit = 0.0f;
     probe_base_rate = 0.0f;
-    unloaded_base_rate = 0.0f;
-    issued_generations = 0;
     probe_previous_limit = 0;
     limit = 0;
     probe_failures = 0;

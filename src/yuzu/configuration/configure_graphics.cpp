@@ -218,6 +218,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     std::map<u32, QWidget*> hold_graphics;
     std::vector<QWidget*> hold_api;
+    std::vector<ConfigurationShared::Widget*> frame_gen_rows;
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
 #ifndef HAS_RESHADE
@@ -243,6 +244,9 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         if (!widget->Valid()) {
             widget->deleteLater();
             continue;
+        }
+        if (setting->PairedSetting() == &Settings::values.frame_gen) {
+            frame_gen_rows.push_back(widget);
         }
 
         if (setting->Id() == Settings::values.renderer_backend.Id()) {
@@ -329,6 +333,28 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
+    }
+
+    // The frame generation rows' checkboxes show "Enable Frame Generation", which only its own
+    // row writes (ConfigurationShared::Widget): keep them equal to it, both ways. A click on a
+    // row's box clicks the main one (in a per-game configuration that makes it custom).
+    if (const auto main_row = hold_graphics.find(Settings::values.frame_gen.Id());
+        main_row != hold_graphics.end()) {
+        QCheckBox* const main_box =
+            static_cast<ConfigurationShared::Widget*>(main_row->second)->checkbox;
+        for (ConfigurationShared::Widget* const row : frame_gen_rows) {
+            QCheckBox* const box = row->checkbox;
+            if (main_box == nullptr || box == nullptr || box == main_box) {
+                continue;
+            }
+            box->setChecked(main_box->isChecked());
+            connect(main_box, &QCheckBox::toggled, box, &QCheckBox::setChecked);
+            connect(box, &QCheckBox::clicked, main_box, [main_box](bool checked) {
+                if (main_box->isChecked() != checked) {
+                    main_box->click();
+                }
+            });
+        }
     }
 
     for (auto widget : hold_api) {

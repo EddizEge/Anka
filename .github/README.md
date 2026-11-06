@@ -19,21 +19,23 @@ Download **`Anka-1.0.0-win64.zip`** from the
 [Releases page](https://github.com/EddizEge/Anka/releases) (`SHA256SUMS.txt` there lets you
 check it).
 
-**Requirement: a working PokeDinner-Eglantine 2.0.0 folder.** Anka is unzipped into that folder,
-next to `eglantine.exe`, and uses that folder's Qt DLLs; they are not in the zip. You also need
-Windows 10 or 11 (64-bit), a GPU with a current Vulkan driver and the Microsoft Visual C++
-2015-2022 x64 runtime.
+Anka runs on its own. You need Windows 10 or 11 (64-bit) and a GPU with a current Vulkan
+driver; the zip carries everything else the programs need (the Qt 6.8.3 DLLs and plugins, the
+Visual C++ runtime DLLs).
 
-1. Back up your saves: the `nand` folder in your user folder (see
-   [Existing saves and settings](#existing-saves-and-settings)).
-2. Unzip `Anka-1.0.0-win64.zip` into the PokeDinner-Eglantine 2.0.0 folder, next to
-   `eglantine.exe`. Nothing is overwritten; 2.0.0 keeps working as before.
-3. Start **`anka.exe`**. Your games are the same as in 2.0.0's game list.
+1. Unzip `Anka-1.0.0-win64.zip` into a new folder.
+2. Run **`anka.exe`**.
+3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
+   only use what you legally own).
 
-Games, keys and firmware are not included; only use what you legally own.
+Coming from PokeDinner-Eglantine 2.0.0: copy your user folder next to `anka.exe` (see
+[Saves and settings](#saves-and-settings)).
 
-To uninstall, delete what the zip added; the list is in "Install" in
-[`README_ANKA.md`](../README_ANKA.md).
+**Do not unzip Anka into a PokeDinner-Eglantine 2.0.0 folder:** its Qt DLLs would replace
+2.0.0's.
+
+To uninstall, delete the Anka folder; move your games and its `user` folder (keys, firmware,
+saves) out first if you want to keep them.
 
 ### Without menus: anka-cli and the launchers
 
@@ -46,10 +48,10 @@ onto a launcher) and double-click a launcher:
 | `start-reactive-experimental.bat` | **Experimental.** Reactive Flushing on: on our PC about 7% slower at the game's opening and about 15% faster in open areas. If you see image errors, go back to the recommended one. |
 | `start-safe.bat` | **For troubleshooting and for games other than Bananza.** The GPU shortcuts Anka keeps on by default turned off (`EDEN_NX2_LIGHT_DRAW=0` and the rest of its list) and the optional settings that change play cleared. Anka's fixes and its changes without a switch stay in. |
 
-On the first start a launcher makes anka-cli's settings file (`config\sdl2-config.ini`) as a
-copy of `qt-config.ini`, so your controller setup comes along; it never changes a settings file
-that already exists (`anka-config.ps1`, a small, readable PowerShell script, does this). The
-game starts in full screen: **quit with Alt+F4**.
+On the first start a launcher makes anka-cli's settings file (`user\config\sdl2-config.ini`) as
+a copy of `anka.exe`'s `qt-config.ini`, so your controller setup comes along; it never changes
+a settings file that already exists (`anka-config.ps1`, a small, readable PowerShell script,
+does this). The game starts in full screen: **quit with Alt+F4**.
 
 ## Settings
 
@@ -58,16 +60,15 @@ choices:
 
 - **Recommended** (the first start's choice): all eight settings on, Reactive Flushing off
   (Graphics > Advanced). The setup we measured; the same as `start-recommended.bat`. On Anka's
-  first start it also turns Reactive Flushing off in `qt-config.ini` by itself, so 2.0.0's
-  `eglantine.exe` then sees it off too. Choosing Recommended later turns it off as well (only
-  while no game is running; otherwise set it in Graphics > Advanced afterwards).
+  first start it also turns Reactive Flushing off in `qt-config.ini` by itself; choosing
+  Recommended later turns it off as well.
 - **Recommended + Reactive Flushing**: all eight on, Reactive Flushing on, barrier feedback loops
   on (Graphics > Advanced; Reactive Flushing needs it) and `EDEN_NX2_RX_RT_FIT=3`. Experimental;
   the same as `start-reactive-experimental.bat`.
-- **Safe**: all eight off, and the GPU shortcuts Anka keeps on by default off too
-  (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list), in every game. Graphics
-  settings such as Reactive Flushing stay as they are; Anka's fixes and its changes without a
-  switch stay in.
+- **Safe**: all eight off, Frame generation off, and the GPU shortcuts Anka keeps on by default
+  off too (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list), in every game.
+  Other graphics settings such as Reactive Flushing stay as they are; Anka's fixes and its
+  changes without a switch stay in.
 - **Custom**: chosen by itself when you change a box by hand.
 
 Recommended was measured in Donkey Kong Bananza only. If another game shows image or speed
@@ -79,16 +80,38 @@ session and take effect at the first game you start. If you change them after a 
 already started, or start a game that needs other settings (Bananza after another game or the
 other way round), Anka asks whether to restart and does it for you. A switch you set outside
 the program (your environment, your own `.bat` or `nx2_switches.txt`) always wins; its box is
-greyed out. Details: "The Anka tab" in [`README_ANKA.md`](../README_ANKA.md).
+greyed out.
 
-## Existing saves and settings
+The tab also has a **Frame generation** box:
 
-Anka uses the same user folder and settings files as Eglantine / Eden: `user\` next to the
-program in a portable install, otherwise `%APPDATA%\eden`, with the same keys, firmware, saves
-and `qt-config.ini`. Your saves are not moved or deleted, but both programs use them, so
-**back up the `nand` folder** before you try Anka. A setting changed in `anka.exe` or in 2.0.0's
-`eglantine.exe` (Reactive Flushing too) is used by the other; only the `[Anka]` group in
-`qt-config.ini` is new, and `eglantine.exe` leaves it alone.
+- **Off** (the default): frame generation off.
+- **2x**: FSR3, one generated frame per real frame (fixed). On a 60 Hz screen it holds the game
+  at 30 fps.
+- **Dynamic**: FSR3 with a 120 fps target, capped at the screen's refresh rate when it is known.
+  It steps between 1x and 4x only while the screen can show the extra frames and the game's own
+  frame rate holds (a step that lowers the game's frame rate by more than 8% is undone).
+- *Other (Graphics tab)* is shown, not chosen, when the Graphics tab holds another frame
+  generation setup; the Anka tab leaves it as it is.
+
+Generated frames need a screen faster than the game's frame rate; on a 60 Hz screen they only
+help below 30 fps. The presets do not change it, except Safe, which sets it to Off. The box
+writes the Graphics tab's frame generation settings (Enable Frame Generation, type FSR3,
+multiplier / target frame rate).
+
+Reactive Flushing (through a preset) and Frame generation are graphics settings, which cannot
+change in a running game: changed while a game runs, Anka keeps them and applies them when you
+press **Restart Now**, or when the game stops if you chose **Later** (the tab says so).
+Details: "The Anka tab" in [`README_ANKA.md`](../README_ANKA.md).
+
+## Saves and settings
+
+The zip has an empty `user` folder next to `anka.exe`, so Anka runs in portable mode: its
+settings (`user\config\qt-config.ini`), keys, firmware, saves (`user\nand`) and log stay in that
+folder, apart from any other emulator; it does not use `%APPDATA%\eden` (except that `anka.exe`
+also reads a `nx2_switches.txt` there, if you made one). Coming from PokeDinner-Eglantine 2.0.0,
+copy your 2.0.0 user folder next to `anka.exe` (a portable 2.0.0 has it next to
+`eglantine.exe`; otherwise copy the contents of `%APPDATA%\eden` into Anka's `user` folder):
+your keys, firmware, saves, game list and controller come along, and 2.0.0 keeps its own copy.
 
 ## What is faster
 
@@ -133,7 +156,8 @@ corresponding source next to the program: `Anka-1.0.0-source.zip` (this reposito
 release commit, tag `anka-v1.0.0`), `Anka-1.0.0-deps-source.zip` (the third-party libraries built
 from source) and `Anka-1.0.0-prebuilt-source.zip` (the sources and build scripts of the four
 prebuilt libraries: FFmpeg, OpenSSL, SDL3, sirit). `anka.exe` links Qt 6.8.3 dynamically
-(LGPL-3.0; Qt Charts GPL-3.0); its Qt DLLs are those of your 2.0.0 folder. Third-party notices
+(LGPL-3.0; Qt Charts GPL-3.0); the program zip carries the Qt DLLs, which you may replace with
+your own build of Qt 6.8.3. Third-party notices
 are in `THIRD_PARTY_NOTICES_ANKA.txt` in the release zips and in [`LICENSES`](../LICENSES).
 
 ## Credits
@@ -156,16 +180,12 @@ decided what to try, played and tested the builds, and is responsible for the re
 commit made with the assistant says so with an `Assisted-by:` line, as the Eden project's AI
 policy asks.
 
-## Türkçe
-
-Türkçe belge: [`BENIOKU_ANKA.md`](../BENIOKU_ANKA.md).
-
 ## Issues
 
 Report problems at https://github.com/EddizEge/Anka/issues (please not to Franseven, the Eden
 project or the other upstream projects). Say which program (`anka.exe` or `anka-cli.exe`) and
-which preset or launcher you used, the game's version, and attach the log file (`log\eden_log.txt` in
-the user folder).
+which preset or launcher you used, the game's version, and attach the log file
+(`user\log\eden_log.txt` in the Anka folder).
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. Use Anka only with games
 you own.

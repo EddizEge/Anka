@@ -298,3 +298,36 @@ TEST_CASE("Nx2PerfSettings: saving settings needs a restart only after a game se
         Plan(Recommended(), true, osd_outside);
     REQUIRE(!NeedsRestart(applied_outside, Plan(AfterBoxChange(no_osd), true, osd_outside)));
 }
+
+TEST_CASE("Nx2PerfSettings: the frame generation choice and the Graphics settings", "[core]") {
+    const FrameGenSettings off{};
+    // Each choice gives the settings that read back as that choice.
+    for (const FrameGen choice : {FrameGen::Off, FrameGen::Fixed2x, FrameGen::Dynamic}) {
+        REQUIRE(FrameGenFrom(FrameGenApply(choice, off)) == choice);
+    }
+    REQUIRE(FrameGenApply(FrameGen::Fixed2x, off) ==
+            FrameGenSettings{.on = true, .fsr3 = true, .multiplier = 2, .target_rate = 0});
+    REQUIRE(FrameGenApply(FrameGen::Dynamic, off).target_rate == DYNAMIC_TARGET_RATE);
+    REQUIRE(DYNAMIC_TARGET_RATE == 120);
+    // Off only turns it off; Other changes nothing.
+    const FrameGenSettings lsfg3{.on = true, .fsr3 = false, .multiplier = 3, .target_rate = 0};
+    REQUIRE(FrameGenFrom(lsfg3) == FrameGen::Other);
+    REQUIRE(FrameGenApply(FrameGen::Off, lsfg3) ==
+            FrameGenSettings{.on = false, .fsr3 = false, .multiplier = 3, .target_rate = 0});
+    REQUIRE(FrameGenApply(FrameGen::Other, lsfg3) == lsfg3);
+    // Dynamic switches the type to FSR3 and keeps the multiplier (the target rate decides).
+    REQUIRE(FrameGenApply(FrameGen::Dynamic, lsfg3) ==
+            FrameGenSettings{.on = true, .fsr3 = true, .multiplier = 3, .target_rate = 120});
+    // FSR3 with another multiplier or target rate is the Graphics tab's own setup.
+    REQUIRE(FrameGenFrom({.on = true, .fsr3 = true, .multiplier = 3, .target_rate = 0}) ==
+            FrameGen::Other);
+    REQUIRE(FrameGenFrom({.on = true, .fsr3 = true, .multiplier = 2, .target_rate = 60}) ==
+            FrameGen::Other);
+    REQUIRE(FrameGenFrom({.on = false, .fsr3 = true, .multiplier = 2, .target_rate = 120}) ==
+            FrameGen::Off);
+    // Presets leave it, Safe turns it off.
+    REQUIRE(FrameGenFor(Preset::Safe) == FrameGen::Off);
+    REQUIRE(!FrameGenFor(Preset::Recommended).has_value());
+    REQUIRE(!FrameGenFor(Preset::Reactive).has_value());
+    REQUIRE(!FrameGenFor(Preset::Custom).has_value());
+}

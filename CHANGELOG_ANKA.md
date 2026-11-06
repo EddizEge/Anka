@@ -37,33 +37,49 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
 ### The menu program
 
 - `anka.exe`: 2.0.0's Qt front end built from this tree against Qt 6.8.3 (the version 2.0.0
-  ships), so it runs with the Qt DLLs of a 2.0.0 folder (unzip it next to `eglantine.exe`;
-  nothing is overwritten). It shares 2.0.0's user folder, game list and `qt-config.ini`: a
-  setting changed in one menu program (Reactive Flushing too) is used by the other.
+  ships).
+- A standalone install: `Anka-1.0.0-win64.zip` is unzipped into a new, empty folder and runs on
+  its own. It holds `anka.exe`, `anka-cli.exe`, the Qt 6.8.3 DLLs and plugins they need, the
+  Visual C++ runtime DLLs, the launchers and an empty `user\` folder, so Anka starts in portable
+  mode and keeps its settings, keys, firmware, saves, caches and log in that folder (not in
+  `%APPDATA%\eden`, not in another install). Coming from PokeDinner-Eglantine 2.0.0: copy your
+  user folder next to `anka.exe`. Do not unzip Anka into a 2.0.0 folder: its Qt DLLs would
+  replace 2.0.0's.
 - An **Anka** tab in Emulation > Configure...: the switches of `start-recommended.bat` as eight
   settings in two groups. All games: split GPU thread, acquire peek, the same-value filter in
   the macro JIT, the lean front macro path, timed frame generation, the FPS overlay in
   RivaTuner. Donkey Kong Bananza only (off in other games): the dynamic frame rate and the
-  frame pacing. They are kept in a new `[Anka]` group of `qt-config.ini`, which 2.0.0's
-  `eglantine.exe` leaves alone.
+  frame pacing. They are kept in a new `[Anka]` group of `qt-config.ini`.
 - A **Preset** box at the top of the tab, with a line under it about the choice:
   - Recommended: all eight on, Reactive Flushing (Graphics > Advanced) off: the measured setup,
     the same as `start-recommended.bat`. On Anka's first start (no `[Anka]` group yet) it is
-    chosen and Reactive Flushing is turned off in `qt-config.ini` (shared with 2.0.0's
-    `eglantine.exe`, which then also sees it off). Choosing it later turns Reactive Flushing off
-    too, while no game is running (otherwise the tab says to set it in Graphics > Advanced).
+    chosen and Reactive Flushing is turned off in `qt-config.ini`. Choosing it later turns
+    Reactive Flushing off too.
   - Recommended + Reactive Flushing: all eight on, Reactive Flushing and barrier feedback loops
     on (Graphics > Advanced; Reactive Flushing needs it) and `EDEN_NX2_RX_RT_FIT=3`.
     Experimental: on our PC about 7% slower at the game's opening and about 15% faster in open
     areas. The same as `start-reactive-experimental.bat`.
-  - Safe: all eight off, and the GPU shortcuts Anka keeps on by default off too
-    (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list of 61), in every game.
-    Graphics settings such as Reactive Flushing stay as they are; Anka's fixes and its changes
-    without a switch stay in.
+  - Safe: all eight off, Frame generation off, and the GPU shortcuts Anka keeps on by default
+    off too (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list of 61), in every
+    game. Other graphics settings such as Reactive Flushing stay as they are; Anka's fixes and
+    its changes without a switch stay in.
   - Custom: chosen by itself when a box is changed by hand.
 
   Recommended was measured in Donkey Kong Bananza only. If another game shows image or speed
   problems, try Safe first and report it with the game's name.
+- A **Frame generation** box in the tab: Off (the default), 2x, Dynamic. Off turns frame
+  generation off. 2x is FSR3 with one generated frame per real frame (fixed); on a 60 Hz screen
+  it holds the game at 30 fps. Dynamic is FSR3 with a 120 fps target, capped at the screen's
+  refresh rate when it is known; it steps between 1x and 4x only while the screen can show the
+  extra frames and the game's own frame rate holds (a step that lowers the game's frame rate by
+  more than 8% is undone). Another setup made in the Graphics tab (LSFG, another multiplier or
+  target) shows as "Other (Graphics tab)" and is left as it is. Generated frames need a screen
+  faster than the game's frame rate; on a 60 Hz screen they only help below 30 fps. The presets
+  do not change it, except Safe, which sets it to Off. It writes the Graphics tab's frame
+  generation settings (Enable Frame Generation, type FSR3, multiplier / target frame rate).
+- Reactive Flushing (changed through a preset) and Frame generation are graphics settings that
+  cannot change in a running game: changed while a game runs, Anka keeps them and applies them
+  when you press Restart Now, or when the game stops if you chose Later (the tab says so).
 - The program sets the switches in its environment before the first game of a session starts;
   the Bananza ones only for Bananza (title id `040074A01BF12000`, the one the dynamic frame rate
   patch checks). A switch set outside the program (the environment, a `.bat` of your own that
@@ -82,6 +98,11 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   menu program was not measured: every number is from the program without menus.
 - The RTSS on-screen display (`OSD`) works in the menu program too (the writer moved from the
   SDL program to `frontend_common`).
+- Fix: the Graphics tab saved *Enable Frame Generation* as off when the checkbox of one of
+  frame generation's sub-settings (Queue Target, for example) was unchecked; now only *Enable
+  Frame Generation* decides, in the global and the per-game settings.
+- Fix: after Restart Now the new Anka waits for the old one to close, so the new session writes
+  its log (`log\eden_log.txt`) again.
 
 ### Donkey Kong Bananza terrain and the GPU command stream
 
@@ -191,9 +212,9 @@ For `use_reactive_flushing=true`; none of these was measured with frame generati
 
 ### On-screen display
 
-- `OSD=1` (anka-cli and the menu program, on Windows): game FPS, display FPS with frame generation's multiplier, and
-  the game's speed in RivaTuner Statistics Server's on-screen display every 0.5 s; the slot is
-  emptied on every exit.
+- `OSD=1` (anka-cli and the menu program, on Windows): game FPS, display FPS with frame
+  generation's multiplier, and the game's speed in RivaTuner Statistics Server's on-screen
+  display every 0.5 s; the slot is emptied on every exit.
 
 ### Shaders and accuracy
 
@@ -248,7 +269,8 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 
 - `/QIntel-jcc-erratum` is a build option (`YUZU_MSVC_JCC_ERRATUM`).
 - Release programs built with link-time code generation and profile-guided optimization, the
-  menu program with anka-cli's profile (`BUILDING_ANKA.md`); the menu program against Qt 6.8.3.
+  menu program with anka-cli's profile (`BUILDING_ANKA.md`); the menu program against Qt 6.8.3,
+  whose DLLs and plugins the program zip carries.
 
 ### Not in this release
 
@@ -265,11 +287,12 @@ Ideas ported from other forks, credited in the code: Selevet (`SLOT_SKIP`, `USAG
 
 - `NX2_NOTES.md` and `NX2_GPU_THREAD_SPLIT.md`: what was tried, measured and why.
 - `nx2_switches_ANKA.txt` (in the source `dist/nx2_switches.txt`): every switch with its default.
-- `README_ANKA.md` / `BENIOKU_ANKA.md`, this file, `BUILDING_ANKA.md`, the launchers in
-  `dist/anka/`.
+- `README_ANKA.md`, this file, `BUILDING_ANKA.md`, the launchers in `dist/anka/`. The release
+  texts are in English only.
 - Launchers (`start-recommended.bat`, `start-reactive-experimental.bat`, `start-safe.bat`;
-  their messages start with `[Anka]`): they find the game in the `Games` folder next to them (asking which one when there
-  are several), and on the first start make `config\sdl2-config.ini` as a copy of
-  `qt-config.ini` (the recommended one turns reactive flushing off in that copy; the reactive one
-  makes its own `sdl2-config-reactive.ini`). An existing `sdl2-config.ini` is never changed. The
-  edits are made by `anka-config.ps1`, a small, readable PowerShell script next to them.
+  their messages start with `[Anka]`): they find the game in the `Games` folder next to them
+  (asking which one when there are several), and on the first start make
+  `user\config\sdl2-config.ini` as a copy of `anka.exe`'s `qt-config.ini` (the recommended one
+  turns reactive flushing off in that copy; the reactive one makes its own
+  `sdl2-config-reactive.ini`). An existing `sdl2-config.ini` is never changed. The edits are made
+  by `anka-config.ps1`, a small, readable PowerShell script next to them.

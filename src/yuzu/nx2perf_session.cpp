@@ -16,8 +16,16 @@
 #include <QStringList>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "core/nx2_perf_settings.h"
 #include "qt_common/config/uisettings.h"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace Nx2PerfSession {
 
@@ -25,8 +33,13 @@ namespace {
 
 namespace Perf = Core::Nx2PerfSettings;
 
+// A restarted process waits for this process id (the old one) before it opens the log.
+constexpr char RESTART_PID_VARIABLE[] = "ANKA_RESTART_WAIT_PID";
+constexpr int RESTART_WAIT_MS = 30'000;
+
 QProcessEnvironment g_start_environment;
 std::vector<std::string_view> g_set_outside;
+PendingGraphics g_pending;
 
 struct Applied {
     std::vector<Perf::Var> plan;
@@ -62,7 +75,24 @@ QString Describe(const std::vector<Perf::Var>& plan) {
 } // Anonymous namespace
 
 void CaptureStartEnvironment() {
+    // The log is not open yet: nothing is logged here.
+    if (const char* pid_text = std::getenv(RESTART_PID_VARIABLE)) {
+#ifdef _WIN32
+        const unsigned long pid = std::strtoul(pid_text, nullptr, 10);
+        if (pid != 0) {
+            if (const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid))) {
+                WaitForSingleObject(process, RESTART_WAIT_MS);
+                CloseHandle(process);
+            }
+        }
+        _putenv_s(RESTART_PID_VARIABLE, "");
+#else
+        (void)pid_text;
+        unsetenv(RESTART_PID_VARIABLE);
+#endif
+    }
     g_start_environment = QProcessEnvironment::systemEnvironment();
+    g_start_environment.remove(QString::fromLatin1(RESTART_PID_VARIABLE));
 }
 
 void CaptureOutsideSwitches() {
@@ -152,11 +182,18 @@ bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen)
         bananza = g_applied->bananza;
     }
     const auto plan = Perf::Plan(UISettings::values.nx2perf, bananza, SetOutside);
-    if (!Perf::NeedsRestart(applied, plan)) {
+    const bool pending = HasPendingGraphics();
+    if (!Perf::NeedsRestart(applied, plan) && !(applied && pending)) {
         return false;
     }
     QString text = QObject::tr("This session's game already started with the earlier Anka "
                                "settings; the new ones take effect after a restart.");
+    if (pending) {
+        text += QStringLiteral("\n\n") +
+                QObject::tr("Reactive Flushing and frame generation cannot change in a running "
+                            "game: they are applied before the restart, or when the game stops "
+                            "if you choose Later.");
+    }
     if (!running_game.isEmpty()) {
         text += QStringLiteral("\n\n") +
                 QObject::tr("Anka opens again with the running game: unsaved game progress is "
@@ -178,6 +215,72 @@ bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen)
     LOG_INFO(Frontend, "Anka: restarting to apply: {}", Describe(plan).toStdString());
     g_restart = Restart{running_game, fullscreen};
     return true;
+}
+
+void AddPendingGraphics(const PendingGraphics& pending) {
+    if (pending.reactive_flushing) {
+        g_pending.reactive_flushing = pending.reactive_flushing;
+    }
+    if (pending.barrier_feedback_loops) {
+        g_pending.barrier_feedback_loops = pending.barrier_feedback_loops;
+    }
+    if (pending.frame_gen) {
+        g_pending.frame_gen = pending.frame_gen;
+    }
+}
+
+bool HasPendingGraphics() {
+    return g_pending.reactive_flushing || g_pending.barrier_feedback_loops || g_pending.frame_gen;
+}
+
+bool ApplyPendingGraphics() {
+    if (!HasPendingGraphics()) {
+        return false;
+    }
+    if (g_pending.reactive_flushing) {
+        Settings::values.use_reactive_flushing.SetValue(*g_pending.reactive_flushing);
+    }
+    if (g_pending.barrier_feedback_loops) {
+        Settings::values.barrier_feedback_loops.SetValue(*g_pending.barrier_feedback_loops);
+    }
+    if (g_pending.frame_gen) {
+        ApplyFrameGen(*g_pending.frame_gen);
+    }
+    LOG_INFO(Frontend, "Anka: graphics settings chosen during the game applied: reactive flushing "
+                       "{}, barrier feedback loops {}, frame generation {}",
+             g_pending.reactive_flushing ? (*g_pending.reactive_flushing ? "on" : "off") : "-",
+             g_pending.barrier_feedback_loops ? (*g_pending.barrier_feedback_loops ? "on" : "off")
+                                              : "-",
+             g_pending.frame_gen ? static_cast<int>(*g_pending.frame_gen) : -1);
+    g_pending = {};
+    return true;
+}
+
+Perf::FrameGen CurrentFrameGen() {
+    const auto& v = Settings::values;
+    return Perf::FrameGenFrom({.on = v.frame_gen.GetValue(true),
+                               .fsr3 = v.frame_gen_type.GetValue(true) ==
+                                       Settings::FrameGenType::Fsr3,
+                               .multiplier = v.frame_gen_multiplier.GetValue(true),
+                               .target_rate = v.frame_gen_target_rate.GetValue(true)});
+}
+
+void ApplyFrameGen(Perf::FrameGen choice) {
+    auto& v = Settings::values;
+    const Perf::FrameGenSettings now =
+        Perf::FrameGenApply(choice, {.on = v.frame_gen.GetValue(true),
+                                     .fsr3 = v.frame_gen_type.GetValue(true) ==
+                                             Settings::FrameGenType::Fsr3,
+                                     .multiplier = v.frame_gen_multiplier.GetValue(true),
+                                     .target_rate = v.frame_gen_target_rate.GetValue(true)});
+    v.frame_gen.SetValue(now.on);
+    if (now.on) {
+        if (now.fsr3) {
+            v.frame_gen_type.SetValue(Settings::FrameGenType::Fsr3);
+        }
+        v.frame_gen_multiplier.SetValue(now.multiplier);
+        v.frame_gen_target_rate.SetValue(now.target_rate);
+    }
 }
 
 void CancelRestart() {
@@ -203,7 +306,12 @@ void RestartIfRequested() {
     QProcess process;
     process.setProgram(QCoreApplication::applicationFilePath());
     process.setArguments(arguments);
-    process.setProcessEnvironment(g_start_environment);
+    QProcessEnvironment environment = g_start_environment;
+    // The new process waits for this one to exit before it opens the log (this one still holds
+    // it, and saves the settings on its way out).
+    environment.insert(QString::fromLatin1(RESTART_PID_VARIABLE),
+                       QString::number(QCoreApplication::applicationPid()));
+    process.setProcessEnvironment(environment);
     if (!process.startDetached()) {
         LOG_ERROR(Frontend, "Anka: the restart failed: {}",
                   process.errorString().toStdString());

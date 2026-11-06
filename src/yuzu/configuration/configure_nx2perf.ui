@@ -89,6 +89,67 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="frame_gen_row">
+     <item>
+      <widget class="QLabel" name="frame_gen_label">
+       <property name="text">
+        <string>Frame generation</string>
+       </property>
+       <property name="buddy">
+        <cstring>frame_gen</cstring>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="frame_gen">
+       <item>
+        <property name="text">
+         <string>Off</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>2x</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Dynamic</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Other (Graphics tab)</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="frame_gen_spacer">
+       <property name="orientation">
+        <enum>Qt::Orientation::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>0</width>
+         <height>0</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="frame_gen_text">
+     <property name="text">
+      <string/>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
+    </widget>
+   </item>
+   <item>
     <widget class="QGroupBox" name="all_games">
      <property name="title">
       <string>All games</string>

@@ -311,7 +311,7 @@ size_t FrameGen::WantedGenerations(size_t capacity) {
         plan = {};
         return 0;
     }
-    plan = pacer.Plan(capacity);
+    plan = pacer.Plan(capacity, RefreshPeriod());
     return plan.generations;
 }
 

@@ -10,6 +10,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QSignalBlocker>
+#include <QStandardItemModel>
 #include <QStringList>
 
 #include "qt_common/config/uisettings.h"
@@ -45,12 +46,22 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
     for (const Row& row : rows) {
         connect(row.box, &QCheckBox::toggled, this, [this] { BoxChanged(); });
     }
+    // The item order is Perf::FrameGen's; "Other" only shows the Graphics tab's own setup.
+    if (auto* model = qobject_cast<QStandardItemModel*>(ui->frame_gen->model())) {
+        model->item(static_cast<int>(Perf::FrameGen::Other))->setEnabled(false);
+    }
+    connect(ui->frame_gen, &QComboBox::activated, this,
+            [this](int index) { ChooseFrameGen(static_cast<Perf::FrameGen>(index)); });
 }
 
 ConfigureNx2Perf::~ConfigureNx2Perf() = default;
 
 void ConfigureNx2Perf::SetReactiveFlushing(std::function<bool(bool, bool)> func) {
     reactive_flushing = std::move(func);
+}
+
+void ConfigureNx2Perf::SetGameRunning(bool running) {
+    game_running = running;
 }
 
 void ConfigureNx2Perf::changeEvent(QEvent* event) {
@@ -64,11 +75,14 @@ void ConfigureNx2Perf::changeEvent(QEvent* event) {
 void ConfigureNx2Perf::RetranslateUI() {
     ui->retranslateUi(this);
     ShowPreset();
+    ShowFrameGen();
     MarkSetOutside();
 }
 
 void ConfigureNx2Perf::SetConfiguration() {
     Show(UISettings::values.nx2perf);
+    frame_gen_shown = Nx2PerfSession::CurrentFrameGen();
+    ShowFrameGen();
 }
 
 Perf::Switches ConfigureNx2Perf::Current() const {
@@ -119,11 +133,20 @@ void ConfigureNx2Perf::ShowPreset() {
 void ConfigureNx2Perf::ChoosePreset(Perf::Preset chosen) {
     ui->status->clear();
     Show(Perf::FromPreset(chosen, Current()));
+    if (const auto frame_gen = Perf::FrameGenFor(chosen)) {
+        ChooseFrameGen(*frame_gen);
+    }
     const auto reactive = Perf::ReactiveFlushing(chosen);
     if (!reactive) {
         return;
     }
     const bool barrier_on = Perf::BarrierFeedbackLoops(chosen).value_or(false);
+    if (game_running) {
+        pending_reactive = *reactive;
+        pending_barrier = Perf::BarrierFeedbackLoops(chosen);
+        ShowPending();
+        return;
+    }
     if (!reactive_flushing || !reactive_flushing(*reactive, barrier_on)) {
         ui->status->setText(tr("Reactive Flushing (Graphics, Advanced) can only be changed with no "
                                "game running; set it there afterwards."));
@@ -138,8 +161,62 @@ void ConfigureNx2Perf::BoxChanged() {
     }
 }
 
+void ConfigureNx2Perf::ShowFrameGen() {
+    {
+        const QSignalBlocker blocker{ui->frame_gen};
+        ui->frame_gen->setCurrentIndex(static_cast<int>(frame_gen_shown));
+    }
+    QString text;
+    switch (frame_gen_shown) {
+    case Perf::FrameGen::Off:
+        text = tr("Off.");
+        break;
+    case Perf::FrameGen::Fixed2x:
+        text = tr("FSR3, one generated frame per real frame. On a 60 Hz screen it holds the game "
+                  "at 30 fps.");
+        break;
+    case Perf::FrameGen::Dynamic:
+        text = tr("FSR3 aiming at 120 fps, at most the screen's refresh rate: 2x to 4x, only while "
+                  "the screen can show the frames and the game's own frame rate holds.");
+        break;
+    case Perf::FrameGen::Other:
+        text = tr("Set in the Graphics tab.");
+        break;
+    }
+    ui->frame_gen_text->setText(
+        text + QLatin1Char(' ') +
+        tr("Generated frames need a screen faster than the game's frame rate; on a 60 Hz screen "
+           "they only help below 30 fps."));
+}
+
+void ConfigureNx2Perf::ChooseFrameGen(Perf::FrameGen chosen) {
+    if (chosen == Perf::FrameGen::Other) {
+        ShowFrameGen();
+        return;
+    }
+    frame_gen_choice = chosen;
+    frame_gen_shown = chosen;
+    ShowFrameGen();
+    if (game_running) {
+        ShowPending();
+    }
+}
+
+void ConfigureNx2Perf::ShowPending() {
+    ui->status->setText(tr("A game is running: Reactive Flushing and frame generation cannot change "
+                           "in it. Anka applies them when it restarts (Restart Now) or when the "
+                           "game stops."));
+}
+
 void ConfigureNx2Perf::ApplyConfiguration() {
     UISettings::values.nx2perf = Current();
+    if (game_running) {
+        Nx2PerfSession::AddPendingGraphics({.reactive_flushing = pending_reactive,
+                                            .barrier_feedback_loops = pending_barrier,
+                                            .frame_gen = frame_gen_choice});
+    } else if (frame_gen_choice) {
+        Nx2PerfSession::ApplyFrameGen(*frame_gen_choice);
+    }
 }
 
 void ConfigureNx2Perf::MarkSetOutside() {

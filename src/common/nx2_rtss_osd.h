@@ -292,22 +292,22 @@ constexpr Rates Compute(const Sample& from, const Sample& to) {
 /// Below this the speed is shown in red.
 constexpr double SlowSpeed = 0.95;
 
-/// "Oyun 34.5 FPS | Ekran 120 FPS | Hiz %99" (ASCII: RTSS's font may lack Turkish letters); the
-/// speed in red (<C=FF5050>...<C>, RTSS's colour tags) below 95%, "Hiz -" without a reading.
-/// With frame generation the multiplier follows the display FPS: "Ekran 120 FPS (3.0x)".
+/// "Game 34.5 FPS | Display 120 FPS | Speed 99%" (ASCII); the
+/// speed in red (<C=FF5050>...<C>, RTSS's colour tags) below 95%, "Speed -" without a reading.
+/// With frame generation the multiplier follows the display FPS: "Display 120 FPS (3.0x)".
 inline std::string Format(const Rates& rates) {
-    std::string text = fmt::format("Oyun {:.1f} FPS | Ekran {:.0f} FPS", rates.game_fps,
+    std::string text = fmt::format("Game {:.1f} FPS | Display {:.0f} FPS", rates.game_fps,
                                    rates.display_fps);
     if (rates.multiplier) {
         text += fmt::format(" ({:.1f}x)", *rates.multiplier);
     }
     text += " | ";
     if (!rates.speed) {
-        text += "Hiz -";
+        text += "Speed -";
     } else if (*rates.speed < SlowSpeed) {
-        text += fmt::format("<C=FF5050>Hiz %{:.0f}<C>", *rates.speed * 100.0);
+        text += fmt::format("<C=FF5050>Speed {:.0f}%<C>", *rates.speed * 100.0);
     } else {
-        text += fmt::format("Hiz %{:.0f}", *rates.speed * 100.0);
+        text += fmt::format("Speed {:.0f}%", *rates.speed * 100.0);
     }
     return text;
 }

@@ -77,10 +77,10 @@ TEST_CASE("Nx2RtssOsd: the switch", "[common]") {
 TEST_CASE("Nx2RtssOsd: v2.14+: the first free slot past slot 0, under the lock", "[common]") {
     Memory m{0x00020015};
     m.Head().osd_frame = 41;
-    REQUIRE(Update(m.Bytes(), "Oyun 30.0 FPS") == Status::Written);
+    REQUIRE(Update(m.Bytes(), "Game 30.0 FPS") == Status::Written);
     REQUIRE(m.Slot(0).owner[0] == '\0'); // slot 0 is the primary client's
     REQUIRE(Str(m.Slot(1).owner, 256) == "EdenNX2");
-    REQUIRE(Str(m.Slot(1).text_ex, 4096) == "Oyun 30.0 FPS");
+    REQUIRE(Str(m.Slot(1).text_ex, 4096) == "Game 30.0 FPS");
     REQUIRE(m.Slot(1).text[0] == '\0');
     REQUIRE(m.Head().osd_frame == 42);
     REQUIRE(m.Head().busy == 0);
@@ -88,8 +88,8 @@ TEST_CASE("Nx2RtssOsd: v2.14+: the first free slot past slot 0, under the lock",
         REQUIRE(m.Slot(i).owner[0] == '\0');
     }
     // The next update finds the same slot, even with slot 1 freed meanwhile... (owned first)
-    REQUIRE(Update(m.Bytes(), "Oyun 31.0 FPS") == Status::Written);
-    REQUIRE(Str(m.Slot(1).text_ex, 4096) == "Oyun 31.0 FPS");
+    REQUIRE(Update(m.Bytes(), "Game 31.0 FPS") == Status::Written);
+    REQUIRE(Str(m.Slot(1).text_ex, 4096) == "Game 31.0 FPS");
     REQUIRE(m.Head().osd_frame == 43);
     // A shorter text ends where it should.
     REQUIRE(Update(m.Bytes(), "x") == Status::Written);
@@ -263,27 +263,27 @@ TEST_CASE("Nx2RtssOsd: RTSS restarted (memory laid out again): the slot taken ag
 }
 
 TEST_CASE("Nx2RtssOsd: the text", "[common]") {
-    REQUIRE(Format({34.5, 120.0, 0.99}) == "Oyun 34.5 FPS | Ekran 120 FPS | Hiz %99");
-    REQUIRE(Format({60.0, 120.2, 1.0}) == "Oyun 60.0 FPS | Ekran 120 FPS | Hiz %100");
+    REQUIRE(Format({34.5, 120.0, 0.99}) == "Game 34.5 FPS | Display 120 FPS | Speed 99%");
+    REQUIRE(Format({60.0, 120.2, 1.0}) == "Game 60.0 FPS | Display 120 FPS | Speed 100%");
     REQUIRE(Format({20.04, 59.6, 0.8333}) ==
-            "Oyun 20.0 FPS | Ekran 60 FPS | <C=FF5050>Hiz %83<C>");
-    REQUIRE(Format({0.0, 0.0, std::nullopt}) == "Oyun 0.0 FPS | Ekran 0 FPS | Hiz -");
+            "Game 20.0 FPS | Display 60 FPS | <C=FF5050>Speed 83%<C>");
+    REQUIRE(Format({0.0, 0.0, std::nullopt}) == "Game 0.0 FPS | Display 0 FPS | Speed -");
     // The red starts below 95%.
-    REQUIRE(Format({30.0, 120.0, 0.95}) == "Oyun 30.0 FPS | Ekran 120 FPS | Hiz %95");
+    REQUIRE(Format({30.0, 120.0, 0.95}) == "Game 30.0 FPS | Display 120 FPS | Speed 95%");
     REQUIRE(Format({30.0, 120.0, 0.9499}).find("<C=FF5050>") != std::string::npos);
     for (const char c : Format({34.5, 120.0, 0.5})) {
         REQUIRE(static_cast<unsigned char>(c) < 0x80); // ASCII only
     }
     // Frame generation: the multiplier after the display FPS, one decimal.
-    REQUIRE(Format({40.0, 120.0, 1.0, 3.0}) == "Oyun 40.0 FPS | Ekran 120 FPS (3.0x) | Hiz %100");
+    REQUIRE(Format({40.0, 120.0, 1.0, 3.0}) == "Game 40.0 FPS | Display 120 FPS (3.0x) | Speed 100%");
     REQUIRE(Format({34.5, 120.0, 0.99, 3.4783}) ==
-            "Oyun 34.5 FPS | Ekran 120 FPS (3.5x) | Hiz %99");
+            "Game 34.5 FPS | Display 120 FPS (3.5x) | Speed 99%");
     REQUIRE(Format({20.0, 60.0, 0.8333, 3.0}) ==
-            "Oyun 20.0 FPS | Ekran 60 FPS (3.0x) | <C=FF5050>Hiz %83<C>");
+            "Game 20.0 FPS | Display 60 FPS (3.0x) | <C=FF5050>Speed 83%<C>");
     REQUIRE(Format({30.0, 30.0, std::nullopt, 1.0}) ==
-            "Oyun 30.0 FPS | Ekran 30 FPS (1.0x) | Hiz -");
+            "Game 30.0 FPS | Display 30 FPS (1.0x) | Speed -");
     // None: the text as before.
-    REQUIRE(Format({40.0, 120.0, 1.0, std::nullopt}) == "Oyun 40.0 FPS | Ekran 120 FPS | Hiz %100");
+    REQUIRE(Format({40.0, 120.0, 1.0, std::nullopt}) == "Game 40.0 FPS | Display 120 FPS | Speed 100%");
     for (const char c : Format({34.5, 120.0, 0.5, 3.5})) {
         REQUIRE(static_cast<unsigned char>(c) < 0x80);
     }
@@ -310,7 +310,7 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     REQUIRE(*r.speed > 0.9799 && *r.speed < 0.9801);
     // Frame generation never ran: no multiplier, the text as before.
     REQUIRE_FALSE(r.multiplier.has_value());
-    REQUIRE(Format(r) == "Oyun 34.0 FPS | Ekran 120 FPS | Hiz %98");
+    REQUIRE(Format(r) == "Game 34.0 FPS | Display 120 FPS | Speed 98%");
     // No present meanwhile, after presents timed the game: it stood still (a stall), 0, whatever
     // the clock says.
     Sample c = b;
@@ -319,7 +319,7 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     c.system_us = 7'500'000;
     REQUIRE(Compute(a, c).speed.has_value());
     REQUIRE(*Compute(a, c).speed == 0.0);
-    REQUIRE(Format(Compute(a, c)).find("<C=FF5050>Hiz %0<C>") != std::string::npos);
+    REQUIRE(Format(Compute(a, c)).find("<C=FF5050>Speed 0%<C>") != std::string::npos);
     // The presents never timed the game: the emulated clock against the wall clock (single core).
     Sample f = a, g = c;
     f.speed_frame_us = f.speed_game_us = g.speed_frame_us = g.speed_game_us = 0;
@@ -328,7 +328,7 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     Sample d = g, e = f;
     d.system_us = e.system_us = 0;
     REQUIRE_FALSE(Compute(e, d).speed.has_value());
-    REQUIRE(Format(Compute(e, d)).find("Hiz -") != std::string::npos);
+    REQUIRE(Format(Compute(e, d)).find("Speed -") != std::string::npos);
     // No time passed: nothing.
     const Rates z = Compute(a, a);
     REQUIRE(z.game_fps == 0.0);
@@ -356,14 +356,14 @@ TEST_CASE("Nx2RtssOsd: the frame generation multiplier", "[common]") {
     const Rates r = Compute(a, b);
     REQUIRE(r.multiplier.has_value());
     REQUIRE(*r.multiplier == 3.0);
-    REQUIRE(Format(r) == "Oyun 40.0 FPS | Ekran 118 FPS (3.0x) | Hiz %100");
+    REQUIRE(Format(r) == "Game 40.0 FPS | Display 118 FPS (3.0x) | Speed 100%");
     // A varying count (FSR3's pacing): 23 frames, 57 generated in 0.5 s: 80 / 23 = 3.478.
     Sample c = a;
     c.seconds = 10.5;
     c.game_frames = 1023;
     c.output_frames = 4080;
     c.generated_frames = 2557;
-    REQUIRE(Format(Compute(a, c)).find("Ekran 160 FPS (3.5x) | ") != std::string::npos);
+    REQUIRE(Format(Compute(a, c)).find("Display 160 FPS (3.5x) | ") != std::string::npos);
     // On but adding nothing this window (the game at the target rate): 1.0x.
     Sample d = b;
     d.generated_frames = a.generated_frames;
@@ -372,12 +372,12 @@ TEST_CASE("Nx2RtssOsd: the frame generation multiplier", "[common]") {
     Sample e = a;
     e.seconds = 11.0;
     REQUIRE_FALSE(Compute(a, e).multiplier.has_value());
-    REQUIRE(Format(Compute(a, e)).find("Ekran 0 FPS | ") != std::string::npos);
+    REQUIRE(Format(Compute(a, e)).find("Display 0 FPS | ") != std::string::npos);
     // Generation off since the start (its counter 0): none, the text as before.
     Sample f = a, g = b;
     f.generated_frames = g.generated_frames = 0;
     REQUIRE_FALSE(Compute(f, g).multiplier.has_value());
-    REQUIRE(Format(Compute(f, g)) == "Oyun 40.0 FPS | Ekran 118 FPS | Hiz %100");
+    REQUIRE(Format(Compute(f, g)) == "Game 40.0 FPS | Display 118 FPS | Speed 100%");
     // The first generated images inside the window count from 0.
     Sample h = b;
     h.generated_frames = 40;

@@ -2,13 +2,13 @@
 setlocal DisableDelayedExpansion
 rem Anka - SAFE: the shortcuts Anka keeps on by default set to 0, its opt-in switches cleared.
 rem Anka launcher for anka-cli.exe (Anka's program without menus).
-rem Put this file next to anka-cli.exe, in your PokeDinner-Eglantine 2.0.0 folder.
+rem Put this file next to anka-cli.exe.
 rem Start: put your game (.nsp .xci .nsz .xcz) in the Games folder next to this file and double-click
 rem this file; or drag a game file onto it; or write the game's path in GAME below.
 rem First start: when the user folder has no config\sdl2-config.ini yet, it is made as a copy of
-rem config\qt-config.ini (the menu program's controller and settings). An existing sdl2-config.ini is
-rem never changed. The .ini edits are made by anka-config.ps1 next to this file (a small,
-rem readable PowerShell script). Quit the game with Alt+F4.
+rem config\qt-config.ini (the controller and settings of the menu program, anka.exe). An existing
+rem sdl2-config.ini is never changed. The .ini edits are made by anka-config.ps1 next to this file
+rem (a small, readable PowerShell script). Quit the game with Alt+F4.
 rem Use it to tell whether a problem comes from the new switches. Changes that have no
 rem switch stay in (CHANGELOG_ANKA.md).
 rem ---- your settings -------------------------------------------------------------------
@@ -157,14 +157,12 @@ goto end
 echo.
 echo  No game found. Put your game file (.nsp .xci .nsz .xcz) in the Games folder next to
 echo  this file, or drag it onto this .bat.
-echo  Oyun bulunamadi. Oyun dosyanizi bu dosyanin yanindaki Games klasorune koyun ya da
-echo  bu .bat'in ustune surukleyin.
 echo.
 pause
 exit /b 1
 :gamemissing
 echo.
-echo  The game file was not found / Oyun dosyasi bulunamadi:
+echo  The game file was not found:
 echo  "%GAME%"
 echo.
 pause
@@ -180,8 +178,7 @@ pause
 exit /b 1
 :noexe
 echo.
-echo  anka-cli.exe is not next to this .bat. Put both in your
-echo  PokeDinner-Eglantine 2.0.0 folder (README_ANKA.md).
+echo  anka-cli.exe is not next to this .bat. Put both in the Anka folder (README_ANKA.md).
 echo.
 pause
 exit /b 1
@@ -201,7 +198,7 @@ if "%NGAMES%"=="1" set "GAME=%F%"
 exit /b 0
 :choose
 echo.
-echo  Games in the Games folder / Games klasorundeki oyunlar:
+echo  Games in the Games folder:
 set "I=0"
 for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
   set "F=%%~nxF"
@@ -210,7 +207,7 @@ for /r "%HERE%Games" %%F in (*.nsp *.xci *.nsz *.xcz) do (
 echo.
 :ask
 set "SEL="
-set /p "SEL= Number / Numara (1-%NGAMES%; Enter = quit / cikis): "
+set /p "SEL= Number (1-%NGAMES%; Enter = quit): "
 if not defined SEL goto end
 set "SEL=%SEL:"=%"
 set "PICK="
@@ -247,18 +244,14 @@ copy /y "%CDIR%\qt-config.ini" "%SDL%" >nul
 if errorlevel 1 goto noini
 set "FRESH=1"
 echo  [Anka] config\sdl2-config.ini was made from qt-config.ini: the controller and settings of
-echo            the menu programs (anka.exe, eglantine.exe) are used.
-echo  [Anka] config\sdl2-config.ini, qt-config.ini'den olusturuldu: menulu programin
-echo            (anka.exe, eglantine.exe) kumanda ve ayarlari kullanilir.
+echo            the menu program (anka.exe) are used.
 :sdlready
 exit /b 0
 :noini
 echo.
 echo  [Anka] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
 echo            "%CDIR%".
-echo            Start anka.exe (or eglantine.exe) once and set up your controller there, then start this again.
-echo  [Anka] Henuz ayar yok: config\sdl2-config.ini de config\qt-config.ini de yok. anka.exe'yi (ya da
-echo            eglantine.exe'yi) bir kez acip kumandanizi ayarlayin, sonra bunu yeniden baslatin.
+echo            Start anka.exe once and set up your controller there, then start this again.
 echo.
 pause
 exit /b 1
@@ -268,7 +261,7 @@ set "NX2_MODE=set"
 if errorlevel 1 goto psfail
 exit /b 0
 :psfail
-echo  [Anka] Could not edit "%NX2_INI%" / duzenlenemedi.
+echo  [Anka] Could not edit "%NX2_INI%".
 exit /b 1
 :end
 endlocal

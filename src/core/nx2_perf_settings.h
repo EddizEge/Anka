@@ -101,6 +101,71 @@ constexpr Switches AfterBoxChange(Switches switches) {
     return switches;
 }
 
+/// The Anka tab's frame generation choice. It writes the Graphics tab's settings (frame_gen,
+/// frame_gen_type, frame_gen_multiplier, frame_gen_target_rate); they are not EDEN_NX2_* switches.
+enum class FrameGen : u8 {
+    Off = 0,     ///< frame generation off
+    Fixed2x = 1, ///< FSR3, one generated frame per real frame
+    Dynamic = 2, ///< FSR3 aiming at DYNAMIC_TARGET_RATE (the pacer caps it at the refresh rate)
+    Other = 3,   ///< the Graphics tab holds another setup: shown, never written
+};
+
+/// Dynamic's target frame rate (frame_gen_target_rate).
+constexpr u32 DYNAMIC_TARGET_RATE = 120;
+
+/// The Graphics tab's frame generation settings, as far as the choice goes.
+struct FrameGenSettings {
+    bool on = false;
+    bool fsr3 = true; ///< frame_gen_type is FSR3
+    u32 multiplier = 2;
+    u32 target_rate = 0;
+
+    constexpr bool operator==(const FrameGenSettings&) const = default;
+};
+
+/// The choice the settings amount to.
+constexpr FrameGen FrameGenFrom(const FrameGenSettings& settings) {
+    if (!settings.on) {
+        return FrameGen::Off;
+    }
+    if (settings.fsr3 && settings.target_rate == 0 && settings.multiplier == 2) {
+        return FrameGen::Fixed2x;
+    }
+    if (settings.fsr3 && settings.target_rate == DYNAMIC_TARGET_RATE) {
+        return FrameGen::Dynamic;
+    }
+    return FrameGen::Other;
+}
+
+/// The settings a choice writes; what it leaves alone comes from `current` (Off only turns frame
+/// generation off, Dynamic keeps the multiplier: the target rate decides, Other changes nothing).
+constexpr FrameGenSettings FrameGenApply(FrameGen choice, FrameGenSettings current) {
+    switch (choice) {
+    case FrameGen::Off:
+        current.on = false;
+        break;
+    case FrameGen::Fixed2x:
+        current = {.on = true, .fsr3 = true, .multiplier = 2, .target_rate = 0};
+        break;
+    case FrameGen::Dynamic:
+        current.on = true;
+        current.fsr3 = true;
+        current.target_rate = DYNAMIC_TARGET_RATE;
+        break;
+    case FrameGen::Other:
+        break;
+    }
+    return current;
+}
+
+/// The frame generation a preset asks for: Safe turns it off, the others leave it.
+constexpr std::optional<FrameGen> FrameGenFor(Preset preset) {
+    if (preset == Preset::Safe) {
+        return FrameGen::Off;
+    }
+    return std::nullopt;
+}
+
 /// The barrier feedback loops setting (Graphics > Advanced) a preset asks for: on for Reactive,
 /// which needs it (start-reactive-experimental.bat sets both); none for the others.
 constexpr std::optional<bool> BarrierFeedbackLoops(Preset preset) {

@@ -1,6 +1,6 @@
-# Switch NX2 - read at every start of the menu programs (Anka's anka.exe, 2.0.0's
-# eglantine.exe). The programs without menus (anka-cli.exe, 2.0.0's eden-cli.exe) do not
-# read it: give them the variables in their environment (a launcher .bat).
+# Anka switches (EDEN_NX2_*) - nx2_switches.txt next to anka.exe is read at every start of the
+# menu program anka.exe. The program without menus, anka-cli.exe, does not read it: give it the
+# variables in its environment (a launcher .bat).
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
 # Between files, %APPDATA%\eden\nx2_switches.txt (yours) wins over this one, so editing

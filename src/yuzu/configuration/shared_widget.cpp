@@ -519,6 +519,10 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
     }
 
     const bool require_checkbox = other_setting != nullptr && other_setting->TypeId() == "bool";
+    // "Enable Frame Generation" has a row of its own: the frame generation rows show it in their
+    // checkbox but leave writing it to that row. Each row wrote it and the last one won, so an
+    // unchecked Queue Target saved frame generation off. ConfigureGraphics keeps the boxes equal.
+    const bool writes_other = require_checkbox && other_setting != &Settings::values.frame_gen;
     if (other_setting != nullptr && other_setting->TypeId() != "bool") {
         LOG_WARNING(
             Frontend,
@@ -658,8 +662,8 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
     }
 
     if (Settings::IsConfiguringGlobal()) {
-        load_func = [this, serializer, checkbox_serializer, require_checkbox, other_setting]() {
-            if (require_checkbox && other_setting->UsingGlobal()) {
+        load_func = [this, serializer, checkbox_serializer, writes_other, other_setting]() {
+            if (writes_other && other_setting->UsingGlobal()) {
                 other_setting->LoadString(checkbox_serializer());
             }
             if (setting.UsingGlobal()) {
@@ -681,13 +685,13 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
                                     restore_func();
                                 });
 
-        load_func = [this, serializer, require_checkbox, checkbox_serializer, other_setting]() {
+        load_func = [this, serializer, writes_other, checkbox_serializer, other_setting]() {
             bool using_global = !restore_button->isEnabled();
             setting.SetGlobal(using_global);
             if (!using_global) {
                 setting.LoadString(serializer());
             }
-            if (require_checkbox) {
+            if (writes_other) {
                 other_setting->SetGlobal(using_global);
                 if (!using_global) {
                     other_setting->LoadString(checkbox_serializer());
