@@ -34,7 +34,7 @@ const ConnectionError ErrorManager::HOST_BANNED(
     QT_TR_NOOP("The host of the room has banned you. Speak with the host to unban you "
                "or try a different room."));
 const ConnectionError ErrorManager::WRONG_VERSION(
-    QT_TR_NOOP("Version mismatch! Please update to the latest version of Eden. If the problem "
+    QT_TR_NOOP("Version mismatch! Please update to the latest version of Anka. If the problem "
                "persists, contact the room host and ask them to update the server."));
 const ConnectionError ErrorManager::WRONG_PASSWORD(QT_TR_NOOP("Incorrect password."));
 const ConnectionError ErrorManager::GENERIC_ERROR(QT_TR_NOOP(

@@ -23,9 +23,9 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   with Nintendo. Upstream names, copyrights and licenses are unchanged.
 - Repository: https://github.com/EddizEge/Anka (branch `anka`, tag `anka-v1.0.0`).
 - A logo of its own: a phoenix rising, with flame wings and a flame crest, gold, orange and red
-  on a dark warm tile. `dist/anka.ico` is the program icon (16-256 px) and
-  `dist/qt_themes/default/icons/256x256/anka.png` the window and About image; both are made by
-  `dist/anka/anka_logo.py`.
+  on a dark warm tile. `dist/anka.ico` is the program and window icon (16-256 px),
+  `dist/qt_themes/default/icons/256x256/anka.png` the About image and `dist/anka.bmp` anka-cli's
+  window icon; all three are made by `dist/anka/anka_logo.py`.
 - Window titles: "Anka by EddizEge" (in a game: "Anka by EddizEge | <game> | <version> |
   <GPU>"; anka-cli: "Anka by EddizEge | <branch>-<desc>"). The About dialog says "Anka is an
   open-source Nintendo Switch 2 emulator for Windows, focused on performance.", links Source

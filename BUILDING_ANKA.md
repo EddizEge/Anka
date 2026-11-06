@@ -96,9 +96,9 @@ folder without LTO and with `-DYUZU_TESTS=ON`, build `tests` and run `bin/tests.
 ## Logo
 
 `python dist/anka/anka_logo.py` draws the logo again and writes `dist/anka.ico` (the program
-icon, 16-256 px) and `dist/qt_themes/default/icons/256x256/anka.png` (the window and About
-image). It needs Pillow (`pip install pillow`). Both files are in the tree, so a build does not
-need Python.
+and window icon, 16-256 px), `dist/qt_themes/default/icons/256x256/anka.png` (the About image)
+and `dist/anka.bmp` (anka-cli's window icon). It needs Pillow (`pip install pillow`). All three
+files are in the tree, so a build does not need Python.
 
 ## Profile-guided optimization (the release programs)
 

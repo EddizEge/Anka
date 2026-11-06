@@ -28,7 +28,7 @@ namespace Core::Nx2PerfSettings {
 enum class Preset : u8 {
     Recommended = 0, ///< start-recommended.bat: all on, Reactive Flushing off
     Reactive = 1,    ///< start-reactive-experimental.bat: all on, Reactive Flushing on, RX_RT_FIT=3
-    Safe = 2,        ///< start-safe.bat: all off, the per-draw shortcuts too (closest to 2.0.0)
+    Safe = 2,        ///< start-safe.bat: all off, and the shortcuts Anka keeps on set to 0
     Custom = 3,      ///< the boxes as set, nothing else
 };
 
@@ -51,7 +51,7 @@ constexpr Switches Recommended() {
     return Switches{};
 }
 
-/// Like 2.0.0 (start-safe.bat): none of the switches, and the per-draw shortcuts off.
+/// start-safe.bat's setup: none of the switches, and the per-draw shortcuts off.
 constexpr Switches AllOff() {
     return Switches{false, false, false, false, false, false, false, false, Preset::Safe};
 }

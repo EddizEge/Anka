@@ -84,7 +84,7 @@ klasörünü (kayıtlarınız) yedekleyin.**
 1. `Anka-1.0.0-win64.zip`'i PokeDinner-Eglantine 2.0.0 klasörüne, `eglantine.exe`'nin yanına
    açın. Hiçbir dosyanın üstüne yazılmaz: yeni programların kendi adları var, 2.0.0 eskisi gibi
    çalışmaya devam eder. Qt DLL'leri o klasörden gelir, zip'te yoktur.
-2. **`anka.exe`**'yi açın (pencere başlığı "Anka by EddizEge", ardından oyun / derleme bilgisi). 2.0.0'ın
+2. **`anka.exe`**'yi açın (pencere başlığı "Anka by EddizEge"; oyunda ardından oyunun adı, sürümü ve GPU). 2.0.0'ın
    `eglantine.exe`'siyle aynı kullanıcı klasörünü ve aynı `qt-config.ini`'yi kullanır; oyun
    listeniz (2.0.0'dakiyle aynı oyunlar), kumandanız ve ayarlarınız zaten oradadır.
 3. Ayarlar: **Emulation > Configure... > Anka**. İlk açılışta **Preset** kutusunda
@@ -429,8 +429,9 @@ gönderilmez. İçine alınan upstream commit'leri yazarlarıyla değişiklik g�
 
 Anka; Eden, Eglantine (Franseven'in PokeDinner çatalı), yuzu ve Sudachi üzerine kuruludur; onların
 telif ve emek kayıtları korunur. Bu projelerin resmî bir sürümü değildir. Menülü programın Hakkında
-penceresi de bunu söyler: "A Nintendo Switch 2 emulator for Windows, focused on performance" ve
-altta "Built on Eden and Eglantine (Franseven), yuzu and Sudachi".
+penceresi de bunu söyler: "Anka is an open-source Nintendo Switch 2 emulator for Windows, focused
+on performance." ve altta "Built on Eden and Eglantine (Franseven). Not an official release of those
+projects; please report Anka problems on its GitHub page, not to them."
 
 ## Lisans
 

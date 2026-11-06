@@ -228,8 +228,8 @@ echo.
 echo  [Anka] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
 echo            "%CDIR%".
 echo            Start anka.exe (or eglantine.exe) once and set up your controller there, then start this again.
-echo  [Anka] Henuz ayar yok: config\sdl2-config.ini de config\qt-config.ini de yok. eglantine.exe'yi
-echo            bir kez acip kumandanizi ayarlayin, sonra bunu yeniden baslatin.
+echo  [Anka] Henuz ayar yok: config\sdl2-config.ini de config\qt-config.ini de yok. anka.exe'yi (ya da
+echo            eglantine.exe'yi) bir kez acip kumandanizi ayarlayin, sonra bunu yeniden baslatin.
 echo.
 pause
 exit /b 1
