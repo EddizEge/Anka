@@ -64,6 +64,9 @@ void AddPendingGraphics(const PendingGraphics& pending);
 /// Whether graphics settings are waiting for the game to stop.
 bool HasPendingGraphics();
 
+/// The graphics settings waiting for the game to stop.
+const PendingGraphics& Pending();
+
 /// After the game stopped (MainWindow::OnEmulationStopped): writes the waiting graphics settings
 /// to the global settings. True when it wrote something: the caller saves the config.
 bool ApplyPendingGraphics();

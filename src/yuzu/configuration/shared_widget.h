@@ -101,6 +101,7 @@ public:
     QSpinBox* spinbox{};
     QDoubleSpinBox* double_spinbox{};
     QCheckBox* checkbox{};
+    QCheckBox* paired_checkbox{}; ///< The left checkbox of the paired bool setting (other_setting)
     QSlider* slider{};
     QComboBox* combobox{};
     QDateTimeEdit* date_time_edit{};

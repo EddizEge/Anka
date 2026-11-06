@@ -81,8 +81,13 @@ void ConfigureNx2Perf::RetranslateUI() {
 
 void ConfigureNx2Perf::SetConfiguration() {
     Show(UISettings::values.nx2perf);
-    frame_gen_shown = Nx2PerfSession::CurrentFrameGen();
+    // A choice waiting for the game to stop (Later) is shown, not the running game's setting
+    const auto waiting = Nx2PerfSession::Pending().frame_gen;
+    frame_gen_shown = waiting.value_or(Nx2PerfSession::CurrentFrameGen());
     ShowFrameGen();
+    if (Nx2PerfSession::HasPendingGraphics()) {
+        ShowPending();
+    }
 }
 
 Perf::Switches ConfigureNx2Perf::Current() const {
@@ -122,7 +127,8 @@ void ConfigureNx2Perf::ShowPreset() {
     case Perf::Preset::Safe:
         ui->preset_text->setText(tr("All settings below off, and the GPU shortcuts Anka keeps on by "
                                     "default off too (the variables start-safe.bat sets to 0). "
-                                    "Graphics settings stay as they are."));
+                                    "Frame generation off; other graphics settings such as "
+                                    "Reactive Flushing stay as they are."));
         break;
     case Perf::Preset::Custom:
         ui->preset_text->setText(tr("Your own choice of the settings below."));

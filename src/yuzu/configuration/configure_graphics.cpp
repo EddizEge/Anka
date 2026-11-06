@@ -343,13 +343,19 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         QCheckBox* const main_box =
             static_cast<ConfigurationShared::Widget*>(main_row->second)->checkbox;
         for (ConfigurationShared::Widget* const row : frame_gen_rows) {
-            QCheckBox* const box = row->checkbox;
+            // The left checkbox (for a bool row such as Auto Flow Scale, checkbox is its value)
+            QCheckBox* const box = row->paired_checkbox;
             if (main_box == nullptr || box == nullptr || box == main_box) {
                 continue;
             }
             box->setChecked(main_box->isChecked());
+            box->setEnabled(main_box->isEnabled());
             connect(main_box, &QCheckBox::toggled, box, &QCheckBox::setChecked);
-            connect(box, &QCheckBox::clicked, main_box, [main_box](bool checked) {
+            connect(box, &QCheckBox::clicked, main_box, [main_box, box](bool checked) {
+                if (!main_box->isEnabled()) { // a game runs: frame generation cannot change
+                    box->setChecked(main_box->isChecked());
+                    return;
+                }
                 if (main_box->isChecked() != checked) {
                     main_box->click();
                 }

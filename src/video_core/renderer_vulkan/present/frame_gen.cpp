@@ -311,7 +311,11 @@ size_t FrameGen::WantedGenerations(size_t capacity) {
         plan = {};
         return 0;
     }
-    plan = pacer.Plan(capacity, RefreshPeriod());
+    // The display refresh caps Dynamic (a target rate); not asked from Windows otherwise
+    const bool needs_refresh = Settings::values.frame_gen.GetValue() &&
+                               (Settings::values.frame_gen_target_rate.GetValue() > 0 ||
+                                timing.timed || timing.diag);
+    plan = pacer.Plan(capacity, needs_refresh ? RefreshPeriod() : 0.0f);
     return plan.generations;
 }
 

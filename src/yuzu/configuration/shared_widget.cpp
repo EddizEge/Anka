@@ -580,6 +580,7 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
     if (require_checkbox) {
         QWidget* lhs =
             CreateCheckBox(other_setting, label, checkbox_serializer, checkbox_restore_func, touch);
+        paired_checkbox = checkbox; // a bool setting's own checkbox replaces checkbox below
         layout->addWidget(lhs, 1);
     } else if (type_id != "bool") {
         QLabel* qt_label = CreateLabel(label);

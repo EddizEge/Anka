@@ -144,7 +144,8 @@ launchers from `dist/anka/` (`start-recommended.bat`, `start-reactive-experiment
 prepare the `.ini` files on the first start), an empty `Games` folder with its note
 (`dist/anka/Games/PUT-YOUR-GAMES-HERE.txt`), `README_ANKA.md`, `CHANGELOG_ANKA.md`,
 `BUILDING_ANKA.md`, `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_ANKA.txt` (the license
-texts and notices of the third-party components), `NOTICE_ANKA.txt`, `VERSION_ANKA.txt` and
+texts and notices of the third-party components), `QT_THIRD_PARTY_NOTICES.txt` (the third-party
+code inside the Qt DLLs, from Qt's SBOM), `NOTICE_ANKA.txt`, `VERSION_ANKA.txt` and
 `dist/nx2_switches.txt` as `nx2_switches_ANKA.txt` (a reference copy that no program reads under
 that name).
 `Anka-1.0.0-pdb.zip` holds the two programs' debug symbols. `Anka-1.0.0-source.zip` is
