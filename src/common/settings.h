@@ -509,11 +509,12 @@ struct Values {
     SwitchableSetting<u8, false> bg_blue{
                                          linkage, 0, "bg_blue", Category::Renderer, Specialization::Default, true, true};
 
+    // Anka: Low on desktop too (2.0.0: High), the setting it was measured with
     SwitchableSetting<GpuAccuracy, true> gpu_accuracy{linkage,
 #ifdef __ANDROID__
                                                       GpuAccuracy::Low,
 #else
-                                                      GpuAccuracy::High,
+                                                      GpuAccuracy::Low,
 #endif
                                                       "gpu_accuracy",
                                                       Category::RendererAdvanced,

@@ -59,9 +59,9 @@ In `anka.exe`: **Emulation > Configure... > Anka**. The **Preset** box at the to
 choices:
 
 - **Recommended** (the first start's choice): all eight settings on, Reactive Flushing off
-  (Graphics > Advanced). The setup we measured; the same as `start-recommended.bat`. On Anka's
-  first start it also turns Reactive Flushing off in `qt-config.ini` by itself; choosing
-  Recommended later turns it off as well.
+  (Graphics > Advanced). The setup we measured (with GPU Mode Fast, the default); the same as
+  `start-recommended.bat`. On Anka's first start it also turns Reactive Flushing off in
+  `qt-config.ini` by itself; choosing Recommended later turns it off as well.
 - **Recommended + Reactive Flushing**: all eight on, Reactive Flushing on, barrier feedback loops
   on (Graphics > Advanced; Reactive Flushing needs it) and `EDEN_NX2_RX_RT_FIT=3`. Experimental;
   the same as `start-reactive-experimental.bat`.
@@ -73,6 +73,10 @@ choices:
 
 Recommended was measured in Donkey Kong Bananza only. If another game shows image or speed
 problems, try Safe first and report it with the game's name.
+
+GPU Mode (GPU accuracy) starts at **Fast** (Low), as in newer Eden versions (2.0.0 started at
+Accurate, High, on desktop); our measurements used Fast. If a game shows image errors, set
+Graphics > Advanced > GPU Mode to Accurate for that game (its Properties) or globally.
 
 Below the presets, six settings apply to **all games** and two to **Donkey Kong Bananza only**
 (Dynamic frame rate and Frame pacing; off in other games). The settings are read once per

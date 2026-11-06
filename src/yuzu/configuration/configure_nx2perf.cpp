@@ -116,7 +116,8 @@ void ConfigureNx2Perf::ShowPreset() {
     switch (preset) {
     case Perf::Preset::Recommended:
         ui->preset_text->setText(tr("All settings on, Reactive Flushing off (Graphics, Advanced): "
-                                    "the setup Anka was measured with. Like start-recommended.bat."));
+                                    "the setup Anka was measured with (GPU Mode Fast, the default). Like "
+                                    "start-recommended.bat."));
         break;
     case Perf::Preset::Reactive:
         ui->preset_text->setText(

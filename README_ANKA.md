@@ -94,6 +94,10 @@ Settings: **Emulation > Configure... > Anka**. On the first start the preset is
 **Recommended**, the setup we measured, and Anka also turns *Enable Reactive Flushing* off in
 its `qt-config.ini` (Graphics > Advanced).
 
+GPU Mode (GPU accuracy) starts at **Fast** (Low), as in newer Eden versions (2.0.0 started at
+Accurate, High, on desktop); our measurements used Fast. If a game shows image errors, set
+Graphics > Advanced > GPU Mode to Accurate for that game (its Properties) or globally.
+
 ### The Anka tab
 
 At the top of the tab is a **Preset** box; a one-line description of the chosen preset is shown
@@ -101,7 +105,7 @@ under it.
 
 | Preset | What it sets | Same as |
 |---|---|---|
-| **Recommended** (the first start's choice) | all eight settings below on, *Enable Reactive Flushing* off (Graphics > Advanced): the setup we measured. Anka's first start also turns Reactive Flushing off in `qt-config.ini` by itself; choosing Recommended later turns it off too | `start-recommended.bat` |
+| **Recommended** (the first start's choice) | all eight settings below on, *Enable Reactive Flushing* off (Graphics > Advanced): the setup we measured (with GPU Mode Fast, the default). Anka's first start also turns Reactive Flushing off in `qt-config.ini` by itself; choosing Recommended later turns it off too | `start-recommended.bat` |
 | **Recommended + Reactive Flushing** | all eight on, Reactive Flushing on, barrier feedback loops on (Graphics > Advanced; Reactive Flushing needs it) and `EDEN_NX2_RX_RT_FIT=3`. Experimental: on our PC about 7% slower at the game's opening and about 15% faster in open areas ("Reactive flushing") | `start-reactive-experimental.bat` |
 | **Safe** | all eight off, Frame generation off, and the GPU shortcuts Anka keeps on by default off too (`EDEN_NX2_LIGHT_DRAW=0` and the rest of `start-safe.bat`'s list), in every game. Other graphics settings such as Reactive Flushing stay as they are; Anka's fixes and its changes without a switch stay in | `start-safe.bat` |
 | **Custom** | chosen by itself when you change a box by hand | - |

@@ -51,7 +51,8 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   RivaTuner. Donkey Kong Bananza only (off in other games): the dynamic frame rate and the
   frame pacing. They are kept in a new `[Anka]` group of `qt-config.ini`.
 - A **Preset** box at the top of the tab, with a line under it about the choice:
-  - Recommended: all eight on, Reactive Flushing (Graphics > Advanced) off: the measured setup,
+  - Recommended: all eight on, Reactive Flushing (Graphics > Advanced) off: the measured setup
+    (with GPU Mode Fast, the default),
     the same as `start-recommended.bat`. On Anka's first start (no `[Anka]` group yet) it is
     chosen and Reactive Flushing is turned off in `qt-config.ini`. Choosing it later turns
     Reactive Flushing off too.
@@ -98,6 +99,9 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   menu program was not measured: every number is from the program without menus.
 - The RTSS on-screen display (`OSD`) works in the menu program too (the writer moved from the
   SDL program to `frontend_common`).
+- GPU Mode (GPU accuracy) starts at **Fast** (Low), as in newer Eden versions (2.0.0 started at
+  Accurate, High, on desktop); our measurements used Fast. If a game shows image errors, set
+  Graphics > Advanced > GPU Mode to Accurate for that game (its Properties) or globally.
 - Fix: the Graphics tab saved *Enable Frame Generation* as off when the checkbox of one of
   frame generation's sub-settings (Queue Target, for example) was unchecked; now only *Enable
   Frame Generation* decides, in the global and the per-game settings.
