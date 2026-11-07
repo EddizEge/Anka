@@ -388,6 +388,14 @@ TEST_CASE("Anka route: the starting program's switches are not passed on", "[yuz
     REQUIRE(ClearedForSecondCore("EDEN_CLI_RESTART_HANDOFF"));
     REQUIRE(ClearedForSecondCore("__GL_SHADER_DISK_CACHE"));
     REQUIRE(ClearedForSecondCore("__GL_SHADER_DISK_CACHE_PATH"));
+    // Windows' variable names have no case
+    REQUIRE(ClearedForSecondCore("eden_nx2_x"));
+    REQUIRE(ClearedForSecondCore("Eden_Nx2_Osd"));
+    REQUIRE(ClearedForSecondCore("__gl_shader_disk_cache_path"));
+    static_assert(ClearedForSecondCore("eden_cli_restart_handoff"));
+    REQUIRE_FALSE(ClearedForSecondCore("eden"));
+    REQUIRE_FALSE(ClearedForSecondCore("anka_user_dir"));
+    REQUIRE_FALSE(ClearedForSecondCore("__gl_threaded_optimizations"));
     REQUIRE_FALSE(ClearedForSecondCore("ANKA_USER_DIR"));
     REQUIRE_FALSE(ClearedForSecondCore("PATH"));
     REQUIRE_FALSE(ClearedForSecondCore("XEDEN_NX2"));

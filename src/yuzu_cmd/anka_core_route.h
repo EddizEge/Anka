@@ -205,9 +205,16 @@ std::vector<std::pair<std::string, std::string>> SecondCoreEnv(
 /// Variables of the starting program's environment the second core does not get: Anka's switches
 /// and the fork's diagnostics (EDEN_*; a launcher of the main core sets dozens) and the NVIDIA
 /// driver's shader cache settings (__GL_SHADER_DISK_CACHE*), as the second core's own test
-/// launchers clear them. Its own (PlanSecondCore's) are set afterwards.
+/// launchers clear them. Its own (PlanSecondCore's) are set afterwards. Any case: Windows reads
+/// "eden_nx2_x" as EDEN_NX2_X.
 constexpr bool ClearedForSecondCore(std::string_view name) {
-    return name.starts_with("EDEN_") || name.starts_with("__GL_SHADER_DISK_CACHE");
+    const auto starts_with = [name](std::string_view prefix) {
+        return name.size() >= prefix.size() &&
+               std::equal(prefix.begin(), prefix.end(), name.begin(), [](char p, char c) {
+                   return p == (c >= 'a' && c <= 'z' ? char(c - 'a' + 'A') : c);
+               });
+    };
+    return starts_with("EDEN_") || starts_with("__GL_SHADER_DISK_CACHE");
 }
 
 struct Launch {
