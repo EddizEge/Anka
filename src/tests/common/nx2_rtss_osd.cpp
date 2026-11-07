@@ -307,7 +307,7 @@ TEST_CASE("Nx2RtssOsd: the rates over the window", "[common]") {
     REQUIRE(r.game_fps == 34.0);
     REQUIRE(r.display_fps == 120.0);
     REQUIRE(r.speed.has_value());
-    REQUIRE(*r.speed > 0.9799 && *r.speed < 0.9801);
+    REQUIRE((*r.speed > 0.9799 && *r.speed < 0.9801));
     // Frame generation never ran: no multiplier, the text as before.
     REQUIRE_FALSE(r.multiplier.has_value());
     REQUIRE(Format(r) == "Game 34.0 FPS | Display 120 FPS | Speed 98%");

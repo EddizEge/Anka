@@ -225,7 +225,7 @@ TEST_CASE("Nx2RegReplica: A -> B -> A within a record", "[video_core]") {
     Deliver(setup, capture, replica, 0);
     Deliver(setup, again, stripped, DeltaDirty | DeltaChanged);
     REQUIRE(Differences(reference, replica) == 0);
-    REQUIRE(replica.flags[7] && replica.flags[9] && replica.changes == (1U << 3));
+    REQUIRE((replica.flags[7] && replica.flags[9] && replica.changes == (1U << 3)));
     REQUIRE(Differences(reference, stripped) == 2);
 }
 

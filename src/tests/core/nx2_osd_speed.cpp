@@ -59,7 +59,7 @@ TEST_CASE("Nx2OsdSpeed: speeds at steady frame rates", "[core]") {
     REQUIRE(speed(true, 0, 50'000) == 41'667.0 / 50'000); // 20 fps: 83%
     REQUIRE(speed(false, 2, 33'333) == 1.0);              // 30 mode at 30 fps
     const double slow = speed(false, 2, 40'000);          // 30 mode at 25 fps
-    REQUIRE(slow > 0.8333 && slow < 0.8334);
+    REQUIRE((slow > 0.8333 && slow < 0.8334));
 }
 
 TEST_CASE("Nx2OsdSpeed: nothing counted without an estimate", "[core]") {

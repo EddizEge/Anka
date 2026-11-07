@@ -417,7 +417,7 @@ TEST_CASE("Nx2ModePace21: probes", "[video_core]") {
     const Fed fed = Feed(ctl, 3, 40.0, 20 * 25);
     REQUIRE(fed.Starts() >= 1);
     for (const Output21& o : fed.outs) {
-        REQUIRE(o.started == Push21::None || o.by_probe);
+        REQUIRE((o.started == Push21::None || o.by_probe));
         if (o.ended != Push21::None) {
             REQUIRE(o.fails == 0); // probes leave the rests alone
         }
