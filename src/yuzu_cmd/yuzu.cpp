@@ -267,6 +267,72 @@ struct SdlState {
     Nx2Osd::WriterPtr osd;
 };
 
+#ifdef _WIN32
+// CreateProcessW with only this program's standard handles inherited (its console, or the pipe
+// or file a caller redirected it to): bInheritHandles=TRUE alone would also hand the second core
+// every inheritable handle this program holds (files it opened), open for as long as it runs.
+static bool StartWithStandardHandles(const std::filesystem::path& program, std::wstring& command,
+                                     const std::filesystem::path& working_dir,
+                                     PROCESS_INFORMATION& process) {
+    std::array<HANDLE, 3> standard{};
+    std::vector<HANDLE> inherited;
+    const std::array<DWORD, 3> ids{STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        const HANDLE own = GetStdHandle(ids[i]);
+        // Inheritable copies: the list takes only inheritable handles, and each one once
+        if (own != nullptr && own != INVALID_HANDLE_VALUE &&
+            DuplicateHandle(GetCurrentProcess(), own, GetCurrentProcess(), &standard[i], 0, TRUE,
+                            DUPLICATE_SAME_ACCESS)) {
+            inherited.push_back(standard[i]);
+        } else {
+            standard[i] = nullptr;
+        }
+    }
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    std::vector<char> list_memory;
+    LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
+    if (!inherited.empty()) {
+        SIZE_T bytes = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+        list_memory.resize(bytes);
+        list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(list_memory.data());
+        if (!InitializeProcThreadAttributeList(list, 1, 0, &bytes)) {
+            list = nullptr;
+        } else if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                              inherited.data(), inherited.size() * sizeof(HANDLE),
+                                              nullptr, nullptr)) {
+            DeleteProcThreadAttributeList(list);
+            list = nullptr;
+        }
+    }
+    if (list != nullptr) {
+        startup.StartupInfo.cb = sizeof(STARTUPINFOEXW);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = standard[0];
+        startup.StartupInfo.hStdOutput = standard[1];
+        startup.StartupInfo.hStdError = standard[2];
+        startup.lpAttributeList = list;
+    } else {
+        // No list: nothing inherited; a console child still writes to the shared console
+        startup.StartupInfo.cb = sizeof(STARTUPINFOW);
+    }
+    const BOOL started =
+        CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, list != nullptr,
+                       list != nullptr ? EXTENDED_STARTUPINFO_PRESENT : 0, nullptr,
+                       working_dir.c_str(), &startup.StartupInfo, &process);
+    const DWORD error = GetLastError();
+    if (list != nullptr) {
+        DeleteProcThreadAttributeList(list);
+    }
+    for (const HANDLE handle : inherited) {
+        CloseHandle(handle);
+    }
+    SetLastError(error);
+    return started != FALSE;
+}
+#endif
+
 // Anka 1.1: one game runs on Anka's second core, a program next to this one
 // (anka_core_route.h). This program writes its settings, starts it with the same game and full
 // screen choice, waits, restarts it after exit 75 and returns its exit code. Empty: not that game.
@@ -365,14 +431,11 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
             _wputenv_s(Common::UTF8ToUTF16W(name).c_str(), Common::UTF8ToUTF16W(value).c_str());
         }
         std::wstring command = Common::UTF8ToUTF16W(WindowsCommandLine(launch.program, launch.args));
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
         PROCESS_INFORMATION process{};
         LOG_INFO(Frontend, "Second core: {}{}", Common::UTF16ToUTF8(command),
                  restart ? " (restart handoff)" : "");
         Common::Log::Stop();
-        if (!CreateProcessW(launch.program.c_str(), command.data(), nullptr, nullptr, TRUE, 0,
-                            nullptr, launch.working_dir.c_str(), &startup, &process)) {
+        if (!StartWithStandardHandles(launch.program, command, launch.working_dir, process)) {
             LOG_CRITICAL(Frontend, "Anka's second core could not be started (error {})",
                          GetLastError());
             return 1;

@@ -2907,6 +2907,19 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         env.insert(QString::fromStdString(name), QString::fromStdString(value));
     }
     process.setProcessEnvironment(env);
+#ifdef _WIN32
+    // As Nx2PerfSession's restart: Qt passes bInheritHandles=TRUE, and the second core would keep
+    // this program's inheritable handles (its log file, saves, game files) open; closing and
+    // opening the menu again found its log locked. Nor the standard handles Qt names
+    // (STARTF_USESTDHANDLES): not inherited, they would be invalid or someone else's there.
+    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->inheritHandles = false;
+        args->startupInfo->dwFlags &= ~STARTF_USESTDHANDLES;
+        args->startupInfo->hStdInput = nullptr;
+        args->startupInfo->hStdOutput = nullptr;
+        args->startupInfo->hStdError = nullptr;
+    });
+#endif
     qint64 pid = 0;
     if (!process.startDetached(&pid)) {
         QMessageBox::warning(this, tr("Anka"),
