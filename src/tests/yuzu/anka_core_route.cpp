@@ -429,10 +429,26 @@ TEST_CASE("Anka route: Reactive Flushing always off on the second core", "[yuzu]
         REQUIRE(key > section);
         REQUIRE(ini.find("\n[", section + 1) > key);
     }
+    // Barrier feedback loops always on there (its default; the main core's Recommended turns them
+    // off), in [Renderer] as well
+    for (const auto& config :
+         {with("barrier_feedback_loops\\default=false\nbarrier_feedback_loops=false\n"),
+          with("barrier_feedback_loops\\default=false\nbarrier_feedback_loops=true\n"),
+          with("barrier_feedback_loops\\default=true\nbarrier_feedback_loops=true\n"), base}) {
+        const auto ini = MakeSecondCoreIni(config, State(true));
+        REQUIRE(Has(ini, "barrier_feedback_loops\\default=false"));
+        REQUIRE(Has(ini, "barrier_feedback_loops=true"));
+        REQUIRE_FALSE(Has(ini, "barrier_feedback_loops=false"));
+        const auto section = ini.find(renderer);
+        const auto key = ini.find("barrier_feedback_loops=");
+        REQUIRE(key > section);
+        REQUIRE(ini.find("\n[", section + 1) > key);
+    }
     // A file without [Renderer] gets one
     const auto ini = MakeSecondCoreIni("[System]\nuse_docked_mode=1\n", State(true));
     REQUIRE(Has(ini, "[Renderer]"));
     REQUIRE(Has(ini, "use_reactive_flushing=false"));
+    REQUIRE(Has(ini, "barrier_feedback_loops=true"));
 }
 
 TEST_CASE("Anka route: unchanged AA, filter and ASTC stay the second core's",

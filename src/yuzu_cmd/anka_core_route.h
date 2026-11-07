@@ -511,8 +511,8 @@ inline void KeepSecondCoreAddOn(Section& section) {
 /// - [System] use_docked_mode always the starting program's (the second core's default differs);
 /// - [Data%20Storage] the paths in use, the second core writing them back as absolute paths;
 /// - [DisabledAddOns] without the frame rate patch its game needs on;
-/// - [Renderer] use_reactive_flushing always off, whatever the preset wrote: the second core was
-///   only ever tested so;
+/// - [Renderer] use_reactive_flushing always off and barrier_feedback_loops always on (its default),
+///   whatever the preset wrote: the second core was only ever tested so;
 /// - no setting only the second core has.
 /// anti_aliasing / scaling_filter / astc_recompression go over as they are: left at the
 /// default (`\default=true`) the second core keeps its own (FXAA, ScaleForce, BC3).
@@ -529,6 +529,7 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
     }
     SetKey(SectionNamed(sections, "System"), "use_docked_mode", state.docked ? "1" : "0");
     SetKey(SectionNamed(sections, "Renderer"), "use_reactive_flushing", "false");
+    SetKey(SectionNamed(sections, "Renderer"), "barrier_feedback_loops", "true");
     if (!state.data_storage.empty()) {
         auto& storage = SectionNamed(sections, "Data%20Storage");
         for (const auto& [key, value] : state.data_storage) {
