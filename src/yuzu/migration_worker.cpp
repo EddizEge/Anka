@@ -10,6 +10,14 @@
 #include <boost/algorithm/string/replace.hpp>
 
 #include "common/fs/path_util.h"
+#include "yuzu/migration_plan.h"
+
+static_assert(static_cast<int>(MigrationWorker::MigrationStrategy::Copy) ==
+              static_cast<int>(MigrationPlan::Strategy::Copy));
+static_assert(static_cast<int>(MigrationWorker::MigrationStrategy::Move) ==
+              static_cast<int>(MigrationPlan::Strategy::Move));
+static_assert(static_cast<int>(MigrationWorker::MigrationStrategy::Link) ==
+              static_cast<int>(MigrationPlan::Strategy::Link));
 
 MigrationWorker::MigrationWorker(const Emulator selected_emu_, const bool clear_shader_cache_,
                                  const MigrationStrategy strategy_)
@@ -35,83 +43,101 @@ void MigrationWorker::process() {
     cache_dir.make_preferred();
     shader_dir.make_preferred();
 
+    // The data folder is replaced only while it holds nothing of the user's: a portable `user`
+    // folder with keys, saves or games in it is never removed (yuzu/migration_plan.h).
+    const MigrationPlan::Target target = MigrationPlan::Classify(eden_dir);
+    if (!MigrationPlan::MayReplace(target)) {
+        emit error(tr("Nothing was migrated: %1 already holds data (or could not be read), and "
+                      "the migration would replace it.\nMove its contents away first, or copy the "
+                      "old data into it by hand.")
+                       .arg(QString::fromStdString(eden_dir.string())));
+        return;
+    }
     try {
         fs::remove_all(eden_dir);
     } catch (fs::filesystem_error& _) {
         // directory may not exist at this point, that's fine
     }
 
-    switch (strategy) {
-    case MigrationStrategy::Link:
-        // Create symlinks/directory junctions if requested
+    // A failed copy or move (fs::rename cannot move a folder to another drive) stops here; the
+    // old data is where it was.
+    try {
+        switch (strategy) {
+        case MigrationStrategy::Link:
+            // Create symlinks/directory junctions if requested
 
-        // Windows 11 has random permission nonsense to deal with.
-        try {
-            Common::FS::CreateSymlink(legacy_user_dir, eden_dir);
-        } catch (const fs::filesystem_error& e) {
-            emit error(tr("Linking the old directory failed. You may need to re-run with "
-                          "administrative privileges on Windows.\nOS gave error: %1")
-                           .arg(tr(e.what())));
-            std::exit(-1);
-        }
+            // Windows 11 has random permission nonsense to deal with.
+            try {
+                Common::FS::CreateSymlink(legacy_user_dir, eden_dir);
+            } catch (const fs::filesystem_error& e) {
+                emit error(tr("Linking the old directory failed. You may need to re-run with "
+                              "administrative privileges on Windows.\nOS gave error: %1")
+                               .arg(tr(e.what())));
+                return; // the error is shown (user_data_migration.cpp), no longer std::exit(-1)
+            }
 
-        // Windows doesn't need any more links, because cache and config
-        // are already children of the root directory
+            // Windows doesn't need any more links, because cache and config
+            // are already children of the root directory
 #ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            Common::FS::CreateSymlink(legacy_config_dir, config_dir);
-        }
+            if (fs::is_directory(legacy_config_dir)) {
+                Common::FS::CreateSymlink(legacy_config_dir, config_dir);
+            }
 
-        if (fs::is_directory(legacy_cache_dir)) {
-            Common::FS::CreateSymlink(legacy_cache_dir, cache_dir);
-        }
+            if (fs::is_directory(legacy_cache_dir)) {
+                Common::FS::CreateSymlink(legacy_cache_dir, cache_dir);
+            }
 #endif
 
-        success_text.append(tr("\n\nNote that your configuration and data will be shared with %1.\n"
-                               "If this is not desirable, delete the following files:\n%2\n%3\n%4")
-                                .arg(selected_emu.name(), QString::fromStdString(eden_dir.string()),
-                                     QString::fromStdString(config_dir.string()),
-                                     QString::fromStdString(cache_dir.string())));
+            success_text.append(tr("\n\nNote that your configuration and data will be shared with %1.\n"
+                                   "If this is not desirable, delete the following files:\n%2\n%3\n%4")
+                                    .arg(selected_emu.name(), QString::fromStdString(eden_dir.string()),
+                                         QString::fromStdString(config_dir.string()),
+                                         QString::fromStdString(cache_dir.string())));
 
-        break;
-    case MigrationStrategy::Move:
-        // Rename directories if deletion is requested (achieves the same result)
-        fs::rename(legacy_user_dir, eden_dir);
+            break;
+        case MigrationStrategy::Move:
+            // Rename directories if deletion is requested (achieves the same result)
+            fs::rename(legacy_user_dir, eden_dir);
 
-        // Windows doesn't need any more renames, because cache and config
-        // are already children of the root directory
+            // Windows doesn't need any more renames, because cache and config
+            // are already children of the root directory
 #ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            fs::rename(legacy_config_dir, config_dir);
-        }
+            if (fs::is_directory(legacy_config_dir)) {
+                fs::rename(legacy_config_dir, config_dir);
+            }
 
-        if (fs::is_directory(legacy_cache_dir)) {
-            fs::rename(legacy_cache_dir, cache_dir);
-        }
+            if (fs::is_directory(legacy_cache_dir)) {
+                fs::rename(legacy_cache_dir, cache_dir);
+            }
 #endif
-        break;
-    case MigrationStrategy::Copy:
-    default:
-        // Default behavior: copy
-        fs::copy(legacy_user_dir, eden_dir, copy_options);
+            break;
+        case MigrationStrategy::Copy:
+        default:
+            // Default behavior: copy
+            fs::copy(legacy_user_dir, eden_dir, copy_options);
 
-        // Windows doesn't need any more copies, because cache and config
-        // are already children of the root directory
+            // Windows doesn't need any more copies, because cache and config
+            // are already children of the root directory
 #ifndef WIN32
-        if (fs::is_directory(legacy_config_dir)) {
-            fs::copy(legacy_config_dir, config_dir, copy_options);
-        }
+            if (fs::is_directory(legacy_config_dir)) {
+                fs::copy(legacy_config_dir, config_dir, copy_options);
+            }
 
-        if (fs::is_directory(legacy_cache_dir)) {
-            fs::copy(legacy_cache_dir, cache_dir, copy_options);
-        }
+            if (fs::is_directory(legacy_cache_dir)) {
+                fs::copy(legacy_cache_dir, cache_dir, copy_options);
+            }
 #endif
 
-        success_text.append(tr("\n\nIf you wish to clean up the files which were left in the old "
-                               "data location, you can do so by deleting the following directory:\n"
-                               "%1")
-                                .arg(QString::fromStdString(legacy_user_dir.string())));
-        break;
+            success_text.append(tr("\n\nIf you wish to clean up the files which were left in the old "
+                                   "data location, you can do so by deleting the following directory:\n"
+                                   "%1")
+                                    .arg(QString::fromStdString(legacy_user_dir.string())));
+            break;
+        }
+    } catch (const fs::filesystem_error& e) {
+        emit error(tr("Migrating from %1 failed; the old data was not removed.\nOS gave error: %2")
+                       .arg(selected_emu.name(), QString::fromLocal8Bit(e.what())));
+        return;
     }
 
     // Delete and re-create shader dir

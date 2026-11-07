@@ -223,6 +223,7 @@ add_executable(yuzu
     yuzu.rc
     migration_dialog.h migration_dialog.cpp
     migration_worker.h migration_worker.cpp
+    migration_plan.h
     libqt_common.h libqt_common.cpp
 
     deps_dialog.cpp deps_dialog.h deps_dialog.ui

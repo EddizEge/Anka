@@ -9,10 +9,13 @@
 #include <QPushButton>
 #include <QString>
 #include <QTranslator>
+#include "common/fs/fs.h"
+#include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "qt_common/qt_string_lookup.h"
 #include "user_data_migration.h"
 #include "yuzu/migration_dialog.h"
+#include "yuzu/migration_plan.h"
 
 // Needs to be included at the end due to https://bugreports.qt.io/browse/QTBUG-73263
 #include <filesystem>
@@ -35,9 +38,29 @@ UserDataMigrator::UserDataMigrator(QMainWindow* main_window) {
     }
 }
 
+namespace {
+
+// The data folder is the `user` folder next to the program (Anka's package ships one).
+bool IsPortable() {
+    namespace fs = std::filesystem;
+#ifdef _WIN32
+    const fs::path portable = Common::FS::GetExeDirectory() / PORTABLE_DIR;
+#else
+    const fs::path portable = Common::FS::GetCurrentDir() / PORTABLE_DIR;
+#endif
+    std::error_code ec;
+    return fs::equivalent(Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir), portable, ec);
+}
+
+} // Anonymous namespace
+
 void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
     namespace fs = std::filesystem;
     using namespace QtCommon::StringLookup;
+
+    // Portable: only a copy, the shader cache kept by default (yuzu/migration_plan.h)
+    const bool portable = IsPortable();
+    const MigrationPlan::Choices choices = MigrationPlan::ChoicesFor(portable);
 
     MigrationDialog migration_prompt;
     migration_prompt.setWindowTitle(QObject::tr("Migration"));
@@ -55,7 +78,7 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
     migration_prompt.addBox(name);
 
     BUTTON(QCheckBox, clear_shaders, QObject::tr("Clear Shader Cache"), MigrationTooltipClearShader,
-           true)
+           choices.clear_shader_cache)
 
 #define RADIO(name, text, tooltip, checkState, strategy)                                           \
     BUTTON(QRadioButton, name, text, tooltip, checkState)                                          \
@@ -67,6 +90,15 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 
 #undef RADIO
 #undef BUTTON
+
+    if (!choices.move) {
+        group->removeButton(clear_old);
+        clear_old->hide();
+    }
+    if (!choices.link) {
+        group->removeButton(link_old);
+        link_old->hide();
+    }
 
     std::vector<Emulator> found{};
 
@@ -107,8 +139,8 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
         return ShowMigrationCancelledMessage(main_window);
     }
 
-    MigrationWorker::MigrationStrategy strategy =
-        static_cast<MigrationWorker::MigrationStrategy>(group->checkedId());
+    const auto strategy = static_cast<MigrationWorker::MigrationStrategy>(
+        MigrationPlan::FromButton(group->checkedId(), portable));
 
     selected_emu = button->property("emulator").value<Emulator>();
 
@@ -150,7 +182,18 @@ void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clea
                         thread->quit();
                     });
 
+    // Nothing was removed or the old data stayed where it was: no migration, the prompt comes back
+    // at the next start while the config folder is missing.
+    thread->connect(worker, &MigrationWorker::error, progress,
+                    [=](const QString& error_message) {
+                        progress->close();
+                        QMessageBox::warning(main_window, QObject::tr("Migration"), error_message,
+                                             QMessageBox::Ok);
+                        thread->quit();
+                    });
+
     thread->connect(worker, &MigrationWorker::finished, worker, &QObject::deleteLater);
+    thread->connect(worker, &MigrationWorker::error, worker, &QObject::deleteLater);
     thread->connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
     thread->start();
