@@ -8,6 +8,7 @@
 #undef VMA_IMPLEMENTATION
 #endif
 
+#include <cstdlib>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/settings.h"
@@ -311,7 +312,9 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
 constexpr int default_mouse_hide_timeout = 2500;
-constexpr int default_input_update_timeout = 1;
+// SDL and the input engines are pumped from the GUI thread. yuzu_cmd does it 240 times a second;
+// every millisecond woke the GUI thread 1000 times a second for as long as the program ran.
+constexpr int default_input_update_timeout = 4;
 
 constexpr size_t CopyBufferSize = 1_MiB;
 
@@ -472,7 +475,16 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     connect(&mouse_hide_timer, &QTimer::timeout, this, &MainWindow::HideMouseCursor);
     connect(ui->menubar, &QMenuBar::hovered, this, &MainWindow::ShowMouseCursor);
 
-    update_input_timer.setInterval(default_input_update_timeout);
+    // EDEN_NX2_QT_INPUT_MS=<1-16>: another pump interval (1 is the earlier one), for A/B runs.
+    int input_update_timeout = default_input_update_timeout;
+    if (const char* text = std::getenv("EDEN_NX2_QT_INPUT_MS")) {
+        const int ms = std::atoi(text);
+        if (ms >= 1 && ms <= 16) {
+            input_update_timeout = ms;
+            LOG_INFO(Frontend, "Input pumped every {} ms (EDEN_NX2_QT_INPUT_MS)", ms);
+        }
+    }
+    update_input_timer.setInterval(input_update_timeout);
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
     update_input_timer.start();
 
