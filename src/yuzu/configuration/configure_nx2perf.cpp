@@ -9,6 +9,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QLabel>
+#include <QPalette>
 #include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QStringList>
@@ -27,24 +29,29 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
 
     using S = Perf::Switches;
     rows = {
-        {ui->split_gpu_thread, &S::split_gpu_thread, {"EDEN_NX2_BACK_STAGES", "EDEN_NX2_BACK_CUTS"}},
-        {ui->acquire_peek, &S::acquire_peek, {"EDEN_NX2_ACQUIRE_PEEK"}},
-        {ui->jit_same, &S::jit_same, {"EDEN_NX2_JIT_SAME"}},
-        {ui->front_macro_lean, &S::front_macro_lean, {"EDEN_NX2_FRONT_MACRO_LEAN"}},
-        {ui->fg_timed, &S::fg_timed, {"EDEN_NX2_FG_TIMED"}},
-        {ui->osd, &S::osd, {"EDEN_NX2_OSD"}},
-        {ui->dk_dyn, &S::dk_dyn, {"EDEN_NX2_DK_DYN"}},
+        {ui->split_gpu_thread,
+         ui->split_gpu_thread_text,
+         &S::split_gpu_thread,
+         {"EDEN_NX2_BACK_STAGES", "EDEN_NX2_BACK_CUTS"}},
+        {ui->acquire_peek, ui->acquire_peek_text, &S::acquire_peek, {"EDEN_NX2_ACQUIRE_PEEK"}},
+        {ui->jit_same, ui->jit_same_text, &S::jit_same, {"EDEN_NX2_JIT_SAME"}},
+        {ui->front_macro_lean,
+         ui->front_macro_lean_text,
+         &S::front_macro_lean,
+         {"EDEN_NX2_FRONT_MACRO_LEAN"}},
+        {ui->fg_timed, ui->fg_timed_text, &S::fg_timed, {"EDEN_NX2_FG_TIMED"}},
+        {ui->osd, ui->osd_text, &S::osd, {"EDEN_NX2_OSD"}},
+        {ui->dk_dyn, ui->dk_dyn_text, &S::dk_dyn, {"EDEN_NX2_DK_DYN"}},
         {ui->dk_pacing,
+         ui->dk_pacing_text,
          &S::dk_pacing,
          {"EDEN_NX2_PRESENT_INTERVAL_WORD", "EDEN_NX2_MODE_PACE", "EDEN_NX2_PACE_SPIN_US"}},
     };
 
     SetConfiguration();
     MarkSetOutside();
-    // A preset's own variables reach the second core only where its table says
-    if constexpr (AnkaCoreRoute::SecondCorePresetVars.empty()) {
-        ui->preset->setToolTip(tr(AnkaCoreRoute::Text::PresetOnSecondCore));
-    }
+    ShowSecondCoreNotes();
+    ui->preset->setToolTip(tr(AnkaCoreRoute::Text::PresetOnSecondCore));
 
     // The preset's item order is Perf::Preset's (configure_nx2perf.ui).
     connect(ui->preset, &QComboBox::activated, this,
@@ -83,7 +90,9 @@ void ConfigureNx2Perf::RetranslateUI() {
     ShowPreset();
     ShowFrameGen();
     MarkSetOutside();
+    // The notes go under the texts as they are now, the conflict's line included
     ShowDkDynConflict();
+    ShowSecondCoreNotes();
 }
 
 void ConfigureNx2Perf::ShowDkDynConflict() {
@@ -286,11 +295,25 @@ void ConfigureNx2Perf::MarkSetOutside() {
                       "The box sets the rest.")
                        .arg(outside.join(QStringLiteral(", ")));
         }
-        // The second core takes only the settings its table has (yuzu_cmd/anka_core_route.h)
-        if (!AnkaCoreRoute::ReachesSecondCore(KeyName(row.field))) {
-            tip << tr(AnkaCoreRoute::Text::MainCoreOnly);
-        }
         row.box->setToolTip(tip.join(QStringLiteral("\n\n")));
+    }
+}
+
+void ConfigureNx2Perf::ShowSecondCoreNotes() {
+    // The second core takes only the settings its table has (yuzu_cmd/anka_core_route.h). A quiet
+    // line under the text, in the placeholder colour: a fact about the other core, not a warning,
+    // and the box stays usable (every setting applies on the main core).
+    const QString colour = palette().color(QPalette::PlaceholderText).name();
+    for (const Row& row : rows) {
+        if (AnkaCoreRoute::ReachesSecondCore(KeyName(row.field))) {
+            continue;
+        }
+        const QString text =
+            row.text->text().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+        row.text->setTextFormat(Qt::RichText);
+        row.text->setText(QStringLiteral("%1<br><span style=\"color:%2\">%3</span>")
+                              .arg(text, colour,
+                                   tr(AnkaCoreRoute::Text::NoEffectOnSecondCore).toHtmlEscaped()));
     }
 }
 

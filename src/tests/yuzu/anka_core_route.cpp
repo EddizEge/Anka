@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -10,13 +11,35 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/nx2_perf_settings.h"
 #include "yuzu_cmd/anka_core_route.h"
 
 namespace {
 
 namespace fs = std::filesystem;
+namespace Perf = Core::Nx2PerfSettings;
 using namespace AnkaCoreRoute;
 using Env = std::vector<std::pair<std::string, std::string>>;
+
+constexpr int Recommended = static_cast<int>(Perf::Preset::Recommended);
+
+// The second core's variables for the Anka tab's boxes and preset, as the menu asks for them
+Env EnvFor(const Perf::Switches& switches) {
+    return SecondCoreEnv(
+        [&switches](std::string_view name) {
+            for (const auto& key : Perf::Keys) {
+                if (key.name == name) {
+                    return switches.*key.field;
+                }
+            }
+            return false;
+        },
+        static_cast<int>(switches.preset));
+}
+
+Env EnvFor(Perf::Preset preset) {
+    return EnvFor(Perf::FromPreset(preset, Perf::Recommended()));
+}
 
 constexpr std::uint64_t Bananza = 0x040074A01BF12000ULL;
 
@@ -128,7 +151,7 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     const std::array texts{Text::Starting,      Text::Closed,         Text::StillRunning,
                            Text::StopRunningFirst, Text::PropertiesNote, Text::Missing,
                            Text::IniNotWritten, Text::NotStarted,     Text::StartFailed,
-                           Text::AlreadyRunning, Text::Crashed,       Text::MainCoreOnly,
+                           Text::AlreadyRunning, Text::Crashed, Text::NoEffectOnSecondCore,
                            Text::PresetOnSecondCore};
     for (const std::string_view text : texts) {
         REQUIRE(text.find("Zelda") == std::string_view::npos);
@@ -140,6 +163,7 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
         "Another game is still running on Anka's second core"));
     REQUIRE(std::string_view{Text::PropertiesNote} ==
             "These settings have no effect on this game's core.");
+    REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "Anka's second core: no effect");
 }
 
 TEST_CASE("Anka route: the second core in the package", "[yuzu][anka_route]") {
@@ -203,23 +227,122 @@ TEST_CASE("Anka route: the settings table gives the second core's variables",
     REQUIRE_FALSE(ReachesSecondCore("bananza_dynamic_fps", table));
 }
 
-TEST_CASE("Anka route: the main core's settings do not reach the second core",
+TEST_CASE("Anka route: only OSD and timed frame generation reach the second core",
           "[yuzu][anka_route]") {
-    // The Anka tab's keys (Core::Nx2PerfSettings::Keys): none in the table until its contract
+    REQUIRE(ReachesSecondCore("osd"));
+    REQUIRE(ReachesSecondCore("fg_timed"));
+    // No counterpart there: the tab marks them, they set nothing
     for (const std::string_view key :
-         {"split_gpu_thread", "acquire_peek", "jit_same", "front_macro_lean", "fg_timed", "osd",
+         {"split_gpu_thread", "acquire_peek", "jit_same", "front_macro_lean",
           "bananza_dynamic_fps", "bananza_frame_pacing"}) {
         REQUIRE_FALSE(ReachesSecondCore(key));
+        REQUIRE(SecondCoreEnv([key](std::string_view k) { return k == key; }, Recommended)
+                    .empty());
     }
-    // Every box on, every preset: no variable
+    // Every table key is one of the Anka tab's
+    for (const auto& setting : SecondCoreSettings) {
+        REQUIRE(std::any_of(Perf::Keys.begin(), Perf::Keys.end(),
+                            [&](const Perf::Key& key) { return key.name == setting.key; }));
+    }
+}
+
+TEST_CASE("Anka route: each preset's variables on the second core", "[yuzu][anka_route]") {
+    const Env boxes{{"EDEN_NX2_FG_TIMED", "1"}, {"EDEN_NX2_OSD", "1"}};
+    REQUIRE(EnvFor(Perf::Preset::Recommended) == boxes);
+    // Reactive: as Recommended (RX_RT_FIT has no reader there)
+    REQUIRE(EnvFor(Perf::Preset::Reactive) == boxes);
+    // Safe: its boxes are off, and 8 shortcuts at 0
+    REQUIRE(EnvFor(Perf::Preset::Safe) == Env{{"EDEN_NX2_UBO_BIND_SKIP", "0"},
+                                              {"EDEN_NX2_MARK_WORDS", "0"},
+                                              {"EDEN_NX2_SLOT_SKIP", "0"},
+                                              {"EDEN_NX2_TICK_SKIP", "0"},
+                                              {"EDEN_NX2_HLE_INDIRECT", "0"},
+                                              {"EDEN_NX2_LAYOUT_MEMO", "0"},
+                                              {"EDEN_NX2_FAST_PRIORITY_SCAN", "0"},
+                                              {"EDEN_NX2_PBFLUSH_WINDOW_KIB", "0"}});
+    // Safe with OSD turned back on is Custom: the box alone
+    Perf::Switches custom = Perf::AfterBoxChange([] {
+        Perf::Switches s = Perf::AllOff();
+        s.osd = true;
+        return s;
+    }());
+    REQUIRE(custom.preset == Perf::Preset::Custom);
+    REQUIRE(EnvFor(custom) == Env{{"EDEN_NX2_OSD", "1"}});
+    // The Safe names are SafeOff's, the preset number Perf::Preset::Safe
+    REQUIRE(SafePreset == static_cast<int>(Perf::Preset::Safe));
+    for (const auto& var : SecondCorePresetVars) {
+        REQUIRE(var.preset == SafePreset);
+        REQUIRE(var.value == "0");
+        REQUIRE(std::find(Perf::SafeOff.begin(), Perf::SafeOff.end(), var.env) !=
+                Perf::SafeOff.end());
+    }
+}
+
+TEST_CASE("Anka route: boxes off, the second core gets ANKA_USER_DIR alone", "[yuzu][anka_route]") {
+    const auto none = [](std::string_view) { return false; };
+    for (const int preset : {Recommended, static_cast<int>(Perf::Preset::Reactive),
+                             static_cast<int>(Perf::Preset::Custom)}) {
+        REQUIRE(SecondCoreEnv(none, preset).empty());
+        const auto launch = PlanSecondCore("D:/Anka/zelda/x.exe", "D:/Anka/user", "g.nup", false,
+                                           false, SecondCoreEnv(none, preset));
+        REQUIRE(launch.env.size() == 1);
+        REQUIRE(launch.env[0].first == "ANKA_USER_DIR");
+    }
+}
+
+TEST_CASE("Anka route: never the main core's 256 KiB flush window", "[yuzu][anka_route]") {
     for (int preset = 0; preset <= 3; ++preset) {
-        REQUIRE(SecondCoreEnv(AllOn, preset).empty());
+        for (const bool on : {false, true}) {
+            for (const auto& [name, value] :
+                 SecondCoreEnv([on](std::string_view) { return on; }, preset)) {
+                REQUIRE(value != "256");
+                if (name == "EDEN_NX2_PBFLUSH_WINDOW_KIB") {
+                    REQUIRE(value == "0");
+                }
+            }
+        }
     }
-    // So the second core gets ANKA_USER_DIR alone
+    // Left in the menu's environment by a main core game: not passed on either
     const auto launch = PlanSecondCore("D:/Anka/zelda/x.exe", "D:/Anka/user", "g.nup", false, false,
-                                       SecondCoreEnv(AllOn, 0));
-    REQUIRE(launch.env.size() == 1);
-    REQUIRE(launch.env[0].first == "ANKA_USER_DIR");
+                                       EnvFor(Perf::Preset::Recommended));
+    for (const auto& [name, value] :
+         SecondCoreEnvironment({{"EDEN_NX2_PBFLUSH_WINDOW_KIB", "256"}}, launch)) {
+        REQUIRE(value != "256");
+    }
+}
+
+TEST_CASE("Anka route: a main core game's variables are not inherited", "[yuzu][anka_route]") {
+    // The menu after Bananza: Nx2PerfSession set its plan in the menu's environment (the 11
+    // variables cb99db20b9 passed on), and a launcher may have set more
+    Env inherited{{"PATH", "C:/Windows"},
+                  {"ANKA_USER_DIR", "C:/elsewhere"},
+                  {"__GL_SHADER_DISK_CACHE_PATH", "C:/cache"},
+                  {"EDEN_CLI_RESTART_HANDOFF", "1"},
+                  {"EDEN_NX2_PBFLUSH_WINDOW_KIB", "256"}};
+    const auto bananza_plan = Perf::Wanted(Perf::Recommended(), true);
+    REQUIRE(bananza_plan.size() == 11);
+    for (const auto& var : bananza_plan) {
+        inherited.emplace_back(var.name, var.value);
+    }
+    for (const auto preset : {Perf::Preset::Recommended, Perf::Preset::Reactive,
+                              Perf::Preset::Safe}) {
+        const Env own = EnvFor(preset);
+        const auto launch = PlanSecondCore("D:/Anka/zelda/x.exe", "D:/Anka/user", "g.nup", false,
+                                           false, own);
+        const auto env = SecondCoreEnvironment(inherited, launch);
+        // PATH, then ANKA_USER_DIR (its own, once), then the table's: nothing else
+        Env expected{{"PATH", "C:/Windows"}, launch.env[0]};
+        expected.insert(expected.end(), own.begin(), own.end());
+        REQUIRE(env == expected);
+        REQUIRE(launch.env[0].second != "C:/elsewhere");
+    }
+    // Names set by the launch replace inherited ones in any case (Windows)
+    const auto launch = PlanSecondCore("D:/Anka/zelda/x.exe", "D:/Anka/user", "g.nup", false, true);
+    const auto env = SecondCoreEnvironment({{"anka_user_dir", "C:/x"}, {"Path", "C:/W"}}, launch);
+    REQUIRE(env.size() == 3);
+    REQUIRE(env[0] == std::pair<std::string, std::string>{"Path", "C:/W"});
+    REQUIRE(env[1].first == "ANKA_USER_DIR");
+    REQUIRE(env[2] == std::pair<std::string, std::string>{"EDEN_CLI_RESTART_HANDOFF", "1"});
 }
 
 TEST_CASE("Anka route: the starting program's switches are not passed on", "[yuzu][anka_route]") {
@@ -273,6 +396,38 @@ TEST_CASE("Anka route: docked or handheld always written", "[yuzu][anka_route]")
     const auto ini = MakeSecondCoreIni("[Renderer]\nanti_aliasing=0\n", State(false));
     REQUIRE(Has(ini, "[System]"));
     REQUIRE(Has(ini, "use_docked_mode=0"));
+}
+
+TEST_CASE("Anka route: Reactive Flushing always off on the second core", "[yuzu][anka_route]") {
+    // As each preset leaves the menu's file: Recommended off, Reactive on, Safe / Custom as it
+    // was (here: the default, no key)
+    const std::string base = QtConfig;
+    const std::string renderer = "[Renderer]\n";
+    const auto with = [&](const std::string& lines) {
+        std::string text = base;
+        text.insert(text.find(renderer) + renderer.size(), lines);
+        return text;
+    };
+    for (const auto& config :
+         {with("use_reactive_flushing\\default=false\nuse_reactive_flushing=false\n"),
+          with("use_reactive_flushing\\default=false\nuse_reactive_flushing=true\n"),
+          with("use_reactive_flushing\\default=true\nuse_reactive_flushing=true\n"), base}) {
+        const auto ini = MakeSecondCoreIni(config, State(true));
+        REQUIRE(Has(ini, "use_reactive_flushing\\default=false"));
+        REQUIRE(Has(ini, "use_reactive_flushing=false"));
+        REQUIRE_FALSE(Has(ini, "use_reactive_flushing=true"));
+        REQUIRE_FALSE(Has(ini, "use_reactive_flushing\\default=true"));
+        // In [Renderer], where the settings read it (Category::RendererAdvanced)
+        const auto section = ini.find(renderer);
+        const auto key = ini.find("use_reactive_flushing=");
+        REQUIRE(section != std::string::npos);
+        REQUIRE(key > section);
+        REQUIRE(ini.find("\n[", section + 1) > key);
+    }
+    // A file without [Renderer] gets one
+    const auto ini = MakeSecondCoreIni("[System]\nuse_docked_mode=1\n", State(true));
+    REQUIRE(Has(ini, "[Renderer]"));
+    REQUIRE(Has(ini, "use_reactive_flushing=false"));
 }
 
 TEST_CASE("Anka route: unchanged AA, filter and ASTC stay the second core's",

@@ -14,6 +14,7 @@
 #include "core/nx2_perf_settings.h"
 
 class QCheckBox;
+class QLabel;
 
 namespace Ui {
 class ConfigureNx2Perf;
@@ -22,7 +23,7 @@ class ConfigureNx2Perf;
 // The Anka tab: a preset (the launchers' three setups, or Custom) and Anka's settings
 // (core/nx2_perf_settings.h), one box each; a box changed by hand makes the preset Custom. A box
 // whose variables were all set outside the program (yuzu/nx2perf_session.h) is greyed out: theirs
-// is used.
+// is used. A setting Anka's second core does not take says so under its text.
 class ConfigureNx2Perf : public QWidget {
     Q_OBJECT
 
@@ -43,6 +44,7 @@ public:
 private:
     struct Row {
         QCheckBox* box;
+        QLabel* text; ///< the description under the box
         bool Core::Nx2PerfSettings::Switches::*field;
         std::vector<std::string_view> names;
     };
@@ -55,8 +57,11 @@ private:
     void ShowPreset();
     void ChoosePreset(Core::Nx2PerfSettings::Preset chosen);
     void BoxChanged();
-    /// The tooltips: set outside the program, no effect on Anka's second core.
+    /// The tooltips: set outside the program.
     void MarkSetOutside();
+    /// Under each setting Anka's second core does not take, a quiet "no effect" line. Once per
+    /// text: after setupUi / retranslateUi and ShowDkDynConflict.
+    void ShowSecondCoreNotes();
     /// A box's [Anka] key (Core::Nx2PerfSettings::Keys).
     static std::string_view KeyName(bool Core::Nx2PerfSettings::Switches::*field);
     void ShowFrameGen();

@@ -2866,7 +2866,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         }
     }
 
-    // The Anka tab's settings the second core has a counterpart for (none until its table comes)
+    // The Anka tab's settings the second core has a counterpart for, and the preset's there
     const auto& anka = UISettings::values.nx2perf;
     const auto settings_env = SecondCoreEnv(
         [&anka](std::string_view key) {
@@ -2889,15 +2889,15 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     }
     process.setArguments(args);
     process.setWorkingDirectory(QString::fromStdU16String(launch.working_dir.u16string()));
-    auto env = QProcessEnvironment::systemEnvironment();
     // Not this program's switches (Nx2PerfSession set them in its environment), nor the handoff
     // of another restart
-    for (const QString& name : env.keys()) {
-        if (ClearedForSecondCore(name.toStdString())) {
-            env.remove(name);
-        }
+    const auto system_env = QProcessEnvironment::systemEnvironment();
+    std::vector<std::pair<std::string, std::string>> inherited;
+    for (const QString& name : system_env.keys()) {
+        inherited.emplace_back(name.toStdString(), system_env.value(name).toStdString());
     }
-    for (const auto& [name, value] : launch.env) {
+    QProcessEnvironment env;
+    for (const auto& [name, value] : SecondCoreEnvironment(inherited, launch)) {
         env.insert(QString::fromStdString(name), QString::fromStdString(value));
     }
     process.setProcessEnvironment(env);

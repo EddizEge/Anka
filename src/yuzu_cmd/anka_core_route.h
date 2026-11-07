@@ -55,14 +55,12 @@ constexpr const char* StartFailed = "The game could not start on Anka's second c
 constexpr const char* AlreadyRunning = "Anka's second core is already running.";
 constexpr const char* Crashed = "Anka's second core closed unexpectedly (exit code 0x%1). Its "
                                 "log:\n%2";
-/// The Anka tab, next to a setting the second core does not take
-constexpr const char* MainCoreOnly =
-    "Only for games on Anka's main core: no effect on games that run on Anka's second core.";
-/// The Anka tab's preset while SecondCorePresetVars is empty
+/// The Anka tab, under a setting the second core does not take (ReachesSecondCore)
+constexpr const char* NoEffectOnSecondCore = "Anka's second core: no effect";
+/// The Anka tab's preset: what it means on the second core (SecondCorePresetVars)
 constexpr const char* PresetOnSecondCore =
-    "On games that run on Anka's second core a preset changes only graphics settings (Reactive "
-    "Flushing, barrier feedback loops, frame generation); its other switches have no effect "
-    "there.";
+    "On Anka's second core Reactive Flushing stays off, so both Recommended presets are the "
+    "same there; Safe also turns off its GPU shortcuts.";
 } // namespace Text
 
 /// The game the second core plays (its updates share the base id's upper bits).
@@ -107,12 +105,15 @@ struct SecondCoreSetting {
     std::string_view value;
 };
 
-/// TODO(contract): the second core's counterparts of the Anka tab, from anka-birlesim's table
-/// (setting | variable | value for Recommended / Reactive / Safe). Until it comes, none: no Anka
-/// switch reaches the second core, which runs on its own tuned defaults (the main core's values
-/// can slow it down: EDEN_NX2_PBFLUSH=256 halved its frame rate). Frame generation and the other
-/// graphics settings go over in its settings file (MakeSecondCoreIni), not here.
-inline constexpr std::array<SecondCoreSetting, 0> SecondCoreSettings{};
+/// The Anka tab's settings the second core reads (anka-birlesim's table, 08.11.2026: every
+/// variable's reader looked up in its tree). The others have no counterpart there and set
+/// nothing: split_gpu_thread (the second core splits its GPU thread itself, EDEN_NX2_SPLIT, on by
+/// default), acquire_peek, jit_same, front_macro_lean, bananza_dynamic_fps, bananza_frame_pacing.
+/// Frame generation goes over in its settings file (MakeSecondCoreIni), not here.
+inline constexpr std::array<SecondCoreSetting, 2> SecondCoreSettings{{
+    {"fg_timed", "EDEN_NX2_FG_TIMED", "1"},
+    {"osd", "EDEN_NX2_OSD", "1"},
+}};
 
 /// A preset's variable on the second core (Core::Nx2PerfSettings::Preset as an int).
 struct SecondCorePresetVar {
@@ -121,12 +122,25 @@ struct SecondCorePresetVar {
     std::string_view value;
 };
 
-/// TODO(contract): what Recommended / Reactive / Safe mean on the second core. None until the
-/// table says: no preset variable goes there.
-inline constexpr std::array<SecondCorePresetVar, 0> SecondCorePresetVars{};
+/// The presets on the second core. Recommended: the boxes alone. Reactive: the same
+/// (EDEN_NX2_RX_RT_FIT has no reader there, and its settings file keeps Reactive Flushing off).
+/// Safe: the boxes and the part of Core::Nx2PerfSettings::SafeOff it reads, at 0. Custom: the
+/// boxes. Never EDEN_NX2_PBFLUSH_WINDOW_KIB=256, the main core's window: it halved the second
+/// core's frame rate and made it stutter.
+inline constexpr int SafePreset = 2; ///< Core::Nx2PerfSettings::Preset::Safe
+inline constexpr std::array<SecondCorePresetVar, 8> SecondCorePresetVars{{
+    {SafePreset, "EDEN_NX2_UBO_BIND_SKIP", "0"},
+    {SafePreset, "EDEN_NX2_MARK_WORDS", "0"},
+    {SafePreset, "EDEN_NX2_SLOT_SKIP", "0"},
+    {SafePreset, "EDEN_NX2_TICK_SKIP", "0"},
+    {SafePreset, "EDEN_NX2_HLE_INDIRECT", "0"},
+    {SafePreset, "EDEN_NX2_LAYOUT_MEMO", "0"},
+    {SafePreset, "EDEN_NX2_FAST_PRIORITY_SCAN", "0"},
+    {SafePreset, "EDEN_NX2_PBFLUSH_WINDOW_KIB", "0"},
+}};
 
 /// Whether an Anka tab setting does anything on the second core (else the tab marks it
-/// Text::MainCoreOnly).
+/// Text::NoEffectOnSecondCore).
 inline bool ReachesSecondCore(std::string_view key,
                               std::span<const SecondCoreSetting> table = SecondCoreSettings) {
     return std::any_of(table.begin(), table.end(),
@@ -194,6 +208,30 @@ inline Launch PlanSecondCore(const std::filesystem::path& core,
         launch.env.emplace_back("EDEN_CLI_RESTART_HANDOFF", "1");
     }
     return launch;
+}
+
+/// The second core's whole environment: the starting program's (`inherited`) without what
+/// ClearedForSecondCore drops and without the names the launch sets (Windows: any case), then the
+/// launch's. A main core game's switches left in the program's environment (Nx2PerfSession set
+/// them) never reach it.
+inline std::vector<std::pair<std::string, std::string>> SecondCoreEnvironment(
+    const std::vector<std::pair<std::string, std::string>>& inherited, const Launch& launch) {
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; };
+    const auto same_name = [lower](std::string_view a, std::string_view b) {
+        return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                          [lower](char x, char y) { return lower(x) == lower(y); });
+    };
+    std::vector<std::pair<std::string, std::string>> env;
+    for (const auto& var : inherited) {
+        const bool set_by_launch =
+            std::any_of(launch.env.begin(), launch.env.end(),
+                        [&](const auto& own) { return same_name(own.first, var.first); });
+        if (!set_by_launch && !ClearedForSecondCore(var.first)) {
+            env.push_back(var);
+        }
+    }
+    env.insert(env.end(), launch.env.begin(), launch.env.end());
+    return env;
 }
 
 /// One argument as CommandLineToArgvW reads it back: quoted when it has a space, a tab or a quote
@@ -470,6 +508,8 @@ inline void KeepSecondCoreAddOn(Section& section) {
 /// - [System] use_docked_mode always the starting program's (the second core's default differs);
 /// - [Data%20Storage] the paths in use, the second core writing them back as absolute paths;
 /// - [DisabledAddOns] without the frame rate patch its game needs on;
+/// - [Renderer] use_reactive_flushing always off, whatever the preset wrote: the second core was
+///   only ever tested so;
 /// - no setting only the second core has.
 /// anti_aliasing / scaling_filter / astc_recompression go over as they are: left at the
 /// default (`\default=true`) the second core keeps its own (FXAA, ScaleForce, BC3).
@@ -485,6 +525,7 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
         }
     }
     SetKey(SectionNamed(sections, "System"), "use_docked_mode", state.docked ? "1" : "0");
+    SetKey(SectionNamed(sections, "Renderer"), "use_reactive_flushing", "false");
     if (!state.data_storage.empty()) {
         auto& storage = SectionNamed(sections, "Data%20Storage");
         for (const auto& [key, value] : state.data_storage) {
