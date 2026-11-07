@@ -22,6 +22,11 @@ public:
     /// (frame_gen_pacer_rules.h).
     [[nodiscard]] FrameGenPlan Plan(size_t capacity, f32 refresh_period);
 
+    using Clock = std::chrono::steady_clock;
+
+    /// Plan with the time of this real frame given (src/tests/video_core/frame_gen_pacer.cpp).
+    [[nodiscard]] FrameGenPlan Plan(size_t capacity, f32 refresh_period, Clock::time_point now);
+
     void Reset();
 
     /// The interval between this real frame and the one before it in seconds, as the last Plan
@@ -31,9 +36,12 @@ public:
         return last_interval;
     }
 
-private:
-    using Clock = std::chrono::steady_clock;
+    /// Generated frames per real frame the target-rate mode allows now.
+    [[nodiscard]] size_t Limit() const {
+        return limit;
+    }
 
+private:
     void Stabilize(Clock::time_point now);
     void DeferEvaluations(Clock::duration amount);
     void UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate, f32 refresh_hz,
@@ -48,6 +56,7 @@ private:
     f32 last_interval{};
     f32 output_credit{};
     f32 probe_base_rate{};
+    f32 refresh_hz_seen{}; ///< the refresh rate of the previous evaluation, 0 = unknown
     size_t probe_previous_limit{};
     size_t limit{};
     u32 probe_failures{};

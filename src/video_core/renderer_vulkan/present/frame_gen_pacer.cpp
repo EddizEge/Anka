@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen_pacer.h"
 #include "video_core/renderer_vulkan/present/frame_gen_pacer_rules.h"
@@ -46,13 +47,16 @@ constexpr auto PROBE_STEP_DELAY = std::chrono::milliseconds(250);
 } // Anonymous namespace
 
 FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 refresh_period) {
+    return Plan(capacity, refresh_period, Clock::now());
+}
+
+FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 refresh_period, Clock::time_point now) {
     const size_t ceiling = std::min(capacity, Settings::FrameGenMaxGenerations());
     if (ceiling == 0) {
         Reset();
         return {};
     }
 
-    const Clock::time_point now = Clock::now();
     last_interval = 0.0f;
     if (!last_frame) {
         last_frame = now;
@@ -135,6 +139,28 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 refresh_period) {
 void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate,
                                 f32 refresh_hz, size_t ceiling) {
     limit = std::min(limit, ceiling);
+
+    if (FrameGenPacerRules::RefreshChanged(refresh_hz_seen, refresh_hz)) {
+        // The window moved to another display or the mode changed: a step in progress measured
+        // the old refresh, and a level the new one cannot show would let vsync slow the game
+        if (probe_until) {
+            probe_until.reset();
+            limit = probe_previous_limit;
+        }
+        const size_t before = limit;
+        limit = FrameGenPacerRules::LimitAfterRefreshChange(base_rate, limit, refresh_hz);
+        if (refresh_hz_seen > 0.0f || limit != before) {
+            LOG_INFO(Render_Vulkan, "Frame gen pacer: display refresh {:.1f} -> {:.1f} Hz, {} -> {} "
+                                    "generated frame(s) per real frame",
+                     refresh_hz_seen, refresh_hz, before, limit);
+        }
+        refresh_hz_seen = refresh_hz;
+        probe_failures = 0;
+        next_probe.reset();
+        deficit_since.reset();
+        output_credit = 0.0f;
+        return;
+    }
 
     if (probe_until) {
         if (now < *probe_until) {
@@ -225,6 +251,7 @@ void FrameGenPacer::Reset() {
     last_interval = 0.0f;
     output_credit = 0.0f;
     probe_base_rate = 0.0f;
+    refresh_hz_seen = 0.0f;
     probe_previous_limit = 0;
     limit = 0;
     probe_failures = 0;

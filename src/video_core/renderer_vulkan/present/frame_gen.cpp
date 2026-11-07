@@ -206,15 +206,20 @@ FrameGen::FrameGen(MemoryAllocator& memory_allocator_, Scheduler& scheduler_,
     const char* present_diag = std::getenv("EDEN_NX2_PRESENT_DIAG");
     timing.diag = Nx2FgTiming::SwitchOn(std::getenv("EDEN_NX2_FG_DIAG")) ||
                   (timing.timed && present_diag != nullptr && present_diag[0] != '0');
-    if (!timing.timed && !timing.diag) {
-        return;
-    }
+    // Read without FG_TIMED / FG_DIAG too: Dynamic frame generation takes it as its ceiling
     bool invalid = false;
     timing.override_hz =
         Nx2FgTiming::ParseRefreshHz(std::getenv("EDEN_NX2_FG_REFRESH_HZ"), &invalid);
     if (invalid) {
         LOG_WARNING(Render_Vulkan, "nx2:fg EDEN_NX2_FG_REFRESH_HZ is not a refresh of 20-1000 Hz, "
                                    "the display's refresh is used");
+    }
+    if (!timing.timed && !timing.diag) {
+        if (timing.override_hz) {
+            LOG_INFO(Render_Vulkan, "nx2:fg refresh {:.2f} Hz (EDEN_NX2_FG_REFRESH_HZ)",
+                     *timing.override_hz);
+        }
+        return;
     }
     LOG_INFO(Render_Vulkan,
              "nx2:fg timed generated frames {} (EDEN_NX2_FG_TIMED, FSR3 only), refresh {}",

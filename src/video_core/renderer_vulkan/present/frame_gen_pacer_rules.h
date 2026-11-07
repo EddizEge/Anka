@@ -44,6 +44,35 @@ constexpr f32 PROBE_BASE_RETENTION = 0.92f;
     return refresh_hz <= 0.0f || base_rate * static_cast<f32>(limit + 2) <= refresh_hz;
 }
 
+/// A level is kept after the refresh rate changed only while its output stays this far below the
+/// new refresh: vsync holds a game whose output no longer fits to exactly refresh / (level + 1),
+/// so a level that only just fits cannot be told from one vsync is already throttling.
+constexpr f32 REFRESH_FIT_MARGIN = 0.97f;
+
+/// Refresh rates closer than this (relative) are the same display mode.
+constexpr f32 REFRESH_CHANGE_RATIO = 0.01f;
+
+/// Whether the refresh rate changed from `before_hz` to `now_hz` (Hz, 0 = unknown).
+[[nodiscard]] constexpr bool RefreshChanged(f32 before_hz, f32 now_hz) {
+    const f32 difference = before_hz > now_hz ? before_hz - now_hz : now_hz - before_hz;
+    return difference > (before_hz > now_hz ? before_hz : now_hz) * REFRESH_CHANGE_RATIO;
+}
+
+/// The level after the refresh rate changed (the window moved to another display, the display
+/// mode changed): `limit` while the game's frame rate times its outputs clearly fits the new
+/// refresh, else 0, and the pacer climbs again from the game's own frame rate. Not the highest
+/// level that fits: once the output exceeds the refresh, vsync has already lowered the measured
+/// frame rate (at 60 Hz a 46 FPS game on 3x reads 20), so a lower level would look like it fits
+/// and stay throttled. Unknown refresh (0): no cap, `limit`.
+[[nodiscard]] constexpr size_t LimitAfterRefreshChange(f32 base_rate, size_t limit,
+                                                       f32 refresh_hz) {
+    if (refresh_hz <= 0.0f ||
+        base_rate * static_cast<f32>(limit + 1) <= refresh_hz * REFRESH_FIT_MARGIN) {
+        return limit;
+    }
+    return 0;
+}
+
 /// Whether a probe step left the game's own frame rate where it was (see PROBE_BASE_RETENTION);
 /// false means the step is reverted.
 [[nodiscard]] constexpr bool ProbeKeepsGameRate(f32 base_before, f32 base_after) {
