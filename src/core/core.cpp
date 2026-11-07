@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <utility>
 
 #include "game_settings.h"
@@ -76,6 +78,21 @@ std::atomic<u64> g_nx2_present_count{};
 std::atomic<u64> g_nx2_album_count{};
 std::atomic<u32> g_nx2_session{};
 std::atomic<bool> g_nx2_dk_dyn_applied{};
+
+namespace {
+std::mutex g_nx2_dk_dyn_conflict_mutex;
+std::string g_nx2_dk_dyn_conflict;
+} // Anonymous namespace
+
+void SetNx2DkDynConflict(std::string mod) {
+    std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
+    g_nx2_dk_dyn_conflict = std::move(mod);
+}
+
+std::string Nx2DkDynConflict() {
+    std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
+    return g_nx2_dk_dyn_conflict;
+}
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {
@@ -495,6 +512,7 @@ struct System::Impl {
         service_manager.reset();
         fs_controller.Reset();
         FileSys::SetLooseAOC({});
+        SetNx2DkDynConflict({});
         cheat_engine.reset();
         core_timing.ClearPendingEvents();
         app_loader.reset();
@@ -679,6 +697,8 @@ void System::InitializeDebugger() {
 SystemResultStatus System::Load(Frontend::EmuWindow& emu_window, const std::string& filepath,
                                 Service::AM::FrontendAppletParameters& params) {
     FileSys::SetLooseAOC({});
+    SetNx2DkDynConflict({});
+    g_nx2_dk_dyn_applied.store(false, std::memory_order_relaxed); // set again by the loader
     return impl->Load(*this, emu_window, filepath, params);
 }
 

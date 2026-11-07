@@ -404,7 +404,28 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
     return out;
 }
 
-std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name) const {
+std::vector<std::pair<size_t, size_t>> ChangedRanges(std::span<const u8> before,
+                                                     std::span<const u8> after, size_t skip) {
+    std::vector<std::pair<size_t, size_t>> ranges;
+    const size_t common = std::min(before.size(), after.size());
+    const size_t total = std::max(before.size(), after.size());
+    size_t i = skip;
+    while (i < total) {
+        if (i < common && before[i] == after[i]) {
+            ++i;
+            continue;
+        }
+        const size_t begin = i;
+        while (i < total && (i >= common || before[i] != after[i])) {
+            ++i;
+        }
+        ranges.emplace_back(begin - skip, i - skip);
+    }
+    return ranges;
+}
+
+std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name,
+                                       std::vector<NsoModChange>* mod_changes) const {
     if (nso.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }
@@ -447,20 +468,32 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     auto out = nso;
     for (const auto& patch_file : patches) {
+        const std::string mod =
+            patch_file->GetContainingDirectory()->GetParentDirectory()->GetName();
+        VirtualFile patched;
+        std::string_view kind;
         if (patch_file->GetExtension() == "ips") {
-            LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"",
-                     patch_file->GetContainingDirectory()->GetParentDirectory()->GetName());
-            const auto patched = PatchIPS(std::make_shared<VectorVfsFile>(out), patch_file);
-            if (patched != nullptr)
-                out = patched->ReadAllBytes();
+            LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"", mod);
+            patched = PatchIPS(std::make_shared<VectorVfsFile>(out), patch_file);
+            kind = "IPS";
         } else if (patch_file->GetExtension() == "pchtxt") {
-            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"",
-                     patch_file->GetContainingDirectory()->GetParentDirectory()->GetName());
+            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"", mod);
             const IPSwitchCompiler compiler{patch_file};
-            const auto patched = compiler.Apply(std::make_shared<VectorVfsFile>(out));
-            if (patched != nullptr)
-                out = patched->ReadAllBytes();
+            patched = compiler.Apply(std::make_shared<VectorVfsFile>(out));
+            kind = "IPSwitch";
         }
+        if (patched == nullptr) {
+            continue;
+        }
+        auto bytes = patched->ReadAllBytes();
+        if (mod_changes != nullptr) {
+            auto ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader));
+            if (!ranges.empty()) {
+                mod_changes->push_back(
+                    {.mod = mod, .kind = std::string{kind}, .ranges = std::move(ranges)});
+            }
+        }
+        out = std::move(bytes);
     }
 
     if (out.size() < sizeof(Loader::NSOHeader)) {

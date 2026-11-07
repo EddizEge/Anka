@@ -8,8 +8,12 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <span>
+#include <string>
 #include <vector>
+
+#include <fmt/ranges.h>
 
 #include "common/common_funcs.h"
 #include "common/hex_util.h"
@@ -166,6 +170,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Apply patches if necessary
     const auto name = nso_file.GetName();
+    // What each user exefs mod changed (EDEN_NX2_DK_DYN checks them against its code below)
+    std::vector<FileSys::NsoModChange> mod_changes;
     if (pm && (pm->HasNSOPatch(nso_header.build_id, name) || Settings::values.dump_nso)) {
         std::span<u8> patchable_section(codeset.memory.data() + module_start, codeset.memory.size() - module_start);
         std::vector<u8> pi_header(sizeof(NSOHeader) + patchable_section.size());
@@ -173,7 +179,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         std::memcpy(pi_header.data() + sizeof(NSOHeader), patchable_section.data(),
                     patchable_section.size());
 
-        pi_header = pm->PatchNSO(pi_header, name);
+        pi_header = pm->PatchNSO(pi_header, name, &mod_changes);
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
     }
@@ -196,10 +202,48 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         const auto& text = nso_header.segments[0];
         const size_t text_start = module_start + text.location;
         const std::span<u8> image{codeset.memory};
-        const auto dk_dyn = Nx2DkDynamicFps::ApplyIfEnabled(
-            dk_dyn_switch, process.GetProgramId(), name,
-            text_start <= image.size() ? image.subspan(text_start) : std::span<u8>{}, text.size,
-            PageAlignSize(text.size), dk_dyn_min_fps.fps);
+        const std::span<u8> text_image =
+            text_start <= image.size() ? image.subspan(text_start) : std::span<u8>{};
+        // Another exefs mod in the frame rate code: the patch stays out of this boot
+        // (nx2_dk_dynamic_fps.h, FpsZones)
+        bool dk_dyn_blocked = false;
+        if (Nx2DkDynamicFps::Enabled(dk_dyn_switch) && name == "main" &&
+            process.GetProgramId() == Nx2DkDynamicFps::ProgramId && !mod_changes.empty()) {
+            const auto zones = Nx2DkDynamicFps::FpsZones(text_image, text.size);
+            std::vector<std::string> elsewhere;
+            for (const auto& change : mod_changes) {
+                const auto conflict =
+                    Nx2DkDynamicFps::FirstConflict(zones, text.location, change.ranges);
+                if (!conflict) {
+                    elsewhere.push_back(fmt::format("\"{}\" ({})", change.mod, change.kind));
+                    continue;
+                }
+                LOG_WARNING(Loader,
+                            "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
+                            "boot: the {} mod \"{}\" changes its {} (main+{:#x}); both would "
+                            "run the game too fast. Turn the mod off in Add-Ons to use it",
+                            change.kind, change.mod, conflict->what, conflict->offset);
+                if (!dk_dyn_blocked) {
+                    Core::SetNx2DkDynConflict(change.mod);
+                }
+                dk_dyn_blocked = true;
+            }
+            if (!elsewhere.empty()) {
+                LOG_WARNING(Loader,
+                            "Donkey Kong Bananza: exefs mod(s) {} change main with EDEN_NX2_DK_DYN "
+                            "on, outside the frame rate code it patches; if the game runs too "
+                            "fast above 30 fps, one of them changes the frame rate too",
+                            fmt::join(elsewhere, ", "));
+            }
+        }
+        if (dk_dyn_blocked) {
+            Core::g_nx2_dk_dyn_applied.store(false, std::memory_order_relaxed);
+        }
+        const auto dk_dyn = dk_dyn_blocked
+                                ? std::optional<Nx2DkDynamicFps::Result>{}
+                                : Nx2DkDynamicFps::ApplyIfEnabled(
+                                      dk_dyn_switch, process.GetProgramId(), name, text_image,
+                                      text.size, PageAlignSize(text.size), dk_dyn_min_fps.fps);
         if (dk_dyn) {
             Core::g_nx2_dk_dyn_applied.store(dk_dyn->applied, std::memory_order_relaxed);
             if (dk_dyn->applied) {
@@ -296,6 +340,14 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             system.SetApplicationProcessBuildID(nso_header.build_id);
 
         const auto cheats = pm->CreateCheatList(nso_header.build_id);
+        if (!cheats.empty() && name == "main" && Nx2DkDynamicFps::Enabled(dk_dyn_switch) &&
+            process.GetProgramId() == Nx2DkDynamicFps::ProgramId &&
+            Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed)) {
+            LOG_WARNING(Loader,
+                        "Donkey Kong Bananza: {} cheat(s) with dynamic FPS (EDEN_NX2_DK_DYN); if "
+                        "one changes the frame rate, the game runs too fast above 30 fps",
+                        cheats.size());
+        }
         if (!cheats.empty()) {
             system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);
         }

@@ -9,7 +9,10 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
+#include <vector>
 #include "common/common_types.h"
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/vfs/vfs_types.h"
@@ -51,6 +54,20 @@ struct Patch {
     u32 numeric_version{0};
 };
 
+/// The bytes one user exefs mod changed in a module (PatchManager::PatchNSO).
+struct NsoModChange {
+    std::string mod;  ///< the mod's folder name
+    std::string kind; ///< "IPS" or "IPSwitch"
+    /// [begin, end) offsets into the module's code (after the NSO header), merged and sorted.
+    std::vector<std::pair<size_t, size_t>> ranges;
+};
+
+/// The [begin, end) ranges where `after` differs from `before`, from `skip` on, as offsets less
+/// `skip`; bytes past the shorter one's end count as changed.
+[[nodiscard]] std::vector<std::pair<size_t, size_t>> ChangedRanges(std::span<const u8> before,
+                                                                   std::span<const u8> after,
+                                                                   size_t skip);
+
 // A centralized class to manage patches to games.
 class PatchManager {
 public:
@@ -71,8 +88,10 @@ public:
     // Currently tracked NSO patches:
     // - IPS
     // - IPSwitch
-    [[nodiscard]] std::vector<u8> PatchNSO(const std::vector<u8>& nso,
-                                           const std::string& name) const;
+    // `mod_changes`, when given, gets the bytes each user mod (IPS / IPSwitch) changed, in the
+    // module's code offsets (after the NSO header).
+    [[nodiscard]] std::vector<u8> PatchNSO(const std::vector<u8>& nso, const std::string& name,
+                                           std::vector<NsoModChange>* mod_changes = nullptr) const;
 
     // Checks to see if PatchNSO() will have any effect given the NSO's build ID.
     // Used to prevent expensive copies in NSO loader.

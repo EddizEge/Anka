@@ -13,6 +13,7 @@
 #include <QStandardItemModel>
 #include <QStringList>
 
+#include "core/core.h"
 #include "qt_common/config/uisettings.h"
 #include "ui_configure_nx2perf.h"
 #include "yuzu/nx2perf_session.h"
@@ -77,10 +78,24 @@ void ConfigureNx2Perf::RetranslateUI() {
     ShowPreset();
     ShowFrameGen();
     MarkSetOutside();
+    ShowDkDynConflict();
+}
+
+void ConfigureNx2Perf::ShowDkDynConflict() {
+    const std::string mod = Core::Nx2DkDynConflict();
+    if (mod.empty()) {
+        return;
+    }
+    ui->dk_dyn_text->setText(
+        ui->dk_dyn_text->text() + QStringLiteral("\n") +
+        tr("Off in the running game: the mod \"%1\" changes the same frame rate code, and both "
+           "at once run the game too fast. Turn the mod off in Add-Ons (Properties) to use it.")
+            .arg(QString::fromStdString(mod)));
 }
 
 void ConfigureNx2Perf::SetConfiguration() {
     Show(UISettings::values.nx2perf);
+    ShowDkDynConflict();
     // A choice waiting for the game to stop (Later) is shown, not the running game's setting
     const auto waiting = Nx2PerfSession::Pending().frame_gen;
     frame_gen_shown = waiting.value_or(Nx2PerfSession::CurrentFrameGen());

@@ -59,6 +59,7 @@ private:
     void ShowFrameGen();
     void ChooseFrameGen(Core::Nx2PerfSettings::FrameGen chosen);
     void ShowPending();
+    void ShowDkDynConflict();
 
     std::unique_ptr<Ui::ConfigureNx2Perf> ui;
     std::vector<Row> rows;

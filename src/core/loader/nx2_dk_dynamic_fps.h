@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -74,6 +77,48 @@ constexpr MinFps ParseMinFps(const char* value) {
     return {.fps = fps};
 }
 
+/// Where the patch's three code sequences are, in words from the text segment's start (each
+/// the last match), and how many times each was found; Apply needs one of each.
+struct Sites {
+    size_t controller{};
+    size_t sleep{};
+    size_t step{};
+    size_t controller_matches{};
+    size_t sleep_matches{};
+    size_t step_matches{};
+};
+
+inline Sites FindSites(std::span<const u8> text, u32 text_size) {
+    Sites sites{};
+    if (text.size() < text_size) {
+        return sites;
+    }
+    const u8* const code = text.data();
+    const size_t count = text_size / sizeof(u32);
+    const auto word = [code](size_t index) {
+        u32 value;
+        std::memcpy(&value, code + index * sizeof(u32), sizeof(value));
+        return value;
+    };
+    for (size_t i = 1; i + 8 < count; ++i) {
+        if (word(i) == 0xBD405100 && word(i + 1) == 0x52A84E08 && word(i + 2) == 0x1E270101 &&
+            word(i + 6) == 0x5E21D800 && word(i + 7) == 0x1E201820 && word(i + 8) == 0xBD000100) {
+            sites.step = i; // ldr s0, [x8, #0x50]; ...; scvtf s0, s0; fdiv s0, s1, s0; str s0, [x8]
+            ++sites.step_matches;
+        }
+        if (word(i) == 0xF9409429 && word(i + 1) == 0x7100015F && word(i + 2) == 0xFA400924) {
+            sites.controller = i; // ldr x9, [x1, #0x128]; cmp w10, #0; ccmp x9, #0, #4, eq
+            ++sites.controller_matches;
+        }
+        if (word(i) == 0xEB080120 && word(i - 1) == 0x9E380009 &&
+            (word(i + 1) & 0xFF00001F) == 0x5400000D && (word(i + 2) >> 26) == 0x25) {
+            sites.sleep = i; // fcvtzs x9, s0; subs x0, x9, x8; b.le; bl
+            ++sites.sleep_matches;
+        }
+    }
+    return sites;
+}
+
 struct Result {
     bool applied{};
     size_t controller{};
@@ -124,24 +169,10 @@ inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size, u32 min
         return 0x14000000U |
                (static_cast<u32>(static_cast<s64>(to) - static_cast<s64>(from)) & 0x3FFFFFFU);
     };
-    size_t controller = 0, controller_matches = 0, sleep = 0, sleep_matches = 0;
-    size_t step = 0, step_matches = 0;
-    for (size_t i = 1; i + 8 < count; ++i) {
-        if (word(i) == 0xBD405100 && word(i + 1) == 0x52A84E08 && word(i + 2) == 0x1E270101 &&
-            word(i + 6) == 0x5E21D800 && word(i + 7) == 0x1E201820 && word(i + 8) == 0xBD000100) {
-            step = i; // ldr s0, [x8, #0x50]; ...; scvtf s0, s0; fdiv s0, s1, s0; str s0, [x8]
-            ++step_matches;
-        }
-        if (word(i) == 0xF9409429 && word(i + 1) == 0x7100015F && word(i + 2) == 0xFA400924) {
-            controller = i; // ldr x9, [x1, #0x128]; cmp w10, #0; ccmp x9, #0, #4, eq
-            ++controller_matches;
-        }
-        if (word(i) == 0xEB080120 && word(i - 1) == 0x9E380009 &&
-            (word(i + 1) & 0xFF00001F) == 0x5400000D && (word(i + 2) >> 26) == 0x25) {
-            sleep = i; // fcvtzs x9, s0; subs x0, x9, x8; b.le; bl
-            ++sleep_matches;
-        }
-    }
+    const Sites sites = FindSites(text, text_size);
+    const size_t controller = sites.controller, controller_matches = sites.controller_matches;
+    const size_t sleep = sites.sleep, sleep_matches = sites.sleep_matches;
+    const size_t step = sites.step, step_matches = sites.step_matches;
     result.controller = controller;
     result.sleep = sleep;
     result.step = step;
@@ -198,6 +229,90 @@ inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size, u32 min
         }
     }
     return result;
+}
+
+// Another exefs mod on the same module (a "60 FPS" IPS / IPSwitch patch) can change the frame
+// rate code too: both at once ran the game twice as fast above 30 fps (a user's report, X,
+// 07.11.2026). The code the patch rewrites or depends on, with a margin of the functions around
+// it, and the controller's present interval sites (the 30 FPS lock's, nso.cpp): a mod changing
+// any of it turns the patch off for that session. A mod elsewhere is only named in the log.
+struct Zone {
+    size_t begin{}; ///< bytes from the text segment's start
+    size_t end{};
+    std::string_view what;
+};
+
+constexpr size_t ZoneMarginWords = 32;
+
+inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
+    std::vector<Zone> zones;
+    if (text.size() < text_size) {
+        return zones;
+    }
+    const size_t count = text_size / sizeof(u32);
+    const auto add = [&zones, count](size_t first, size_t last, std::string_view what) {
+        first = first > ZoneMarginWords ? first - ZoneMarginWords : 0;
+        last = std::min(last + ZoneMarginWords, count);
+        zones.push_back({first * sizeof(u32), last * sizeof(u32), what});
+    };
+    const Sites sites = FindSites(text, text_size);
+    if (sites.controller_matches == 1) {
+        add(sites.controller, sites.controller + LowTargetOffset + 2, "frame rate controller");
+    }
+    if (sites.sleep_matches == 1) {
+        add(sites.sleep >= 14 ? sites.sleep - 14 : 0, sites.sleep + 3, "frame sleep");
+    }
+    if (sites.step_matches == 1) {
+        add(sites.step, sites.step + 9, "game clock step");
+    }
+    // The free space Apply writes to (past the end of the code, in its last page)
+    const size_t cave = (text_size + 15) / 16 * 4;
+    zones.push_back({cave * sizeof(u32), (cave + CaveWords) * sizeof(u32), "free space it uses"});
+
+    const u8* const code = text.data();
+    const auto word = [code](size_t index) {
+        u32 value;
+        std::memcpy(&value, code + index * sizeof(u32), sizeof(value));
+        return value;
+    };
+    // SetLayerExtendedSwapInterval(layer, 1, fps) calls and the vblank divisor (nso.cpp)
+    for (size_t i = 0; i + 4 < count; ++i) {
+        if ((word(i + 3) & 0xFC000000) == 0x94000000 && word(i + 1) == 0x52800021 &&
+            ((word(i) == 0xF940C260 && word(i + 2) == 0xB940E262) ||
+             (word(i) == 0xF940C000 && word(i + 2) == 0x2A1303E2))) {
+            add(i, i + 4, "present interval");
+        }
+        if (word(i) == 0x52800788 && word(i + 1) == 0xB9402689 && word(i + 2) == 0xB9004295 &&
+            word(i + 3) == 0x1AD50D08 && word(i + 4) == 0x2A0803E1) {
+            add(i, i + 5, "present interval");
+        }
+    }
+    return zones;
+}
+
+struct Conflict {
+    size_t offset{}; ///< the first changed byte inside a zone, in module code offsets
+    std::string_view what;
+};
+
+/// The first byte of `changes` ([begin, end) in module code offsets, PatchManager's
+/// NsoModChange) inside one of `zones`; the text segment starts at `text_location` there.
+inline std::optional<Conflict> FirstConflict(const std::vector<Zone>& zones, size_t text_location,
+                                             const std::vector<std::pair<size_t, size_t>>& changes) {
+    std::optional<Conflict> first;
+    for (const Zone& zone : zones) {
+        const size_t zone_begin = text_location + zone.begin;
+        const size_t zone_end = text_location + zone.end;
+        for (const auto& [begin, end] : changes) {
+            if (begin < zone_end && zone_begin < end) {
+                const size_t offset = std::max(begin, zone_begin);
+                if (!first || offset < first->offset) {
+                    first = Conflict{offset, zone.what};
+                }
+            }
+        }
+    }
+    return first;
 }
 
 /// The loader's entry: nullopt (the module untouched) unless EDEN_NX2_DK_DYN is on and this is

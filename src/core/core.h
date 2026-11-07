@@ -126,6 +126,11 @@ extern std::atomic<u32> g_nx2_session;
 /// EDEN_NX2_DK_DYN: Donkey Kong Bananza's dynamic frame rate patch went into its main module as it
 /// loaded (core/loader/nx2_dk_dynamic_fps.h); vi2 then reports VRR and paces every vblank.
 extern std::atomic<bool> g_nx2_dk_dyn_applied;
+/// EDEN_NX2_DK_DYN was on but another exefs mod changes the frame rate code it patches: the patch
+/// stayed out of this boot, and this names the mod (empty: no such mod). Cleared at each boot; the
+/// Anka tab shows it.
+void SetNx2DkDynConflict(std::string mod);
+[[nodiscard]] std::string Nx2DkDynConflict();
 
 class CpuManager;
 class Debugger;

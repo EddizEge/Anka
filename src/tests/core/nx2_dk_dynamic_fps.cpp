@@ -4,11 +4,13 @@
 #include <cstdio>
 #include <cstring>
 #include <span>
+#include <utility>
 #include <string_view>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/file_sys/patch_manager.h"
 #include "core/loader/nx2_dk_dynamic_fps.h"
 
 namespace {
@@ -457,4 +459,104 @@ TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS through the loader's entry",
                      .has_value());
         REQUIRE(text.words == before);
     }
+}
+
+TEST_CASE("Nx2DkDynamicFps: FindSites finds what Apply patches", "[core]") {
+    Text text;
+    text.PutAll();
+    const Sites sites = FindSites(text.Bytes(), TextSize);
+    REQUIRE(sites.controller == Controller);
+    REQUIRE(sites.sleep == Sleep);
+    REQUIRE(sites.step == Step);
+    REQUIRE(sites.controller_matches == 1);
+    REQUIRE(sites.sleep_matches == 1);
+    REQUIRE(sites.step_matches == 1);
+    REQUIRE(FindSites(text.Bytes().first(TextSize - 4), TextSize).controller_matches == 0);
+}
+
+TEST_CASE("Nx2DkDynamicFps: a mod in the frame rate code turns the patch off", "[core]") {
+    Text text;
+    text.PutAll();
+    // The present interval sites of the 30 FPS lock (nso.cpp): A, and the vblank divisor
+    constexpr size_t SiteA = 0x800, Divisor = 0x900;
+    text.words[SiteA] = 0xF940C260;
+    text.words[SiteA + 1] = 0x52800021;
+    text.words[SiteA + 2] = 0xB940E262;
+    text.words[SiteA + 3] = 0x94000042;
+    text.words[Divisor] = 0x52800788;
+    text.words[Divisor + 1] = 0xB9402689;
+    text.words[Divisor + 2] = 0xB9004295;
+    text.words[Divisor + 3] = 0x1AD50D08;
+    text.words[Divisor + 4] = 0x2A0803E1;
+    const auto zones = FpsZones(text.Bytes(), TextSize);
+    REQUIRE(zones.size() == 6);
+
+    constexpr size_t TextLocation = 0x100; // module offsets are the text's plus this
+    const auto at = [](size_t word) { return TextLocation + word * 4; };
+    using Ranges = std::vector<std::pair<size_t, size_t>>;
+    // A "60 FPS" mod: one word at the controller's 40 fps check
+    const auto low = FirstConflict(zones, TextLocation,
+                                   Ranges{{at(Controller + LowTargetOffset),
+                                           at(Controller + LowTargetOffset) + 4}});
+    REQUIRE(low.has_value());
+    REQUIRE(low->offset == at(Controller + LowTargetOffset));
+    REQUIRE(low->what == "frame rate controller");
+    // The clock step, the present interval, the divisor, the free space the patch writes to
+    REQUIRE(FirstConflict(zones, TextLocation, Ranges{{at(Step + 7), at(Step + 8)}})->what ==
+            "game clock step");
+    REQUIRE(FirstConflict(zones, TextLocation, Ranges{{at(SiteA + 2), at(SiteA + 3)}})->what ==
+            "present interval");
+    REQUIRE(FirstConflict(zones, TextLocation, Ranges{{at(Divisor + 3), at(Divisor + 4)}})
+                ->what == "present interval");
+    REQUIRE(FirstConflict(zones, TextLocation, Ranges{{at(Cave + 2), at(Cave + 3)}})->what ==
+            "free space it uses");
+    // The margin around a site counts, past it not
+    REQUIRE(FirstConflict(zones, TextLocation,
+                          Ranges{{at(Sleep + 3 + ZoneMarginWords - 1), at(Sleep + 3 +
+                                                                          ZoneMarginWords)}})
+                .has_value());
+    REQUIRE(!FirstConflict(zones, TextLocation,
+                           Ranges{{at(Sleep + 3 + ZoneMarginWords),
+                                   at(Sleep + 3 + ZoneMarginWords) + 4}})
+                 .has_value());
+    // A mod elsewhere (a resolution or graphics patch) leaves the patch on
+    REQUIRE(!FirstConflict(zones, TextLocation, Ranges{{at(0x40), at(0x44)}, {at(0xA00), at(0xA10)}})
+                 .has_value());
+    // The text's own offset: the same bytes one text location lower are outside
+    REQUIRE(!FirstConflict(zones, 0, Ranges{{at(Step + 7) + 0x2000, at(Step + 8) + 0x2000}})
+                 .has_value());
+    // Of several ranges the first byte inside a zone
+    const auto first = FirstConflict(
+        zones, TextLocation, Ranges{{at(Divisor), at(Divisor) + 4}, {at(Step), at(Step) + 4}});
+    REQUIRE(first->offset == at(Step));
+}
+
+TEST_CASE("Nx2DkDynamicFps: no zones without the code", "[core]") {
+    Text text;
+    const auto zones = FpsZones(text.Bytes(), TextSize);
+    // Only the free space the patch would write to
+    REQUIRE(zones.size() == 1);
+    REQUIRE(zones[0].begin == Cave * 4);
+    REQUIRE(zones[0].end == (Cave + CaveWords) * 4);
+    REQUIRE(FpsZones(text.Bytes().first(16), TextSize).empty());
+}
+
+TEST_CASE("PatchManager: ChangedRanges, the bytes a mod changed", "[core]") {
+    using Ranges = std::vector<std::pair<size_t, size_t>>;
+    const std::vector<u8> before{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    std::vector<u8> after = before;
+    REQUIRE(FileSys::ChangedRanges(before, after, 0).empty());
+    after[2] = 0xFF;
+    after[3] = 0xFF;
+    after[7] = 0xFF;
+    REQUIRE(FileSys::ChangedRanges(before, after, 0) == Ranges{{2, 4}, {7, 8}});
+    // The header is skipped and the offsets start after it
+    REQUIRE(FileSys::ChangedRanges(before, after, 3) == Ranges{{0, 1}, {4, 5}});
+    REQUIRE(FileSys::ChangedRanges(before, after, 8).empty());
+    // A longer module: the added bytes count as changed, joined to a change just before them
+    after.push_back(1);
+    after.push_back(2);
+    after[9] = 0xFF;
+    REQUIRE(FileSys::ChangedRanges(before, after, 0) == Ranges{{2, 4}, {7, 8}, {9, 12}});
+    REQUIRE(FileSys::ChangedRanges(after, before, 0) == Ranges{{2, 4}, {7, 8}, {9, 12}});
 }
