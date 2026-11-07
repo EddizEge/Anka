@@ -35,6 +35,7 @@ add_executable(tests
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp
     video_core/ampere_hmma.cpp
+    video_core/ampere_branch_modifiers.cpp
     video_core/nx2_mode_gov.cpp
     video_core/nx2_mode_pace.cpp
     video_core/nx2_mode_pace21.cpp

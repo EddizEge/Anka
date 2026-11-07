@@ -2444,6 +2444,15 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             // out of a lowered SSY region would leave its token on Eden's flow stack).
             break;
         case 0x947: { // BRA
+            // The offset's two low bits (fae454cfeb, d48f75bdfb): .U (1) is a plain branch, .DIV (2)
+            // branches when the warp has diverged, .CONV (3) when its active threads are the mask in
+            // the uniform register at 24-31. Eden runs the warp's threads converged there: .CONV
+            // always branches and .DIV never does. Unlike upstream, a mode 0 branch with bit 91 is
+            // still lowered as before (Anka 1.0.1 accepts it; rejecting it would be a regression).
+            const u32 mode = insn.Bits(32, 2);
+            if (mode == 1 && (insn.Bits(91, 1) || insn.Bits(82, 5) || insn.Bits(92, 13)))
+                return fail(index, "native branch convergence mode");
+            if (mode == 2) break;
             u64 branch_predicate = predicate;
             if (opcode == 0x947 && insn.Bits(87, 4) != 7) {
                 if (insn.Bits(12, 4) != 7) {
@@ -2454,7 +2463,7 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             } else if (insn.Bits(87, 4) != 7) {
                 return fail(index, "native extra branch condition");
             }
-            const u64 raw = insn.words[1] | (u64{insn.words[2] & 0x3ffff} << 32);
+            const u64 raw = (insn.words[1] & ~3U) | (u64{insn.words[2] & 0x3ffff} << 32);
             const s64 relative = static_cast<s64>(raw << 14) >> 14;
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16) return fail(index, "native branch destination alignment");
