@@ -15,10 +15,11 @@
 #include <vector>
 
 // Anka 1.1 ships two cores: this program (Donkey Kong Bananza and every other game) and a second
-// core next to it for The Legend of Zelda: Ocarina of Time. The menu (yuzu/main_window.cpp) and
+// core next to it for one game (SecondCoreProgramId). The menu (yuzu/main_window.cpp) and
 // anka-cli (yuzu_cmd/yuzu.cpp) start the second core for that game; the decisions without Qt or
 // the emulator (src/tests/yuzu/anka_core_route.cpp). The contract is the second core's
-// (anka-birlesim 455f2a90cd): ANKA_USER_DIR, -f / -c / -g, exit codes 0 / 1 / 75 / 76.
+// (anka-birlesim 455f2a90cd, its names from 7b85eb7ce4's common/anka_core.h): ANKA_USER_DIR,
+// -f / -c / -g, exit codes 0 / 1 / 75 / 76.
 //
 // Every name the second core goes by (its folder, programs, settings file, cache and log folders,
 // lock) and every text the user reads about it are here and only here: a rename is one commit.
@@ -26,14 +27,14 @@ namespace AnkaCoreRoute {
 
 /// The second core's file names (the contract with it).
 namespace Names {
-constexpr std::string_view Folder = "zelda";              ///< <package>/<Folder>
-constexpr std::string_view CliProgram = "anka-zelda-cli.exe";
-constexpr std::string_view QtProgram = "anka-zelda.exe";  ///< with a window of its own; none in 1.1
-constexpr std::string_view Ini = "sdl2-config-zelda.ini"; ///< <user>/config/<Ini>
-constexpr std::string_view CacheFolder = "zelda";         ///< <user>/cache/<CacheFolder>: its caches
-constexpr std::string_view LogFolder = "zelda";           ///< <user>/log/<LogFolder>/eden_log.txt
+constexpr std::string_view Folder = "core2";              ///< <package>/<Folder>
+constexpr std::string_view CliProgram = "anka-core2-cli.exe";
+constexpr std::string_view QtProgram = "anka-core2.exe";  ///< with a window of its own; none in 1.1
+constexpr std::string_view Ini = "sdl2-config-core2.ini"; ///< <user>/config/<Ini>
+constexpr std::string_view CacheFolder = "core2";         ///< <user>/cache/<CacheFolder>: its caches
+constexpr std::string_view LogFolder = "core2";           ///< <user>/log/<LogFolder>/eden_log.txt
 constexpr std::string_view LogFile = "eden_log.txt";
-constexpr std::string_view Lock = "Local\\AnkaZeldaCore"; ///< its single instance (exit 76)
+constexpr std::string_view Lock = "Local\\AnkaCore2";     ///< its single instance (exit 76)
 } // namespace Names
 
 /// What the user reads about the second core (English, as the rest of Anka). No game's name.
@@ -60,7 +61,7 @@ constexpr const char* NoEffectOnSecondCore = "Anka's second core: no effect";
 /// The Anka tab's preset: what it means on the second core (SecondCorePresetVars)
 constexpr const char* PresetOnSecondCore =
     "On Anka's second core Reactive Flushing stays off, so both Recommended presets are the "
-    "same there; Safe also turns off its GPU shortcuts.";
+    "same there; Safe also turns off its GPU shortcuts and its GPU thread split.";
 } // namespace Text
 
 /// The game the second core plays (its updates share the base id's upper bits).
@@ -124,11 +125,12 @@ struct SecondCorePresetVar {
 
 /// The presets on the second core. Recommended: the boxes alone. Reactive: the same
 /// (EDEN_NX2_RX_RT_FIT has no reader there, and its settings file keeps Reactive Flushing off).
-/// Safe: the boxes and the part of Core::Nx2PerfSettings::SafeOff it reads, at 0. Custom: the
+/// Safe: the boxes, the part of Core::Nx2PerfSettings::SafeOff it reads, at 0, and its own GPU
+/// thread split off (EDEN_NX2_SPLIT=0; its rare start-up stall waited in that split). Custom: the
 /// boxes. Never EDEN_NX2_PBFLUSH_WINDOW_KIB=256, the main core's window: it halved the second
 /// core's frame rate and made it stutter.
 inline constexpr int SafePreset = 2; ///< Core::Nx2PerfSettings::Preset::Safe
-inline constexpr std::array<SecondCorePresetVar, 8> SecondCorePresetVars{{
+inline constexpr std::array<SecondCorePresetVar, 9> SecondCorePresetVars{{
     {SafePreset, "EDEN_NX2_UBO_BIND_SKIP", "0"},
     {SafePreset, "EDEN_NX2_MARK_WORDS", "0"},
     {SafePreset, "EDEN_NX2_SLOT_SKIP", "0"},
@@ -137,6 +139,7 @@ inline constexpr std::array<SecondCorePresetVar, 8> SecondCorePresetVars{{
     {SafePreset, "EDEN_NX2_LAYOUT_MEMO", "0"},
     {SafePreset, "EDEN_NX2_FAST_PRIORITY_SCAN", "0"},
     {SafePreset, "EDEN_NX2_PBFLUSH_WINDOW_KIB", "0"},
+    {SafePreset, "EDEN_NX2_SPLIT", "0"},
 }};
 
 /// Whether an Anka tab setting does anything on the second core (else the tab marks it
