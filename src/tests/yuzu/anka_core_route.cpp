@@ -152,7 +152,7 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
                            Text::StopRunningFirst, Text::PropertiesNote, Text::Missing,
                            Text::IniNotWritten, Text::NotStarted,     Text::StartFailed,
                            Text::AlreadyRunning, Text::Crashed, Text::NoEffectOnSecondCore,
-                           Text::PresetOnSecondCore};
+                           Text::PresetOnSecondCore, Text::SettingsNotRead};
     for (const std::string_view text : texts) {
         REQUIRE(text.find("Zelda") == std::string_view::npos);
         REQUIRE(text.find("zelda") == std::string_view::npos);
@@ -164,6 +164,35 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     REQUIRE(std::string_view{Text::PropertiesNote} ==
             "These settings have no effect on this game's core.");
     REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "Anka's second core: no effect");
+}
+
+TEST_CASE("Anka route: a UTF-8 settings path under a folder named in any script",
+          "[yuzu][anka_route]") {
+    // "Ö ü ş 日本", as Config::GetConfigFilePath holds it (UTF-8)
+    const std::string folder = "\xC3\x96 \xC3\xBC \xC5\x9F \xE6\x97\xA5\xE6\x9C\xAC";
+    REQUIRE(PathFromUtf8(folder).u16string() == u"Ö ü ş 日本");
+    TempDir t;
+    const fs::path dir = t.path / PathFromUtf8(folder);
+    fs::create_directories(dir);
+    const fs::path file = dir / "qt-config.ini";
+    const std::string settings = "[Controls]\nplayer_0_button_a=\"engine:sdl,button:1\"\n";
+    std::ofstream{file, std::ios::binary} << settings;
+    const auto utf8 = file.u8string();
+    const std::string config_path(utf8.begin(), utf8.end());
+    REQUIRE(PathFromUtf8(config_path) == file);
+    REQUIRE(ReadStartingSettings(PathFromUtf8(config_path)) == settings);
+}
+
+TEST_CASE("Anka route: no settings read, no second core settings written", "[yuzu][anka_route]") {
+    TempDir t;
+    REQUIRE_FALSE(ReadStartingSettings(t.path / "missing.ini").has_value());
+    std::ofstream{t.path / "empty.ini"};
+    REQUIRE_FALSE(ReadStartingSettings(t.path / "empty.ini").has_value());
+    std::ofstream{t.path / "blank.ini"} << "\r\n\n  \n";
+    REQUIRE_FALSE(ReadStartingSettings(t.path / "blank.ini").has_value());
+    std::ofstream{t.path / "one.ini", std::ios::binary} << "[UI]\n";
+    REQUIRE(ReadStartingSettings(t.path / "one.ini") == std::string{"[UI]\n"});
+    REQUIRE(std::string_view{Text::SettingsNotRead}.find("%1") != std::string_view::npos);
 }
 
 TEST_CASE("Anka route: the second core in the package", "[yuzu][anka_route]") {

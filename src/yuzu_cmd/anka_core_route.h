@@ -7,8 +7,10 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -50,6 +52,8 @@ constexpr const char* Missing = "Anka's second core is missing: %1 was not found
                                 "whole Anka package.";
 constexpr const char* IniNotWritten =
     "The settings of Anka's second core could not be written to %1.";
+constexpr const char* SettingsNotRead =
+    "Anka's second core was not started: the settings could not be read from %1.";
 constexpr const char* NotStarted = "Anka's second core could not be started: %1";
 constexpr const char* StartFailed = "The game could not start on Anka's second core. The details "
                                     "are in its log:\n%1";
@@ -97,6 +101,33 @@ inline std::filesystem::path SecondCoreIniPath(const std::filesystem::path& user
 /// The second core's log (for the messages after a failed start).
 inline std::filesystem::path SecondCoreLogPath(const std::filesystem::path& user_dir) {
     return user_dir / "log" / Names::LogFolder / Names::LogFile;
+}
+
+/// A UTF-8 path (Config::GetConfigFilePath, Common::FS::PathToUTF8String) as a path. A path built
+/// from a std::string reads it in the ANSI code page on Windows: a folder named with an "ö" or in
+/// Japanese becomes another path, or an exception.
+inline std::filesystem::path PathFromUtf8(std::string_view utf8) {
+    return std::filesystem::path{std::u8string(utf8.begin(), utf8.end())};
+}
+
+/// The starting program's settings file, for MakeSecondCoreIni. Empty when it could not be read or
+/// holds nothing: the second core's settings file then stays as it was and the second core does not
+/// start (written from nothing, it would have no controls and default settings).
+inline std::optional<std::string> ReadStartingSettings(const std::filesystem::path& file) {
+    std::ifstream in{file, std::ios::binary};
+    if (!in.is_open()) {
+        return std::nullopt;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    if (in.bad()) {
+        return std::nullopt;
+    }
+    std::string settings = std::move(text).str();
+    if (settings.find_first_not_of(" \t\r\n") == std::string::npos) {
+        return std::nullopt;
+    }
+    return settings;
 }
 
 /// One Anka tab setting on the second core: the variable it sets there while its box is on.

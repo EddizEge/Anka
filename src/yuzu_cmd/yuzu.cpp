@@ -292,16 +292,21 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
     const auto core = FindSecondCore(package, false);
     if (!core) {
         LOG_CRITICAL(Frontend, "Anka's second core is missing: {} was not found",
-                     (package / Names::Folder / Names::CliProgram).string());
+                     Common::FS::PathToUTF8String(package / Names::Folder / Names::CliProgram));
         return 1;
     }
     const fs::path user = Common::FS::GetEdenPath(EdenPath::EdenDir);
 
     // Its settings from this program's (the same sections and keys), written at every start
     {
-        std::ifstream in{fs::path{config.GetConfigFilePath()}, std::ios::binary};
-        std::stringstream text;
-        text << in.rdbuf();
+        const auto text = ReadStartingSettings(PathFromUtf8(config.GetConfigFilePath()));
+        if (!text) {
+            LOG_CRITICAL(Frontend,
+                         "Anka's second core was not started: the settings could not be read "
+                         "from {}",
+                         config.GetConfigFilePath());
+            return 1;
+        }
         IniState state;
         state.docked = Settings::values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked;
         for (const auto& [key, path] : {std::pair{"nand_directory", EdenPath::NANDDir},
@@ -319,10 +324,10 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);
         std::ofstream out{ini, std::ios::binary | std::ios::trunc};
-        out << MakeSecondCoreIni(text.str(), state);
+        out << MakeSecondCoreIni(*text, state);
         if (!out) {
             LOG_CRITICAL(Frontend, "The settings of Anka's second core could not be written to {}",
-                         ini.string());
+                         Common::FS::PathToUTF8String(ini));
             return 1;
         }
     }
@@ -384,14 +389,14 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
             continue;
         case ExitReaction::StartFailed:
             LOG_ERROR(Frontend, "The game could not start on Anka's second core; its log: {}",
-                      SecondCoreLogPath(user).string());
+                      Common::FS::PathToUTF8String(SecondCoreLogPath(user)));
             break;
         case ExitReaction::AlreadyRunning:
             LOG_ERROR(Frontend, "Anka's second core is already running");
             break;
         case ExitReaction::Crashed:
             LOG_ERROR(Frontend, "Anka's second core closed unexpectedly; its log: {}",
-                      SecondCoreLogPath(user).string());
+                      Common::FS::PathToUTF8String(SecondCoreLogPath(user)));
             break;
         case ExitReaction::None:
             break;

@@ -2835,9 +2835,15 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
 
     // Its settings: the menu's, written again at every start (BootGame saved them)
     {
-        std::ifstream in{fs::path{config->GetConfigFilePath()}, std::ios::binary};
-        std::stringstream text;
-        text << in.rdbuf();
+        const fs::path menu_ini = PathFromUtf8(config->GetConfigFilePath());
+        const auto text = ReadStartingSettings(menu_ini);
+        if (!text) {
+            QMessageBox::warning(this, tr("Anka"),
+                                 tr(Text::SettingsNotRead)
+                                     .arg(QString::fromStdU16String(
+                                         fs::path{menu_ini}.make_preferred().u16string())));
+            return;
+        }
         IniState state;
         state.docked =
             Settings::values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked;
@@ -2857,7 +2863,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);
         std::ofstream out{ini, std::ios::binary | std::ios::trunc};
-        out << MakeSecondCoreIni(text.str(), state);
+        out << MakeSecondCoreIni(*text, state);
         if (!out) {
             QMessageBox::warning(this, tr("Anka"),
                                  tr(Text::IniNotWritten)
@@ -2909,7 +2915,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         return;
     }
     LOG_INFO(Frontend, "Second core started: {} {} (pid {}{}, {} variables of its own)",
-             launch.program.string(), fmt::join(launch.args, " "), pid,
+             Common::FS::PathToUTF8String(launch.program), fmt::join(launch.args, " "), pid,
              restart_handoff ? ", restart handoff" : "", launch.env.size());
     statusBar()->showMessage(tr(Text::Starting), 10000);
 
