@@ -361,6 +361,10 @@ private slots:
     void OnGameListAddDirectory();
     void OnGameListShowList(bool show);
     void OnGameListOpenPerGameProperties(const std::string& file);
+    /// Anka 1.1: Ocarina of Time runs in the Zelda core, <package>/zelda (yuzu_cmd/anka_core_route.h).
+    void StartZeldaCore(const QString& game, bool restart_handoff);
+    void OnZeldaCoreExited(const QString& game);
+    [[nodiscard]] bool ZeldaCoreRunning() const;
     void OnLinkToRyujinx(const u64& program_id);
     void OnMenuLoadFile();
     void OnMenuLoadFolder();
@@ -549,6 +553,9 @@ private:
     QTimer nx2_auto_timer;
     // Its exit closes the window without ConfirmClose's question.
     bool nx2_auto_closing = false;
+    // The Zelda core started by StartZeldaCore while it runs (Windows: its process handle).
+    void* zelda_process = nullptr;
+    QObject* zelda_notifier = nullptr;
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)

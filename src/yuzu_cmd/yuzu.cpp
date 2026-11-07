@@ -18,7 +18,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <filesystem>
 #include <regex>
+#include <sstream>
 #include <string>
 #include "common/settings_enums.h"
 #include "core/launch_params.h"
@@ -30,6 +32,7 @@
 
 #include <fmt/ostream.h>
 
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
@@ -62,6 +65,7 @@
 #endif
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
+#include "yuzu_cmd/anka_core_route.h"
 #include "yuzu_cmd/nx2_auto_script.h"
 #include "frontend_common/nx2_osd.h"
 #include "yuzu_cmd/nx2_sampler.h"
@@ -263,6 +267,118 @@ struct SdlState {
     Nx2Osd::WriterPtr osd;
 };
 
+// Anka 1.1: Ocarina of Time runs in the Zelda core next to this program (<package>/zelda,
+// anka_core_route.h). This program writes its settings, starts it with the same game and full
+// screen choice, waits, restarts it after exit 75 and returns its exit code. Empty: not Zelda.
+static std::optional<int> RunZeldaCore(Core::System& system, const Core::LaunchParams& lp,
+                                       const SdlConfig& config) {
+#ifdef _WIN32
+    namespace fs = std::filesystem;
+    using namespace AnkaCoreRoute;
+    using Common::FS::EdenPath;
+
+    u64 program_id = 0;
+    {
+        const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+        const auto loader = Loader::GetLoader(system, Core::GetGameFileFromPath(vfs, lp.filepath));
+        if (loader == nullptr || loader->ReadProgramId(program_id) != Loader::ResultStatus::Success ||
+            !IsZelda(program_id)) {
+            return std::nullopt;
+        }
+    }
+    std::wstring exe(MAX_PATH, L'\0');
+    exe.resize(GetModuleFileNameW(nullptr, exe.data(), DWORD(exe.size())));
+    const fs::path package = fs::path{exe}.parent_path();
+    const auto core = FindZeldaCore(package, false);
+    if (!core) {
+        LOG_CRITICAL(Frontend, "The Zelda core is missing: {} was not found",
+                     (package / "zelda" / "anka-zelda-cli.exe").string());
+        return 1;
+    }
+    const fs::path user = Common::FS::GetEdenPath(EdenPath::EdenDir);
+
+    // Its settings from this program's (the same sections and keys), written at every start
+    {
+        std::ifstream in{fs::path{config.GetConfigFilePath()}, std::ios::binary};
+        std::stringstream text;
+        text << in.rdbuf();
+        IniState state;
+        state.docked = Settings::values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked;
+        for (const auto& [key, path] : {std::pair{"nand_directory", EdenPath::NANDDir},
+                                        std::pair{"sdmc_directory", EdenPath::SDMCDir},
+                                        std::pair{"load_directory", EdenPath::LoadDir},
+                                        std::pair{"dump_directory", EdenPath::DumpDir},
+                                        std::pair{"tas_directory", EdenPath::TASDir}}) {
+            state.data_storage.emplace_back(key, Common::FS::GetEdenPathString(path));
+        }
+        const auto save = Common::FS::GetEdenPathString(EdenPath::SaveDir);
+        state.data_storage.emplace_back(
+            "save_directory",
+            save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
+        const fs::path ini = ZeldaIniPath(user);
+        std::error_code ec;
+        fs::create_directories(ini.parent_path(), ec);
+        std::ofstream out{ini, std::ios::binary | std::ios::trunc};
+        out << MakeZeldaIni(text.str(), state);
+        if (!out) {
+            LOG_CRITICAL(Frontend, "The Zelda core's settings could not be written to {}",
+                         ini.string());
+            return 1;
+        }
+    }
+
+    bool restart = false;
+    for (;;) {
+        const Launch launch = PlanZelda(*core, user, lp.filepath, lp.fullscreen, restart);
+        // The child inherits this environment: the handoff only for the restart that asked
+        _wputenv_s(L"EDEN_CLI_RESTART_HANDOFF", L"");
+        for (const auto& [name, value] : launch.env) {
+            _wputenv_s(Common::UTF8ToUTF16W(name).c_str(), Common::UTF8ToUTF16W(value).c_str());
+        }
+        std::wstring command = Common::UTF8ToUTF16W(WindowsCommandLine(launch.program, launch.args));
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        LOG_INFO(Frontend, "Zelda core: {}{}", Common::UTF16ToUTF8(command),
+                 restart ? " (restart handoff)" : "");
+        Common::Log::Stop();
+        if (!CreateProcessW(launch.program.c_str(), command.data(), nullptr, nullptr, TRUE, 0,
+                            nullptr, launch.working_dir.c_str(), &startup, &process)) {
+            LOG_CRITICAL(Frontend, "The Zelda core could not be started (error {})",
+                         GetLastError());
+            return 1;
+        }
+        WaitForSingleObject(process.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(process.hProcess, &code);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        LOG_INFO(Frontend, "Zelda core exited with {:#x}", code);
+        switch (ForExitCode(code)) {
+        case ExitReaction::Restart:
+            restart = true;
+            continue;
+        case ExitReaction::StartFailed:
+            LOG_ERROR(Frontend, "The Zelda core could not start the game; its log: {}",
+                      ZeldaLogPath(user).string());
+            break;
+        case ExitReaction::AlreadyRunning:
+            LOG_ERROR(Frontend, "The Zelda core is already running");
+            break;
+        case ExitReaction::Crashed:
+            LOG_ERROR(Frontend, "The Zelda core closed unexpectedly; its log: {}",
+                      ZeldaLogPath(user).string());
+            break;
+        case ExitReaction::None:
+            break;
+        }
+        return static_cast<int>(code);
+    }
+#else
+    return std::nullopt;
+#endif
+}
+
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(WriteCrashDump);
@@ -318,6 +434,12 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     // Apply the command line arguments
     state->system.ApplySettings();
+
+    // Ocarina of Time: the Zelda core plays it; this program returns its exit code
+    if (const auto zelda_exit = RunZeldaCore(state->system, lp, config)) {
+        Common::Log::Stop();
+        std::exit(*zelda_exit);
+    }
 
     switch (Settings::values.renderer_backend.GetValue()) {
 #ifdef HAS_OPENGL

@@ -27,6 +27,7 @@ add_executable(tests
     core/nx2_osd_speed.cpp
     core/nx2_perf_settings.cpp
     core/nx2_present_crop.cpp
+    yuzu/anka_core_route.cpp
     yuzu/migration_plan.cpp
     core/nx2_present_rate.cpp
     core/nx2_vi2_reply.cpp
