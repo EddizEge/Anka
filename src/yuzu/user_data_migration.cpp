@@ -148,6 +148,18 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 }
 
 void UserDataMigrator::ShowMigrationCancelledMessage(QMainWindow* main_window) {
+    // Portable: deleting the config folder brings the prompt back, but the migration then refuses
+    // to replace a user folder that holds data (MigrationPlan::MayReplace)
+    if (IsPortable()) {
+        QMessageBox::information(
+            main_window, QObject::tr("Migration"),
+            QObject::tr("You can bring this prompt back by moving everything in the user folder "
+                        "somewhere else:\n%1")
+                .arg(QString::fromStdString(
+                    Common::FS::GetEdenPathString(Common::FS::EdenPath::EdenDir))),
+            QMessageBox::Ok);
+        return;
+    }
     QMessageBox::information(main_window, QObject::tr("Migration"),
                              QObject::tr("You can manually re-trigger this prompt by deleting the "
                                          "new config directory:\n%1")

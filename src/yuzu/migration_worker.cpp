@@ -135,8 +135,17 @@ void MigrationWorker::process() {
             break;
         }
     } catch (const fs::filesystem_error& e) {
-        emit error(tr("Migrating from %1 failed; the old data was not removed.\nOS gave error: %2")
-                       .arg(selected_emu.name(), QString::fromLocal8Bit(e.what())));
+        QString message =
+            tr("Migrating from %1 failed; the old data was not removed.\nOS gave error: %2")
+                .arg(selected_emu.name(), QString::fromLocal8Bit(e.what()));
+        // A copy that stopped halfway (a full disk) leaves part of the data in the new folder: the
+        // next migration would refuse to replace it (MigrationPlan::MayReplace)
+        if (strategy != MigrationStrategy::Move && strategy != MigrationStrategy::Link) {
+            message.append(tr("\n\n%1 may hold a partial copy. Move its contents somewhere else "
+                              "before you try again.")
+                               .arg(QString::fromStdU16String(eden_dir.u16string())));
+        }
+        emit error(message);
         return;
     }
 
