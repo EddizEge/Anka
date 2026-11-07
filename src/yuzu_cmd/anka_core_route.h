@@ -47,7 +47,8 @@ constexpr const char* StillRunning = "Another game is still running on Anka's se
                                      "it before starting another game.";
 constexpr const char* StopRunningFirst =
     "Stop the running game first: this game runs on Anka's second core.";
-constexpr const char* PropertiesNote = "These settings have no effect on this game's core.";
+constexpr const char* PropertiesNote =
+    "Per-game settings are not used on Anka's second core; the add-on choices still apply.";
 constexpr const char* Missing = "Anka's second core is missing: %1 was not found. Extract the "
                                 "whole Anka package.";
 constexpr const char* IniNotWritten =
