@@ -16,6 +16,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace AnkaCoreRoute;
+using Env = std::vector<std::pair<std::string, std::string>>;
 
 constexpr std::uint64_t Bananza = 0x040074A01BF12000ULL;
 
@@ -39,6 +40,11 @@ void Touch(const fs::path& file) {
 
 bool Has(const std::string& text, const std::string& line) {
     return ("\n" + text).find("\n" + line + "\n") != std::string::npos;
+}
+
+// Every box of the Anka tab on
+bool AllOn(std::string_view) {
+    return true;
 }
 
 // The parts of a qt-config.ini the second core's settings change
@@ -122,7 +128,8 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     const std::array texts{Text::Starting,      Text::Closed,         Text::StillRunning,
                            Text::StopRunningFirst, Text::PropertiesNote, Text::Missing,
                            Text::IniNotWritten, Text::NotStarted,     Text::StartFailed,
-                           Text::AlreadyRunning, Text::Crashed};
+                           Text::AlreadyRunning, Text::Crashed,       Text::MainCoreOnly,
+                           Text::PresetOnSecondCore};
     for (const std::string_view text : texts) {
         REQUIRE(text.find("Zelda") == std::string_view::npos);
         REQUIRE(text.find("zelda") == std::string_view::npos);
@@ -168,6 +175,65 @@ TEST_CASE("Anka route: the second core's command line and environment", "[yuzu][
     REQUIRE(full.env.size() == 2);
     REQUIRE(full.env[1] == std::pair<std::string, std::string>{"EDEN_CLI_RESTART_HANDOFF", "1"});
 
+    // Settings variables between ANKA_USER_DIR and the handoff
+    const auto with_settings =
+        PlanSecondCore(core, user, "D:/Games/Game.nup", false, true, Env{{"EDEN_X", "1"}});
+    REQUIRE(with_settings.env.size() == 3);
+    REQUIRE(with_settings.env[0].first == "ANKA_USER_DIR");
+    REQUIRE(with_settings.env[1] == std::pair<std::string, std::string>{"EDEN_X", "1"});
+    REQUIRE(with_settings.env[2].first == "EDEN_CLI_RESTART_HANDOFF");
+}
+
+TEST_CASE("Anka route: the settings table gives the second core's variables",
+          "[yuzu][anka_route]") {
+    constexpr std::array<SecondCoreSetting, 2> table{{
+        {"osd", "EDEN_OOT_OSD", "1"},
+        {"jit_same", "EDEN_OOT_JIT", "2"},
+    }};
+    constexpr std::array<SecondCorePresetVar, 2> presets{{
+        {1, "EDEN_OOT_REACTIVE", "1"},
+        {2, "EDEN_OOT_SAFE", "1"},
+    }};
+    const auto osd_only = [](std::string_view key) { return key == "osd"; };
+    REQUIRE(SecondCoreEnv(osd_only, 0, table, presets) == Env{{"EDEN_OOT_OSD", "1"}});
+    REQUIRE(SecondCoreEnv(AllOn, 1, table, presets) ==
+            Env{{"EDEN_OOT_OSD", "1"}, {"EDEN_OOT_JIT", "2"}, {"EDEN_OOT_REACTIVE", "1"}});
+    REQUIRE(SecondCoreEnv([](std::string_view) { return false; }, 3, table, presets).empty());
+    REQUIRE(ReachesSecondCore("osd", table));
+    REQUIRE_FALSE(ReachesSecondCore("bananza_dynamic_fps", table));
+}
+
+TEST_CASE("Anka route: the main core's settings do not reach the second core",
+          "[yuzu][anka_route]") {
+    // The Anka tab's keys (Core::Nx2PerfSettings::Keys): none in the table until its contract
+    for (const std::string_view key :
+         {"split_gpu_thread", "acquire_peek", "jit_same", "front_macro_lean", "fg_timed", "osd",
+          "bananza_dynamic_fps", "bananza_frame_pacing"}) {
+        REQUIRE_FALSE(ReachesSecondCore(key));
+    }
+    // Every box on, every preset: no variable
+    for (int preset = 0; preset <= 3; ++preset) {
+        REQUIRE(SecondCoreEnv(AllOn, preset).empty());
+    }
+    // So the second core gets ANKA_USER_DIR alone
+    const auto launch = PlanSecondCore("D:/Anka/zelda/x.exe", "D:/Anka/user", "g.nup", false, false,
+                                       SecondCoreEnv(AllOn, 0));
+    REQUIRE(launch.env.size() == 1);
+    REQUIRE(launch.env[0].first == "ANKA_USER_DIR");
+}
+
+TEST_CASE("Anka route: the starting program's switches are not passed on", "[yuzu][anka_route]") {
+    REQUIRE(ClearedForSecondCore("EDEN_NX2_PBFLUSH"));
+    REQUIRE(ClearedForSecondCore("EDEN_NX2_DK_DYN"));
+    REQUIRE(ClearedForSecondCore("EDEN_OOT_ANYTHING"));
+    REQUIRE(ClearedForSecondCore("EDEN_NUP_CACHE_MIB"));
+    REQUIRE(ClearedForSecondCore("EDEN_CLI_RESTART_HANDOFF"));
+    REQUIRE(ClearedForSecondCore("__GL_SHADER_DISK_CACHE"));
+    REQUIRE(ClearedForSecondCore("__GL_SHADER_DISK_CACHE_PATH"));
+    REQUIRE_FALSE(ClearedForSecondCore("ANKA_USER_DIR"));
+    REQUIRE_FALSE(ClearedForSecondCore("PATH"));
+    REQUIRE_FALSE(ClearedForSecondCore("XEDEN_NX2"));
+    REQUIRE_FALSE(ClearedForSecondCore("__GL_THREADED_OPTIMIZATIONS"));
 }
 
 TEST_CASE("Anka route: Windows command line quoting", "[yuzu][anka_route]") {
@@ -221,6 +287,16 @@ TEST_CASE("Anka route: unchanged AA, filter and ASTC stay the second core's",
     REQUIRE(ini.find("dk_30fps") == std::string::npos);
     // Controls go over as they are
     REQUIRE(Has(ini, "player_0_button_a=\"engine:sdl,button:1\""));
+}
+
+TEST_CASE("Anka route: frame generation goes over in the settings file", "[yuzu][anka_route]") {
+    const auto ini = MakeSecondCoreIni(QtConfig, State(true));
+    for (const char* line :
+         {"frame_gen\\default=false", "frame_gen=true", "frame_gen_type\\default=true",
+          "frame_gen_type=1", "frame_gen_multiplier\\default=false", "frame_gen_multiplier=2",
+          "frame_gen_target_rate\\default=false", "frame_gen_target_rate=120"}) {
+        REQUIRE(Has(ini, line));
+    }
 }
 
 TEST_CASE("Anka route: its game keeps its frame rate patch", "[yuzu][anka_route]") {

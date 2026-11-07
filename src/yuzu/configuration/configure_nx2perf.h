@@ -55,7 +55,10 @@ private:
     void ShowPreset();
     void ChoosePreset(Core::Nx2PerfSettings::Preset chosen);
     void BoxChanged();
+    /// The tooltips: set outside the program, no effect on Anka's second core.
     void MarkSetOutside();
+    /// A box's [Anka] key (Core::Nx2PerfSettings::Keys).
+    static std::string_view KeyName(bool Core::Nx2PerfSettings::Switches::*field);
     void ShowFrameGen();
     void ChooseFrameGen(Core::Nx2PerfSettings::FrameGen chosen);
     void ShowPending();

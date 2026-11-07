@@ -2866,8 +2866,21 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         }
     }
 
+    // The Anka tab's settings the second core has a counterpart for (none until its table comes)
+    const auto& anka = UISettings::values.nx2perf;
+    const auto settings_env = SecondCoreEnv(
+        [&anka](std::string_view key) {
+            for (const auto& k : Core::Nx2PerfSettings::Keys) {
+                if (k.name == key) {
+                    return anka.*k.field;
+                }
+            }
+            return false;
+        },
+        static_cast<int>(anka.preset));
     const Launch launch = PlanSecondCore(*core, user, game.toStdString(),
-                                         ui->action_Fullscreen->isChecked(), restart_handoff);
+                                         ui->action_Fullscreen->isChecked(), restart_handoff,
+                                         settings_env);
     QProcess process;
     process.setProgram(QString::fromStdU16String(launch.program.u16string()));
     QStringList args;
@@ -2877,8 +2890,13 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     process.setArguments(args);
     process.setWorkingDirectory(QString::fromStdU16String(launch.working_dir.u16string()));
     auto env = QProcessEnvironment::systemEnvironment();
-    // The handoff is only for the restart that asked for it
-    env.remove(QStringLiteral("EDEN_CLI_RESTART_HANDOFF"));
+    // Not this program's switches (Nx2PerfSession set them in its environment), nor the handoff
+    // of another restart
+    for (const QString& name : env.keys()) {
+        if (ClearedForSecondCore(name.toStdString())) {
+            env.remove(name);
+        }
+    }
     for (const auto& [name, value] : launch.env) {
         env.insert(QString::fromStdString(name), QString::fromStdString(value));
     }
@@ -2890,8 +2908,9 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
                                  .arg(process.errorString()));
         return;
     }
-    LOG_INFO(Frontend, "Second core started: {} {} (pid {}{})", launch.program.string(),
-             fmt::join(launch.args, " "), pid, restart_handoff ? ", restart handoff" : "");
+    LOG_INFO(Frontend, "Second core started: {} {} (pid {}{}, {} variables of its own)",
+             launch.program.string(), fmt::join(launch.args, " "), pid,
+             restart_handoff ? ", restart handoff" : "", launch.env.size());
     statusBar()->showMessage(tr(Text::Starting), 10000);
 
 #ifdef _WIN32

@@ -327,10 +327,34 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
         }
     }
 
+    // The child inherits this environment: not this program's switches (a launcher of the main
+    // core sets them), nor a handoff; its own come from PlanSecondCore. anka-cli has no Anka tab:
+    // no settings variables.
+    {
+        std::vector<std::wstring> cleared;
+        if (wchar_t* block = GetEnvironmentStringsW()) {
+            for (const wchar_t* entry = block; *entry != L'\0'; entry += wcslen(entry) + 1) {
+                // "=C:=C:\..." entries hold the current directories: never a switch
+                const std::wstring_view text{entry};
+                const auto equals = text.find(L'=', 1);
+                const std::wstring name{text.substr(0, equals)};
+                if (ClearedForSecondCore(Common::UTF16ToUTF8(name))) {
+                    cleared.push_back(name);
+                }
+            }
+            FreeEnvironmentStringsW(block);
+        }
+        for (const auto& name : cleared) {
+            _wputenv_s(name.c_str(), L"");
+        }
+        if (!cleared.empty()) {
+            LOG_INFO(Frontend, "Second core: {} variables of this program not passed on",
+                     cleared.size());
+        }
+    }
     bool restart = false;
     for (;;) {
         const Launch launch = PlanSecondCore(*core, user, lp.filepath, lp.fullscreen, restart);
-        // The child inherits this environment: the handoff only for the restart that asked
         _wputenv_s(L"EDEN_CLI_RESTART_HANDOFF", L"");
         for (const auto& [name, value] : launch.env) {
             _wputenv_s(Common::UTF8ToUTF16W(name).c_str(), Common::UTF8ToUTF16W(value).c_str());

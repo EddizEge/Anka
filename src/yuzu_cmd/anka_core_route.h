@@ -3,9 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -52,6 +55,14 @@ constexpr const char* StartFailed = "The game could not start on Anka's second c
 constexpr const char* AlreadyRunning = "Anka's second core is already running.";
 constexpr const char* Crashed = "Anka's second core closed unexpectedly (exit code 0x%1). Its "
                                 "log:\n%2";
+/// The Anka tab, next to a setting the second core does not take
+constexpr const char* MainCoreOnly =
+    "Only for games on Anka's main core: no effect on games that run on Anka's second core.";
+/// The Anka tab's preset while SecondCorePresetVars is empty
+constexpr const char* PresetOnSecondCore =
+    "On games that run on Anka's second core a preset changes only graphics settings (Reactive "
+    "Flushing, barrier feedback loops, frame generation); its other switches have no effect "
+    "there.";
 } // namespace Text
 
 /// The game the second core plays (its updates share the base id's upper bits).
@@ -89,6 +100,67 @@ inline std::filesystem::path SecondCoreLogPath(const std::filesystem::path& user
     return user_dir / "log" / Names::LogFolder / Names::LogFile;
 }
 
+/// One Anka tab setting on the second core: the variable it sets there while its box is on.
+struct SecondCoreSetting {
+    std::string_view key; ///< the [Anka] key (Core::Nx2PerfSettings::Keys)
+    std::string_view env;
+    std::string_view value;
+};
+
+/// TODO(contract): the second core's counterparts of the Anka tab, from anka-birlesim's table
+/// (setting | variable | value for Recommended / Reactive / Safe). Until it comes, none: no Anka
+/// switch reaches the second core, which runs on its own tuned defaults (the main core's values
+/// can slow it down: EDEN_NX2_PBFLUSH=256 halved its frame rate). Frame generation and the other
+/// graphics settings go over in its settings file (MakeSecondCoreIni), not here.
+inline constexpr std::array<SecondCoreSetting, 0> SecondCoreSettings{};
+
+/// A preset's variable on the second core (Core::Nx2PerfSettings::Preset as an int).
+struct SecondCorePresetVar {
+    int preset;
+    std::string_view env;
+    std::string_view value;
+};
+
+/// TODO(contract): what Recommended / Reactive / Safe mean on the second core. None until the
+/// table says: no preset variable goes there.
+inline constexpr std::array<SecondCorePresetVar, 0> SecondCorePresetVars{};
+
+/// Whether an Anka tab setting does anything on the second core (else the tab marks it
+/// Text::MainCoreOnly).
+inline bool ReachesSecondCore(std::string_view key,
+                              std::span<const SecondCoreSetting> table = SecondCoreSettings) {
+    return std::any_of(table.begin(), table.end(),
+                       [key](const SecondCoreSetting& setting) { return setting.key == key; });
+}
+
+/// The second core's variables for the Anka tab's state: `box_on(key)` for every setting of the
+/// table, then the preset's.
+template <typename BoxOn>
+std::vector<std::pair<std::string, std::string>> SecondCoreEnv(
+    BoxOn&& box_on, int preset, std::span<const SecondCoreSetting> settings = SecondCoreSettings,
+    std::span<const SecondCorePresetVar> presets = SecondCorePresetVars) {
+    std::vector<std::pair<std::string, std::string>> env;
+    for (const auto& setting : settings) {
+        if (box_on(setting.key)) {
+            env.emplace_back(setting.env, setting.value);
+        }
+    }
+    for (const auto& var : presets) {
+        if (var.preset == preset) {
+            env.emplace_back(var.env, var.value);
+        }
+    }
+    return env;
+}
+
+/// Variables of the starting program's environment the second core does not get: Anka's switches
+/// and the fork's diagnostics (EDEN_*; a launcher of the main core sets dozens) and the NVIDIA
+/// driver's shader cache settings (__GL_SHADER_DISK_CACHE*), as the second core's own test
+/// launchers clear them. Its own (PlanSecondCore's) are set afterwards.
+constexpr bool ClearedForSecondCore(std::string_view name) {
+    return name.starts_with("EDEN_") || name.starts_with("__GL_SHADER_DISK_CACHE");
+}
+
 struct Launch {
     std::filesystem::path program;
     std::filesystem::path working_dir;
@@ -97,10 +169,13 @@ struct Launch {
 };
 
 /// The second core's command line: `-f` when full screen, `-c <user>/config/<Names::Ini>`,
-/// `-g <game>`; ANKA_USER_DIR always, EDEN_CLI_RESTART_HANDOFF=1 only to restart after exit 75.
+/// `-g <game>`; ANKA_USER_DIR always, then `settings_env` (SecondCoreEnv), then
+/// EDEN_CLI_RESTART_HANDOFF=1 only to restart after exit 75.
 inline Launch PlanSecondCore(const std::filesystem::path& core,
                              const std::filesystem::path& user_dir, const std::string& game_utf8,
-                             bool fullscreen, bool restart_handoff) {
+                             bool fullscreen, bool restart_handoff,
+                             const std::vector<std::pair<std::string, std::string>>& settings_env =
+                                 {}) {
     Launch launch;
     launch.program = std::filesystem::path{core}.make_preferred();
     launch.working_dir = launch.program.parent_path();
@@ -114,6 +189,7 @@ inline Launch PlanSecondCore(const std::filesystem::path& core,
     launch.args.push_back(game_utf8);
     const auto user = std::filesystem::path{user_dir}.make_preferred().u8string();
     launch.env.emplace_back("ANKA_USER_DIR", std::string(user.begin(), user.end()));
+    launch.env.insert(launch.env.end(), settings_env.begin(), settings_env.end());
     if (restart_handoff) {
         launch.env.emplace_back("EDEN_CLI_RESTART_HANDOFF", "1");
     }

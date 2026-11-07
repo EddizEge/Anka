@@ -17,6 +17,7 @@
 #include "qt_common/config/uisettings.h"
 #include "ui_configure_nx2perf.h"
 #include "yuzu/nx2perf_session.h"
+#include "yuzu_cmd/anka_core_route.h"
 
 namespace Perf = Core::Nx2PerfSettings;
 
@@ -40,6 +41,10 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
 
     SetConfiguration();
     MarkSetOutside();
+    // A preset's own variables reach the second core only where its table says
+    if constexpr (AnkaCoreRoute::SecondCorePresetVars.empty()) {
+        ui->preset->setToolTip(tr(AnkaCoreRoute::Text::PresetOnSecondCore));
+    }
 
     // The preset's item order is Perf::Preset's (configure_nx2perf.ui).
     connect(ui->preset, &QComboBox::activated, this,
@@ -270,17 +275,30 @@ void ConfigureNx2Perf::MarkSetOutside() {
         // All set outside: the box changes nothing, its value is theirs.
         const bool all_outside = outside.size() == static_cast<qsizetype>(row.names.size());
         row.box->setEnabled(!all_outside);
-        if (outside.isEmpty()) {
-            row.box->setToolTip(QString{});
-        } else if (all_outside) {
-            row.box->setToolTip(tr("Set outside the program (your environment, a .bat of your own "
-                                   "or nx2_switches.txt), so this is used whatever the box says: "
-                                   "%1")
-                                    .arg(outside.join(QStringLiteral(", "))));
-        } else {
-            row.box->setToolTip(tr("Partly set outside the program, and that part is used: %1. "
-                                   "The box sets the rest.")
-                                    .arg(outside.join(QStringLiteral(", "))));
+        QStringList tip;
+        if (all_outside) {
+            tip << tr("Set outside the program (your environment, a .bat of your own "
+                      "or nx2_switches.txt), so this is used whatever the box says: "
+                      "%1")
+                       .arg(outside.join(QStringLiteral(", ")));
+        } else if (!outside.isEmpty()) {
+            tip << tr("Partly set outside the program, and that part is used: %1. "
+                      "The box sets the rest.")
+                       .arg(outside.join(QStringLiteral(", ")));
+        }
+        // The second core takes only the settings its table has (yuzu_cmd/anka_core_route.h)
+        if (!AnkaCoreRoute::ReachesSecondCore(KeyName(row.field))) {
+            tip << tr(AnkaCoreRoute::Text::MainCoreOnly);
+        }
+        row.box->setToolTip(tip.join(QStringLiteral("\n\n")));
+    }
+}
+
+std::string_view ConfigureNx2Perf::KeyName(bool Perf::Switches::*field) {
+    for (const Perf::Key& key : Perf::Keys) {
+        if (key.field == field) {
+            return key.name;
         }
     }
+    return {};
 }
