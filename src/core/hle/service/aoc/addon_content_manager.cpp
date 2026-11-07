@@ -55,6 +55,7 @@ static u64 GetCallerBaseTitleID(Core::System& system, const ClientProcessId& pro
     return FileSys::GetBaseTitleID(GetCallerAOCBaseTitleID(system, process_id));
 }
 
+// The installed add-on content (each NCA parsed: once, when the service starts)
 static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
     std::vector<u64> add_on_content;
     const auto& rcu = system.GetContentProvider();
@@ -66,10 +67,17 @@ static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
         std::remove_if(
             add_on_content.begin(), add_on_content.end(),
             [&rcu](u64 tid) {
-                return rcu.GetEntry(tid, FileSys::ContentRecordType::Data)->GetStatus() !=
-                       Loader::ResultStatus::Success;
+                const auto entry = rcu.GetEntry(tid, FileSys::ContentRecordType::Data);
+                return entry == nullptr || entry->GetStatus() != Loader::ResultStatus::Success;
             }),
         add_on_content.end());
+    return add_on_content;
+}
+
+// With the add-on content the current load published (a NUP's, FileSys::SetLooseAOC): cheap,
+// read on every call
+static std::vector<u64> WithLooseAOC(const std::vector<u64>& installed) {
+    std::vector<u64> add_on_content = installed;
     for (const u64 tid : FileSys::GetLooseAOCTitleIDs()) {
         if (std::find(add_on_content.begin(), add_on_content.end(), tid) == add_on_content.end()) {
             add_on_content.push_back(tid);
@@ -129,10 +137,9 @@ Result IAddOnContentManager::CountAddOnContent(Out<u32> out_count, ClientProcess
         R_SUCCEED();
     }
 
-    // The service outlives a single boot; pick up add-on content registered by the current load.
-    add_on_content = AccumulateAOCTitleIDs(system);
+    const auto all = WithLooseAOC(add_on_content);
     *out_count = static_cast<u32>(
-        std::count_if(add_on_content.begin(), add_on_content.end(),
+        std::count_if(all.begin(), all.end(),
                       [current](u64 tid) { return CheckAOCTitleIDMatchesBase(tid, current); }));
 
     R_SUCCEED();
@@ -150,8 +157,7 @@ Result IAddOnContentManager::ListAddOnContent(Out<u32> out_count,
     const auto& disabled = Settings::values.disabled_addons[
         FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id))];
     if (std::find(disabled.begin(), disabled.end(), "DLC") == disabled.end()) {
-        add_on_content = AccumulateAOCTitleIDs(system);
-        for (u64 content_id : add_on_content) {
+        for (u64 content_id : WithLooseAOC(add_on_content)) {
             if (FileSys::GetBaseTitleID(content_id) != current) {
                 continue;
             }
