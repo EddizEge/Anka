@@ -73,6 +73,7 @@
 #include "core/hle/service/nx2_osd_speed.h"
 #include "core/hle/service/nx2_frame_stats.h"
 #include "core/hle/service/nx2_ipc_trace.h"
+#include "core/hle/service/nx2_present_crop.h"
 #include "core/hle/service/nx2_present_rate.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/nx2_vi2_events.h"
@@ -1901,21 +1902,12 @@ private:
                         image_id, address);
             return;
         }
-        u32 crop_width = layout.width;
-        u32 crop_height = layout.height;
-        // Mario Kart World draws into the top-left corner of its present images: 2560x1440 docked
-        // (in 3840x2160 images), 1920x1080 handheld. It keeps its docked images after a switch to
-        // handheld, and showing all of them put the frame in a corner with stale docked frames
-        // around it.
-        if (system.GetApplicationProcessProgramID() == 0x0400C3F00006E000ULL) {
-            if (!Settings::IsDockedMode()) {
-                crop_width = (std::min)(crop_width, 1920U);
-                crop_height = (std::min)(crop_height, 1080U);
-            } else if (layout.width == 3840 && layout.height == 2160) {
-                crop_width = 2560;
-                crop_height = 1440;
-            }
-        }
+        // Handheld: the top-left 1920x1080 (nx2_present_crop.h)
+        const auto crop = Nx2PresentCrop::Choose(layout.width, layout.height,
+                                                 Settings::IsDockedMode(),
+                                                 system.GetApplicationProcessProgramID());
+        u32 crop_width = crop.width;
+        u32 crop_height = crop.height;
         static const u32 env_crop_w = [] {
             const char* v = std::getenv("EDEN_NX2_CROP_WIDTH");
             return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0U;
