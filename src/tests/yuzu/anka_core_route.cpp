@@ -516,6 +516,70 @@ TEST_CASE("Anka route: its game keeps its frame rate patch", "[yuzu][anka_route]
     REQUIRE(Has(ini, "2\\disabled\\size=1"));
 }
 
+TEST_CASE("Anka route: add-on entries past the sizes stay gone", "[yuzu][anka_route]") {
+    // The menu's list got shorter: Config::SaveDisabledAddOnValues rewrote the sizes and left the
+    // old entries (title 2, and the third add-on of title 1) where they were
+    const std::string shortened = "[DisabledAddOns]\n"
+                                  "size=1\n"
+                                  "1\\title_id\\default=false\n"
+                                  "1\\title_id=288309953924349952\n"
+                                  "1\\disabled\\1\\d\\default=false\n"
+                                  "1\\disabled\\1\\d=Dynamic FPS by Dark\n"
+                                  "1\\disabled\\2\\d\\default=false\n"
+                                  "1\\disabled\\2\\d=Other Mod\n"
+                                  "1\\disabled\\3\\d\\default=false\n"
+                                  "1\\disabled\\3\\d=Old Mod\n"
+                                  "1\\disabled\\size=2\n"
+                                  "2\\title_id\\default=false\n"
+                                  "2\\title_id=288358607164088320\n"
+                                  "2\\disabled\\1\\d\\default=false\n"
+                                  "2\\disabled\\1\\d=Stale Mod\n"
+                                  "2\\disabled\\size=1\n";
+    const auto ini = MakeSecondCoreIni(shortened, State(true));
+    REQUIRE(Has(ini, "size=1"));
+    REQUIRE(Has(ini, "1\\title_id=288309953924349952"));
+    REQUIRE(Has(ini, "1\\disabled\\1\\d=Other Mod"));
+    REQUIRE(Has(ini, "1\\disabled\\size=1"));
+    REQUIRE(ini.find("Dynamic FPS by Dark") == std::string::npos);
+    REQUIRE(ini.find("Old Mod") == std::string::npos);
+    REQUIRE(ini.find("Stale Mod") == std::string::npos);
+    REQUIRE(ini.find("288358607164088320") == std::string::npos);
+    REQUIRE(ini.find("2\\") == std::string::npos);
+}
+
+TEST_CASE("Anka route: add-on entries without a size are not read", "[yuzu][anka_route]") {
+    // No size line: the reader takes no entry, so there is nothing to keep on and nothing moves
+    const std::string no_size = "[DisabledAddOns]\n"
+                                "1\\title_id=288309953924349952\n"
+                                "1\\disabled\\1\\d=Dynamic FPS by Dark\n"
+                                "1\\disabled\\size=1\n";
+    const auto ini = MakeSecondCoreIni(no_size, State(true));
+    REQUIRE(ini.starts_with(no_size));
+    REQUIRE_FALSE(Has(ini, "size=0"));
+    // A size but no disabled\size: that title disables nothing, and its stale add-on stays unread
+    const std::string no_disabled_size = "[DisabledAddOns]\n"
+                                         "size=1\n"
+                                         "1\\title_id=288309953924349952\n"
+                                         "1\\disabled\\1\\d=Dynamic FPS by Dark\n";
+    REQUIRE(MakeSecondCoreIni(no_disabled_size, State(true)).starts_with(no_disabled_size));
+}
+
+TEST_CASE("Anka route: Dark's patch as the only disabled add-on", "[yuzu][anka_route]") {
+    const std::string only_dark = "[DisabledAddOns]\n"
+                                  "size=1\n"
+                                  "1\\title_id\\default=false\n"
+                                  "1\\title_id=288309953924349952\n"
+                                  "1\\disabled\\1\\d\\default=false\n"
+                                  "1\\disabled\\1\\d=Dynamic FPS by Dark\n"
+                                  "1\\disabled\\size=1\n";
+    const auto ini = MakeSecondCoreIni(only_dark, State(true));
+    REQUIRE(Has(ini, "size=1"));
+    REQUIRE(Has(ini, "1\\title_id=288309953924349952"));
+    REQUIRE(Has(ini, "1\\disabled\\size=0"));
+    REQUIRE(ini.find("1\\disabled\\1\\d") == std::string::npos);
+    REQUIRE(ini.find("Dynamic FPS by Dark") == std::string::npos);
+}
+
 TEST_CASE("Anka route: the data storage paths as the menu uses them", "[yuzu][anka_route]") {
     const auto ini = MakeSecondCoreIni(QtConfig, State(true));
     REQUIRE(Has(ini, "nand_directory=D:/Anka/user/nand"));

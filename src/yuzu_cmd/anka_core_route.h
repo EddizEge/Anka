@@ -448,19 +448,38 @@ inline void SetKey(Section& section, std::string_view key, std::string_view valu
     Append(section, std::string{key} + "=" + Quote(value));
 }
 
-/// [DisabledAddOns] without SecondCoreKeptAddOn for its game, renumbered.
+/// The most entries KeepSecondCoreAddOn takes from an array.
+constexpr std::size_t MaxArray = 4096;
+
+/// A QSettings array index or size: digits only (else 0), at most MaxArray + 1.
+inline std::size_t ArrayNumber(std::string_view text) {
+    std::size_t n = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') {
+            return 0;
+        }
+        n = std::min(n * 10 + std::size_t(c - '0'), MaxArray + 1);
+    }
+    return n;
+}
+
+/// [DisabledAddOns] without SecondCoreKeptAddOn for its game, renumbered. Read as
+/// Config::ReadDisabledAddOnValues reads it: entries 1..`size`, of each `N\disabled\1..size`; a
+/// missing size is 0. Config::SaveDisabledAddOnValues writes only the sizes when a list gets
+/// shorter: the entries past them are old ones and must not come back.
 inline void KeepSecondCoreAddOn(Section& section) {
     struct Entry {
         std::string title_id;
+        std::size_t disabled_size{};
         std::vector<std::string> disabled; ///< raw values
     };
-    std::vector<Entry> entries;
-    const auto entry = [&entries](std::size_t index) -> Entry& {
-        if (entries.size() < index) {
-            entries.resize(index);
+    std::size_t size = 0;
+    for (const auto& line : section.lines) {
+        if (KeyOf(line) == "size") {
+            size = std::min(ArrayNumber(Unquote(ValueOf(line))), MaxArray);
         }
-        return entries[index - 1];
-    };
+    }
+    std::vector<Entry> entries(size);
     bool changed = false;
     for (const auto& line : section.lines) {
         const auto key = KeyOf(line);
@@ -468,36 +487,29 @@ inline void KeepSecondCoreAddOn(Section& section) {
         if (key.empty() || slash == std::string_view::npos) {
             continue;
         }
-        std::size_t index = 0;
-        for (const char c : key.substr(0, slash)) {
-            if (c < '0' || c > '9') {
-                index = 0;
-                break;
-            }
-            index = index * 10 + std::size_t(c - '0');
-        }
-        if (index == 0 || index > 4096) {
+        const std::size_t index = ArrayNumber(key.substr(0, slash));
+        if (index == 0 || index > size) {
             continue;
         }
+        auto& entry = entries[index - 1];
         const auto rest = key.substr(slash + 1);
         if (rest == "title_id") {
-            entry(index).title_id = Unquote(ValueOf(line));
-        } else if (rest.starts_with("disabled\\") && rest.ends_with("\\d") &&
-                   rest != "disabled\\size") {
-            const auto number = rest.substr(9, rest.size() - 9 - 2);
-            std::size_t j = 0;
-            for (const char c : number) {
-                j = (c >= '0' && c <= '9') ? j * 10 + std::size_t(c - '0') : 0;
-            }
-            if (j == 0 || j > 4096) {
+            entry.title_id = Unquote(ValueOf(line));
+        } else if (rest == "disabled\\size") {
+            entry.disabled_size = std::min(ArrayNumber(Unquote(ValueOf(line))), MaxArray);
+        } else if (rest.size() > 11 && rest.starts_with("disabled\\") && rest.ends_with("\\d")) {
+            const std::size_t j = ArrayNumber(rest.substr(9, rest.size() - 9 - 2));
+            if (j == 0 || j > MaxArray) {
                 continue;
             }
-            auto& disabled = entry(index).disabled;
-            if (disabled.size() < j) {
-                disabled.resize(j);
+            if (entry.disabled.size() < j) {
+                entry.disabled.resize(j);
             }
-            disabled[j - 1] = std::string{ValueOf(line)};
+            entry.disabled[j - 1] = std::string{ValueOf(line)};
         }
+    }
+    for (auto& e : entries) {
+        e.disabled.resize(e.disabled_size);
     }
     for (auto& e : entries) {
         if (e.title_id != std::to_string(SecondCoreTitleId)) {
@@ -523,7 +535,9 @@ inline void KeepSecondCoreAddOn(Section& section) {
     for (std::size_t i = 0; i < entries.size(); ++i) {
         const std::string n = std::to_string(i + 1);
         section.lines.push_back(n + "\\title_id\\default=false");
-        section.lines.push_back(n + "\\title_id=" + entries[i].title_id);
+        // An entry within the size without a title_id line: the reader's default
+        section.lines.push_back(n + "\\title_id=" +
+                                (entries[i].title_id.empty() ? "0" : entries[i].title_id));
         for (std::size_t j = 0; j < entries[i].disabled.size(); ++j) {
             const std::string d = n + "\\disabled\\" + std::to_string(j + 1) + "\\d";
             section.lines.push_back(d + "\\default=false");
