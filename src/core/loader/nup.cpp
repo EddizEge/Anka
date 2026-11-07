@@ -192,7 +192,27 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
     const u64 addon_application_id = nacp_file && nacp_file->GetDLCBaseTitleId() != 0
                                          ? FileSys::GetBaseTitleID(nacp_file->GetDLCBaseTitleId())
                                          : base_title_id;
-    FileSys::SetLooseAOC(nup->GetAddonRomFS(addon_application_id));
+    auto addons = nup->GetAddonRomFS(addon_application_id);
+    const auto addon_count = std::count_if(nup->GetPackages().begin(), nup->GetPackages().end(),
+                                           [](const auto& package) {
+                                               return package.kind ==
+                                                      NupContainer::PackageKind::Addon;
+                                           });
+    if (addon_count > 0) {
+        // A package of another application or without a RomFS is left out
+        if (addons.empty()) {
+            LOG_WARNING(Loader,
+                        "NUP container has {} add-on content package(s), none mounted for "
+                        "application {:016X} (another application's, or no RomFS)",
+                        addon_count, addon_application_id);
+        } else {
+            LOG_INFO(Loader,
+                     "NUP container has {} add-on content package(s), {} mounted for "
+                     "application {:016X}",
+                     addon_count, addons.size(), addon_application_id);
+        }
+    }
+    FileSys::SetLooseAOC(std::move(addons));
 
     system.GetFileSystemController().RegisterProcess(
         process.GetProcessId(), base_title_id,
