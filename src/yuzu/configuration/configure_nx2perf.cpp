@@ -153,7 +153,8 @@ void ConfigureNx2Perf::ShowPreset() {
 }
 
 void ConfigureNx2Perf::ChoosePreset(Perf::Preset chosen) {
-    ui->status->clear();
+    // Custom and Recommended change no graphics setting: a choice still waiting keeps its note
+    ShowStatus();
     Show(Perf::FromPreset(chosen, Current()));
     if (const auto frame_gen = Perf::FrameGenFor(chosen)) {
         ChooseFrameGen(*frame_gen);
@@ -219,8 +220,21 @@ void ConfigureNx2Perf::ChooseFrameGen(Perf::FrameGen chosen) {
     frame_gen_choice = chosen;
     frame_gen_shown = chosen;
     ShowFrameGen();
-    if (game_running) {
+    ShowStatus();
+}
+
+bool ConfigureNx2Perf::Waiting() const {
+    return game_running &&
+           (Nx2PerfSession::HasPendingGraphics() || pending_reactive.has_value() ||
+            pending_barrier.has_value() ||
+            (frame_gen_choice && *frame_gen_choice != Nx2PerfSession::CurrentFrameGen()));
+}
+
+void ConfigureNx2Perf::ShowStatus() {
+    if (Waiting()) {
         ShowPending();
+    } else {
+        ui->status->clear();
     }
 }
 

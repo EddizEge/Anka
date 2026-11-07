@@ -41,7 +41,9 @@ constexpr int RESTART_WAIT_MS = 30'000;
 QProcessEnvironment g_start_environment;
 std::vector<std::string_view> g_set_outside;
 PendingGraphics g_pending;
-bool g_pending_unasked = false; // the waiting settings changed since the restart question
+// What "Later" was answered for: asked again only when the settings differ from it
+PendingGraphics g_pending_asked;
+std::optional<std::vector<Perf::Var>> g_plan_asked;
 
 struct Applied {
     std::vector<Perf::Var> plan;
@@ -63,6 +65,11 @@ void SetVariable(const Perf::Var& var) {
 #else
     setenv(name.c_str(), value.c_str(), 1);
 #endif
+}
+
+bool SamePending(const PendingGraphics& a, const PendingGraphics& b) {
+    return a.reactive_flushing == b.reactive_flushing &&
+           a.barrier_feedback_loops == b.barrier_feedback_loops && a.frame_gen == b.frame_gen;
 }
 
 QString Describe(const std::vector<Perf::Var>& plan) {
@@ -185,8 +192,10 @@ bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen)
     }
     const auto plan = Perf::Plan(UISettings::values.nx2perf, bananza, SetOutside);
     const bool pending = HasPendingGraphics();
-    const bool pending_new = std::exchange(g_pending_unasked, false);
-    if (!Perf::NeedsRestart(applied, plan) && !(applied && pending_new)) {
+    // After "Later" only a change since then asks again (back to the running values: nothing)
+    const bool plan_new = Perf::NeedsRestart(applied, plan) && plan != g_plan_asked;
+    const bool pending_new = applied && pending && !SamePending(g_pending, g_pending_asked);
+    if (!plan_new && !pending_new) {
         return false;
     }
     QString text = QObject::tr("This session's game already started with the earlier Anka "
@@ -213,6 +222,8 @@ bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen)
     box.exec();
     if (box.clickedButton() != restart) {
         LOG_INFO(Frontend, "Anka: settings changed, restart later: {}", Describe(plan).toStdString());
+        g_plan_asked = plan;
+        g_pending_asked = g_pending;
         return false;
     }
     LOG_INFO(Frontend, "Anka: restarting to apply: {}", Describe(plan).toStdString());
@@ -221,7 +232,6 @@ bool OfferRestart(QWidget* parent, const QString& running_game, bool fullscreen)
 }
 
 void AddPendingGraphics(const PendingGraphics& pending) {
-    const PendingGraphics before = g_pending;
     if (pending.reactive_flushing) {
         g_pending.reactive_flushing = pending.reactive_flushing;
     }
@@ -231,9 +241,17 @@ void AddPendingGraphics(const PendingGraphics& pending) {
     if (pending.frame_gen) {
         g_pending.frame_gen = pending.frame_gen;
     }
-    g_pending_unasked |= before.reactive_flushing != g_pending.reactive_flushing ||
-                         before.barrier_feedback_loops != g_pending.barrier_feedback_loops ||
-                         before.frame_gen != g_pending.frame_gen;
+    // A choice back to what the running game has (the global settings) is nothing to wait for
+    const auto& v = Settings::values;
+    if (g_pending.reactive_flushing == v.use_reactive_flushing.GetValue(true)) {
+        g_pending.reactive_flushing.reset();
+    }
+    if (g_pending.barrier_feedback_loops == v.barrier_feedback_loops.GetValue(true)) {
+        g_pending.barrier_feedback_loops.reset();
+    }
+    if (g_pending.frame_gen == CurrentFrameGen()) {
+        g_pending.frame_gen.reset();
+    }
 }
 
 const PendingGraphics& Pending() {
@@ -264,7 +282,7 @@ bool ApplyPendingGraphics() {
                                               : "-",
              g_pending.frame_gen ? static_cast<int>(*g_pending.frame_gen) : -1);
     g_pending = {};
-    g_pending_unasked = false;
+    g_pending_asked = {};
     return true;
 }
 
@@ -327,8 +345,15 @@ void RestartIfRequested() {
 #ifdef _WIN32
     // Qt passes bInheritHandles=TRUE: the new process would keep this one's inheritable handles
     // open (the log file, saves, game files) after this one exits.
-    process.setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments* args) { args->inheritHandles = false; });
+    // Nor may it name this one's standard handles (STARTF_USESTDHANDLES, which Qt sets): they are
+    // not inherited, so in the new process they would be invalid or someone else's handles.
+    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->inheritHandles = false;
+        args->startupInfo->dwFlags &= ~STARTF_USESTDHANDLES;
+        args->startupInfo->hStdInput = nullptr;
+        args->startupInfo->hStdOutput = nullptr;
+        args->startupInfo->hStdError = nullptr;
+    });
 #endif
     if (!process.startDetached()) {
         LOG_ERROR(Frontend, "Anka: the restart failed: {}",

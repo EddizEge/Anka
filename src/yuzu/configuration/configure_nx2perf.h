@@ -59,6 +59,9 @@ private:
     void ShowFrameGen();
     void ChooseFrameGen(Core::Nx2PerfSettings::FrameGen chosen);
     void ShowPending();
+    /// The "waiting" note while a game runs and a choice waits for it, else nothing.
+    void ShowStatus();
+    [[nodiscard]] bool Waiting() const;
     void ShowDkDynConflict();
 
     std::unique_ptr<Ui::ConfigureNx2Perf> ui;
