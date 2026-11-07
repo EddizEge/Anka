@@ -15,7 +15,7 @@ this tree is the upstream project's own.
 
 ## Downloads and setup
 
-Download **`Anka-1.0.1-win64.zip`** from the
+Download **`Anka-1.1.0-win64.zip`** from the
 [Releases page](https://github.com/EddizEge/Anka/releases) (`SHA256SUMS.txt` there lets you
 check it).
 
@@ -23,8 +23,8 @@ Anka runs on its own. You need Windows 10 or 11 (64-bit) and a GPU with a curren
 driver; the zip carries everything else the programs need (the Qt 6.8.3 DLLs and plugins, the
 Visual C++ runtime DLLs).
 
-1. Unzip `Anka-1.0.1-win64.zip` into a new folder. Anka 1.0.1 also reads `.nup` game files
-   (see the README).
+1. Unzip `Anka-1.1.0-win64.zip` into a new folder (all of it, the `core2` folder too). Anka
+   also reads `.nup` game files (see the README).
 2. Run **`anka.exe`**.
 3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
    only use what you legally own).
@@ -53,6 +53,18 @@ On the first start a launcher makes anka-cli's settings file (`user\config\sdl2-
 a copy of `anka.exe`'s `qt-config.ini`, so your controller setup comes along; it never changes
 a settings file that already exists (`anka-config.ps1`, a small, readable PowerShell script,
 does this). The game starts in full screen: **quit with Alt+F4**.
+
+### Anka's second core
+
+Since 1.1.0 the package has a second emulator core, `core2\anka-core2-cli.exe`, built from a
+second source tree. It is used for one game, The Legend of Zelda: Ocarina of Time (title id
+`0400486024DEC000`): `anka.exe` and `anka-cli.exe` recognize that game and start the second core
+for it, with the same `user` folder. The first time a game starts on Anka's second core after
+its shaders were cached, Anka rebuilds them for your graphics driver. The window title shows
+"preparing shaders 812/1938" meanwhile; this can take about a minute (also after a driver
+update), later starts take a few seconds. The window stays responsive, and closing it cancels
+the start. Its in-game frame rate is low. Details: "Anka's second core" in
+[`README_ANKA.md`](../README_ANKA.md).
 
 ## Settings
 
@@ -146,8 +158,7 @@ every change since PokeDinner-Eglantine 2.0.0: [`CHANGELOG_ANKA.md`](../CHANGELO
 
 ## Roadmap
 
-From now on every update goes into one emulator, Anka. The next release: Zelda support and
-per-game presets. No dates.
+Every update goes into one emulator, Anka. Per-game presets are planned. No dates.
 
 ## Building
 
@@ -157,9 +168,10 @@ See [`BUILDING_ANKA.md`](../BUILDING_ANKA.md).
 
 Anka is licensed under the **GNU General Public License v3.0 or later**
 ([`LICENSE.txt`](../LICENSE.txt)), like Eden and Eglantine. Each release has the complete
-corresponding source next to the program: `Anka-1.0.1-source.zip` (this repository at the
-release commit, tag `anka-v1.0.1`), `Anka-1.0.1-deps-source.zip` (the third-party libraries built
-from source) and `Anka-1.0.1-prebuilt-source.zip` (the sources and build scripts of the four
+corresponding source next to the program: `Anka-1.1.0-source.zip` (this repository at the
+release commit, tag `anka-v1.1.0`), `Anka-1.1.0-core2-source.zip` (the second core, built from its
+own commit), `Anka-1.1.0-deps-source.zip` (the third-party libraries built from source) and
+`Anka-1.1.0-prebuilt-source.zip` (the sources and build scripts of the four
 prebuilt libraries: FFmpeg, OpenSSL, SDL3, sirit). `anka.exe` links Qt 6.8.3 dynamically
 (LGPL-3.0; Qt Charts GPL-3.0); the program zip carries the Qt DLLs, which you may replace with
 your own build of Qt 6.8.3. Third-party notices
@@ -190,7 +202,8 @@ policy asks.
 Report problems at https://github.com/EddizEge/Anka/issues (please not to Franseven, the Eden
 project or the other upstream projects). Say which program (`anka.exe` or `anka-cli.exe`) and
 which preset or launcher you used, the game's version, and attach the log file
-(`user\log\eden_log.txt` in the Anka folder).
+(`user\log\eden_log.txt` in the Anka folder; for a game on the second core
+`user\log\core2\eden_log.txt`).
 
 Nintendo Switch and Donkey Kong Bananza are trademarks of Nintendo. Use Anka only with games
 you own.

@@ -6,6 +6,59 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
+## Anka 1.1.0 (`anka-v1.1.0`)
+
+### Anka's second core (new)
+
+- The package has a second emulator core: `core2\anka-core2-cli.exe`, a separate program built
+  from a second source tree (Anka's changes together with newer upstream Eglantine work, on the
+  same 2.0.0 base; its source is `Anka-1.1.0-core2-source.zip`). It is used for one game, The
+  Legend of Zelda: Ocarina of Time (title id `0400486024DEC000`); every other game stays on the
+  first core, as before.
+- `anka.exe` and `anka-cli.exe` recognize that game by its title id and start the second core
+  for it, with the same `user\` folder (keys, firmware, saves). The second core keeps its own
+  settings file (`user\config\sdl2-config-core2.ini`), caches (`user\cache\core2`) and log
+  (`user\log\core2\eden_log.txt`), and runs once at a time. Its texts name it "Anka's second
+  core"; product names, folders and programs carry no game name.
+- The Anka tab marks the settings the second core does not take ("Anka's second core: no
+  effect"). On the second core Reactive Flushing stays off, so the two Recommended presets are the
+  same there; Safe also turns off its GPU shortcuts and its GPU thread split. It takes the OSD,
+  timed frame generation and the add-on choices of the game's Properties; barrier feedback loops
+  stay on under every preset.
+- Shaders on the first start: the first time a game starts on Anka's second core after its
+  shaders were cached, Anka rebuilds them for your graphics driver. The window title shows
+  "preparing shaders 812/1938" meanwhile; this can take about a minute (also after a driver
+  update), later starts take a few seconds. The window stays responsive, and closing it cancels
+  the start.
+- The second core was not measured the way the first core was (see "Known issues" in the README):
+  its in-game frame rate is low.
+
+### Fixes
+
+- Handheld mode: every handheld picture is cropped to the panel's 1920x1080, as upstream does
+  (1.0.x cropped only Mario Kart World's); Donkey Kong Bananza's handheld frame no longer sits in
+  the top-left of the window inside black margins. Docked mode is unchanged (4515f44747).
+- AMD's proprietary Windows driver: pipeline compilation runs on one worker there, for the crash
+  while loading reported in GitHub issue #5 (6bf227e272, by MamamaNanana; only its Vulkan device
+  part was taken).
+- The yuzu data migration window copies instead of moving, never empties a portable user folder
+  and never moves the old one (8c6d0faee4, by PastaLaPate; 2ec216ff22; GitHub issue #6). Its
+  messages say where a partial copy is.
+- `.nup` files: add-on content (DLC) inside the package is mounted, and the edition metadata is
+  kept (ddd328587f, by MythosOfs); the add-on content is parsed once per boot again.
+- A missing mod folder no longer crashes the start (19e444cb52, c02d4f9c43, by SavageCore).
+- Shaders: the BRA.U / .DIV / .CONV branch modes are captured and lowered (98c230ca9b).
+- Vulkan: invalid depth-stencil copies in ReinterpretImage are fixed (31a7923e3f, by cr1ckt).
+- Donkey Kong Bananza's dynamic frame rate (DK_DYN) steps aside when an ExeFS mod changes the
+  game's frame rate code (7a9d6fda36).
+- Frame generation: Dynamic steps down when the display's refresh rate changes, and
+  `FG_REFRESH_HZ` works without `FG_TIMED` (5e4926ffe6).
+- Restart: Anka restarts without the old standard handles, does not ask a second time after
+  Later, and the waiting note stays (f44ae5e139).
+- Safe (the preset and `start-safe.bat`) no longer turns off `HSETP2_REG` and the upscaler
+  stand-in: they are not shortcuts, and without them Bananza's scene stayed a flat blue
+  (6ce302c7f6).
+
 ## Anka 1.0.1 (`anka-v1.0.1`)
 
 - Reads **`.nup`** files (NUP, the "Unencrypted (Archival) Package" of the Eglantine nx2 project):

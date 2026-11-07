@@ -1,9 +1,13 @@
 # Building Anka
 
-Anka 1.0.1 has two programs, built on Windows with Visual Studio 2022 Build Tools (MSVC
+Anka 1.1.0 has two programs from this tree, built on Windows with Visual Studio 2022 Build Tools (MSVC
 14.44.35207, its CMake and Ninja) from the same build folder: the program without menus (target
 `yuzu-cmd`, SDL; the build names it `eden-cli.exe`) and the menu program (target `yuzu`, Qt; the
 build names it `eglantine.exe`). The release package names them `anka-cli.exe` and `anka.exe`.
+The package's second core, `core2\anka-core2-cli.exe`, is the program without menus of another
+tree (its own commit; `Anka-1.1.0-core2-source.zip`, whose `BUILDING_ANKA.md` and `cpmfile.json`
+apply to it), built the same way without LTO and without the PGO link (`-O2`), target `yuzu-cmd`
+only.
 The general build
 documentation of Eden is in `docs/`; this file lists what the Anka release used.
 
@@ -41,8 +45,9 @@ configure with `-U 'Qt6*' -U 'QT_*'` and delete the `*_autogen` folders, so moc 
 
 The prebuilt packages come from the CI repositories named in `cpmfile.json` (`crueter-ci/...`,
 `eden-emulator/sirit`), which build them from the upstream sources of those projects (the commit is the last part of
-each version above). `Anka-1.0.1-deps-source.zip` holds the sources of the libraries CPM built
-from source; `Anka-1.0.1-prebuilt-source.zip` holds the sources of the four prebuilts: for each, the
+each version above). `Anka-1.1.0-deps-source.zip` holds the sources of the libraries CPM built
+from source (under `core2/` the versions only the second core uses); `Anka-1.1.0-prebuilt-source.zip`
+holds the sources of the four prebuilts: for each, the
 upstream source archive of the exact commit and the crueter-ci recipe (build scripts) at the
 release tag the package was made from, FFmpeg's patch, and sirit's complete source with its
 SPIRV-Headers (its `README_PREBUILT_SOURCES.txt` lists commits, tags, options and hashes). Other
@@ -135,7 +140,7 @@ functionally the same either way.
 
 ## Release package
 
-The release zips were made by a packaging script outside this tree. `Anka-1.0.1-win64.zip` is a
+The release zips were made by a packaging script outside this tree. `Anka-1.1.0-win64.zip` is a
 standalone install, unzipped into a new, empty folder. It holds the two programs `anka.exe` and
 `anka-cli.exe`, the Qt 6.8.3 DLLs and plugins `anka.exe` needs, the Visual C++ runtime DLLs, an
 empty `user/` folder (so the programs start in portable mode and keep everything in it), the
@@ -148,10 +153,14 @@ texts and notices of the third-party components), `QT_THIRD_PARTY_NOTICES.txt` (
 code inside the Qt DLLs, from Qt's SBOM), `NOTICE_ANKA.txt`, `VERSION_ANKA.txt` and
 `dist/nx2_switches.txt` as `nx2_switches_ANKA.txt` (a reference copy that no program reads under
 that name).
-`Anka-1.0.1-pdb.zip` holds the two programs' debug symbols. `Anka-1.0.1-source.zip` is
-`git archive` of the same commit (tag `anka-v1.0.1` of https://github.com/EddizEge/Anka) plus
+The `core2/` folder holds the second core, the Visual C++ runtime DLLs it imports (Windows looks
+for them next to the program) and `THIRD_PARTY_NOTICES_ANKA_CORE2.txt`.
+`Anka-1.1.0-pdb.zip` holds the programs' debug symbols (the second core's under `core2/`).
+`Anka-1.1.0-core2-source.zip` is `git archive` of the second core's commit, with the same added
+files. `Anka-1.1.0-source.zip` is
+`git archive` of the same commit (tag `anka-v1.1.0` of https://github.com/EddizEge/Anka) plus
 `GIT-COMMIT`, `GIT-REFSPEC` and `GIT-TAG` (CMake names the build from them without `.git`),
-`SOURCE_ANKA.txt`, the NOTICE file and the third-party notices; `Anka-1.0.1-deps-source.zip`
+`SOURCE_ANKA.txt`, the NOTICE file and the third-party notices; `Anka-1.1.0-deps-source.zip`
 holds the third-party sources CPM fetched (not the prebuilt packages),
-`Anka-1.0.1-prebuilt-source.zip` the sources and build recipes of the prebuilt packages, and
+`Anka-1.1.0-prebuilt-source.zip` the sources and build recipes of the prebuilt packages, and
 `SHA256SUMS.txt` lists the hashes of the zips.

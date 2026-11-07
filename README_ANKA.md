@@ -1,7 +1,7 @@
 # Anka
 
 **Anka — a Nintendo Switch 2 emulator for Windows, focused on performance.** Released as
-**Anka by EddizEge**; this release is **Anka 1.0.1**.
+**Anka by EddizEge**; this release is **Anka 1.1.0**.
 
 Not affiliated with Nintendo, the Eden project or Franseven; please report problems in this
 repository's Issues, not to them. https://github.com/EddizEge/Anka/issues
@@ -20,10 +20,14 @@ Anka runs on its own: unzip it into a new, empty folder (see "Install"). It ship
 - **`anka-cli.exe`**, the program without menus (SDL), with launchers (`start-*.bat`) that start
   it with the settings we measured. Our measurements were made with it.
 
-- This release: **Anka 1.0.1**; see `VERSION_ANKA.txt` in the package (tag, commit, configure
-  date).
-- Source: https://github.com/EddizEge/Anka, branch `anka`, tag `anka-v1.0.1` (the same commit as
-  the program; GPLv3, see "License").
+Since 1.1.0 a second emulator core (`core2\anka-core2-cli.exe`) comes with them; the two programs
+start it by themselves for the one game it is for (see "Anka's second core").
+
+- This release: **Anka 1.1.0**; see `VERSION_ANKA.txt` in the package (tag, commits, configure
+  dates).
+- Source: https://github.com/EddizEge/Anka, branch `anka`, tag `anka-v1.1.0` (the same commit as
+  the two programs; the second core's source is `Anka-1.1.0-core2-source.zip`; GPLv3, see
+  "License").
 - Changes: `CHANGELOG_ANKA.md`. Every switch: `nx2_switches_ANKA.txt` (in the source:
   `dist/nx2_switches.txt`).
 
@@ -36,8 +40,8 @@ measured: there is no claim of measured speed or tested compatibility for other 
 Bananza-only settings turn themselves off in other games. Other CPUs and AMD or Intel GPUs were
 not tried.
 
-**What comes next:** from now on every update goes into one emulator, Anka. The next release
-brings Zelda support and per-game presets. No dates.
+**What comes next:** every update goes into one emulator, Anka. Per-game presets are planned.
+No dates.
 
 ## What you need
 
@@ -56,10 +60,10 @@ brings Zelda support and per-game presets. No dates.
 
 ## Download and check
 
-The release has five zips and `SHA256SUMS.txt`. To play you need only `Anka-1.0.1-win64.zip`;
-`Anka-1.0.1-pdb.zip` has the debug symbols (for crash reports), `Anka-1.0.1-source.zip`,
-`Anka-1.0.1-deps-source.zip` and `Anka-1.0.1-prebuilt-source.zip` are the source code (see
-"License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt --ignore-missing`, or
+The release has six zips and `SHA256SUMS.txt`. To play you need only `Anka-1.1.0-win64.zip`;
+`Anka-1.1.0-pdb.zip` has the debug symbols (for crash reports), `Anka-1.1.0-source.zip`,
+`Anka-1.1.0-core2-source.zip` (the second core), `Anka-1.1.0-deps-source.zip` and
+`Anka-1.1.0-prebuilt-source.zip` are the source code (see "License"). To check a download, in Git Bash: `sha256sum -c SHA256SUMS.txt --ignore-missing`, or
 in a command prompt `certutil -hashfile <zip> SHA256` and compare with the file. The program is
 not signed: Windows SmartScreen may warn the first time.
 
@@ -67,7 +71,7 @@ not signed: Windows SmartScreen may warn the first time.
 
 This is an experimental build with no warranty (`NOTICE_ANKA.txt`).
 
-1. Unzip `Anka-1.0.1-win64.zip` into a new, empty folder.
+1. Unzip `Anka-1.1.0-win64.zip` into a new, empty folder (all of it, the `core2` folder too).
 2. Run **`anka.exe`** (its window title is "Anka by EddizEge").
 3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
    only use what you legally own).
@@ -92,7 +96,8 @@ decompressed once into `user\cache\nup` (removed when the game closes: it needs 
 disk space).
 
 The zip holds `anka.exe`, `anka-cli.exe`, the Qt DLLs and plugins `anka.exe` needs, the Visual
-C++ runtime DLLs, the launchers and an empty `user\` folder. Because of that `user\` folder Anka
+C++ runtime DLLs, the `core2\` folder (the second core with its own copy of the Visual C++
+runtime DLLs), the launchers and an empty `user\` folder. Because of that `user\` folder Anka
 starts in portable mode: it keeps its settings (`user\config\qt-config.ini`), keys, firmware,
 saves (`user\nand`), shader caches and log (`user\log\eden_log.txt`) in it, and does not use
 `%APPDATA%\eden` or another emulator's folder (the one exception: `anka.exe` also reads a
@@ -114,6 +119,31 @@ its `qt-config.ini` (Graphics > Advanced).
 GPU Mode (GPU accuracy) starts at **Fast** (Low), as in newer Eden versions (2.0.0 started at
 Accurate, High, on desktop); our measurements used Fast. If a game shows image errors, set
 Graphics > Advanced > GPU Mode to Accurate for that game (its Properties) or globally.
+
+### Anka's second core
+
+The package has a second emulator core in its `core2\` folder: `core2\anka-core2-cli.exe`, a
+separate program built from a second source tree (Anka's changes together with newer upstream
+Eglantine work, on the same 2.0.0 base). Anka 1.1.0 uses it for one game, The Legend of Zelda:
+Ocarina of Time (title id `0400486024DEC000`); every other game stays on the first core.
+
+You do not start it yourself: when you start that game, `anka.exe` (and `anka-cli.exe`, also
+from a launcher) recognizes it by its title id and starts the second core instead ("Starting
+this game on Anka's second core"). The second core uses the same `user\` folder (keys,
+firmware, saves) and keeps its own settings file (`user\config\sdl2-config-core2.ini`), caches
+(`user\cache\core2`) and log (`user\log\core2\eden_log.txt`). Only one game runs on it at a
+time. Keep the `core2\` folder next to `anka.exe`: without it Anka says the second core is
+missing.
+
+The first time a game starts on Anka's second core after its shaders were cached, Anka rebuilds
+them for your graphics driver. The window title shows "preparing shaders 812/1938" meanwhile;
+this can take about a minute (also after a driver update), later starts take a few seconds. The
+window stays responsive, and closing it cancels the start.
+
+The Anka tab applies to the second core only in part: a setting it does not take says "Anka's
+second core: no effect". On the second core Reactive Flushing stays off, so both Recommended
+presets are the same there; Safe also turns off its GPU shortcuts and its GPU thread split. Its
+in-game frame rate is low (see "Known issues").
 
 ### The Anka tab
 
@@ -423,6 +453,12 @@ session, not a benchmark.
 
 ## Known issues
 
+- **GitHub issue #3:** with a recent NVIDIA driver a purple mask was reported, and the device
+  was lost (`VK_ERROR_DEVICE_LOST`). Open.
+- **GitHub issue #4:** corrupted graphics on the island. Reactive Flushing on (the Recommended +
+  Reactive Flushing preset, or `start-reactive-experimental.bat`) works around it for now.
+- **The second core's in-game frame rate is low.** It was not measured like the first core; the
+  numbers in this README are all from the first core in Donkey Kong Bananza.
 - **The menu program was not measured.** `anka.exe` runs the same emulator code with the same
   switches and the same PGO profile as `anka-cli.exe`, but every number here comes from the
   program without menus (then called `eden-cli`).
@@ -477,7 +513,11 @@ Like Eden and PokeDinner-Eglantine, Anka is licensed under the **GNU General Pub
 v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantine 2.0.0; what
 was changed and when is in `NOTICE_ANKA.txt` (in the release zips) and `CHANGELOG_ANKA.md`. The
 source code of the program (the release commit) is at https://github.com/EddizEge/Anka and in
-`Anka-1.0.1-source.zip` (`SOURCE_ANKA.txt` in that zip names the repository), with
+`Anka-1.1.0-source.zip` (`SOURCE_ANKA.txt` in that zip names the repository); the second core
+(`core2\anka-core2-cli.exe`) is built from its own commit, whose complete source is
+`Anka-1.1.0-core2-source.zip`. Its third-party notices are `core2\THIRD_PARTY_NOTICES_ANKA_CORE2.txt`;
+the sources of the libraries it builds from source in versions the first core does not use are in
+the `core2/` folder of `Anka-1.1.0-deps-source.zip`. Both come with
 notes on how the third-party libraries are fetched (`BUILDING_ANKA.md`). The Anka logo (`dist/anka.ico`, the
 program icon, and `dist/qt_themes/default/icons/256x256/anka.png`, used for the window and the
 About box: a phoenix rising, with flame wings and a flame crest) is our own design, generated by
@@ -489,9 +529,9 @@ Base and Qt SVG under LGPL-3.0, Qt Charts under GPL-3.0): the Qt DLLs and plugin
 program zip are the official, unmodified Qt 6.8.3 binaries, and you may replace them with your
 own build of Qt 6.8.3. QuaZip
 (LGPL-2.1 with a static linking exception) is compiled into it. The source of the libraries
-built from source, QuaZip included, is in `Anka-1.0.1-deps-source.zip`. Four libraries are
+built from source, QuaZip included, is in `Anka-1.1.0-deps-source.zip`. Four libraries are
 linked from prebuilt packages: FFmpeg, OpenSSL, SDL3 and sirit. Their source is in
-`Anka-1.0.1-prebuilt-source.zip`: the upstream source archives of the exact commits, the
+`Anka-1.1.0-prebuilt-source.zip`: the upstream source archives of the exact commits, the
 crueter-ci build scripts that made the prebuilt packages (with their configure / CMake options),
 the patch applied to FFmpeg before it was built, and sirit's complete source with its
 SPIRV-Headers (`README_PREBUILT_SOURCES.txt` in that zip). FFmpeg (LGPL-2.1-or-later, patched) is
