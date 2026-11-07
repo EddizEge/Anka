@@ -50,7 +50,7 @@ void MigrationWorker::process() {
         emit error(tr("Nothing was migrated: %1 already holds data (or could not be read), and "
                       "the migration would replace it.\nMove its contents away first, or copy the "
                       "old data into it by hand.")
-                       .arg(QString::fromStdString(eden_dir.string())));
+                       .arg(QString::fromStdU16String(eden_dir.u16string())));
         return;
     }
     try {
@@ -90,9 +90,9 @@ void MigrationWorker::process() {
 
             success_text.append(tr("\n\nNote that your configuration and data will be shared with %1.\n"
                                    "If this is not desirable, delete the following files:\n%2\n%3\n%4")
-                                    .arg(selected_emu.name(), QString::fromStdString(eden_dir.string()),
-                                         QString::fromStdString(config_dir.string()),
-                                         QString::fromStdString(cache_dir.string())));
+                                    .arg(selected_emu.name(), QString::fromStdU16String(eden_dir.u16string()),
+                                         QString::fromStdU16String(config_dir.u16string()),
+                                         QString::fromStdU16String(cache_dir.u16string())));
 
             break;
         case MigrationStrategy::Move:
@@ -131,7 +131,7 @@ void MigrationWorker::process() {
             success_text.append(tr("\n\nIf you wish to clean up the files which were left in the old "
                                    "data location, you can do so by deleting the following directory:\n"
                                    "%1")
-                                    .arg(QString::fromStdString(legacy_user_dir.string())));
+                                    .arg(QString::fromStdU16String(legacy_user_dir.u16string())));
             break;
         }
     } catch (const fs::filesystem_error& e) {
@@ -146,5 +146,5 @@ void MigrationWorker::process() {
         fs::create_directory(shader_dir);
     }
 
-    emit finished(success_text, legacy_user_dir.string());
+    emit finished(success_text, Common::FS::PathToUTF8String(legacy_user_dir));
 }

@@ -89,6 +89,18 @@ TEST_CASE("Migration: a data folder with the user's files is never replaced", "[
     REQUIRE_FALSE(MayReplace(Target::Unreadable));
 }
 
+TEST_CASE("Migration: files named in any script are read, not thrown on", "[yuzu][migration]") {
+    // Japanese and an emoji: no ANSI code page has them (generic_string() threw)
+    for (const char16_t* file : {u"日本/セーブ.bin", u"mods/\U0001F34C.txt"}) {
+        TempDir t;
+        Touch(t.path / ProfilesDat);
+        Touch(t.path / fs::path{file});
+        REQUIRE(Classify(t.path) == Target::HasData);
+    }
+    REQUIRE(IsFirstRunFile(fs::path{ProfilesDat}));
+    REQUIRE_FALSE(IsFirstRunFile(fs::path{u"nand/日本/profiles.dat"}));
+}
+
 TEST_CASE("Migration: a file where the data folder should be is not removed", "[yuzu][migration]") {
     TempDir t;
     Touch(t.path / "user");

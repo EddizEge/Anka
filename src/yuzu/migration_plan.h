@@ -51,9 +51,11 @@ enum class Target {
 };
 
 /// The files the program writes before the prompt can run (ProfileManager's profiles.dat), relative
-/// to the data folder.
+/// to the data folder. Compared as UTF-8: generic_string() throws for a file named in a script the
+/// ANSI code page has not.
 inline bool IsFirstRunFile(const std::filesystem::path& relative) {
-    return relative.generic_string() == "nand/system/save/8000000000000010/su/avators/profiles.dat";
+    return relative.generic_u8string() ==
+           u8"nand/system/save/8000000000000010/su/avators/profiles.dat";
 }
 
 inline Target Classify(const std::filesystem::path& dir) {
