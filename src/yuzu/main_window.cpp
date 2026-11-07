@@ -320,9 +320,9 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
 constexpr int default_mouse_hide_timeout = 2500;
-// SDL and the input engines are pumped from the GUI thread. yuzu_cmd does it 240 times a second;
-// every millisecond woke the GUI thread 1000 times a second for as long as the program ran.
-constexpr int default_input_update_timeout = 4;
+// SDL and the input engines are pumped from the GUI thread every millisecond, as in Anka 1.0.1
+// (EDEN_NX2_QT_INPUT_MS sets another interval).
+constexpr int default_input_update_timeout = 1;
 
 constexpr size_t CopyBufferSize = 1_MiB;
 
@@ -483,7 +483,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     connect(&mouse_hide_timer, &QTimer::timeout, this, &MainWindow::HideMouseCursor);
     connect(ui->menubar, &QMenuBar::hovered, this, &MainWindow::ShowMouseCursor);
 
-    // EDEN_NX2_QT_INPUT_MS=<1-16>: another pump interval (1 is the earlier one), for A/B runs.
+    // EDEN_NX2_QT_INPUT_MS=<1-16>: another pump interval (4 is about yuzu_cmd's 240 Hz), opt-in
+    // only, for A/B runs.
     int input_update_timeout = default_input_update_timeout;
     if (const char* text = std::getenv("EDEN_NX2_QT_INPUT_MS")) {
         const int ms = std::atoi(text);
