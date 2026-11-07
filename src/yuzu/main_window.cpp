@@ -1922,10 +1922,8 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
-    if (ZeldaCoreRunning()) {
-        QMessageBox::information(this, tr("Anka"),
-                                 tr("The Zelda core is still running. Close it before starting "
-                                    "another game."));
+    if (SecondCoreRunning()) {
+        QMessageBox::information(this, tr("Anka"), tr(AnkaCoreRoute::Text::StillRunning));
         return;
     }
 
@@ -1953,9 +1951,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     const bool has_title_id =
         loader != nullptr && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success;
 
-    // Ocarina of Time runs in the Zelda core, a program of its own (yuzu_cmd/anka_core_route.h)
-    if (has_title_id && AnkaCoreRoute::IsZelda(title_id)) {
-        StartZeldaCore(filename, false);
+    // One game runs on Anka's second core, a program of its own (yuzu_cmd/anka_core_route.h)
+    if (has_title_id && AnkaCoreRoute::RunsOnSecondCore(title_id)) {
+        StartSecondCore(filename, false);
         return;
     }
 
@@ -2799,41 +2797,38 @@ void MainWindow::OnGameListOpenPerGameProperties(const std::string& file) {
         return;
     }
 
-    // The Zelda core reads no per-game settings (config/custom/*.ini)
-    if (AnkaCoreRoute::IsZelda(title_id)) {
-        QMessageBox::information(this, tr("Properties"),
-                                 tr("These settings have no effect on the Zelda core. The Legend "
-                                    "of Zelda: Ocarina of Time uses the global settings."));
+    // The second core reads no per-game settings (config/custom/*.ini)
+    if (AnkaCoreRoute::RunsOnSecondCore(title_id)) {
+        QMessageBox::information(this, tr("Properties"), tr(AnkaCoreRoute::Text::PropertiesNote));
         return;
     }
 
     OpenPerGameConfiguration(title_id, file);
 }
 
-bool MainWindow::ZeldaCoreRunning() const {
-    return zelda_process != nullptr;
+bool MainWindow::SecondCoreRunning() const {
+    return second_core_process != nullptr;
 }
 
-void MainWindow::StartZeldaCore(const QString& game, bool restart_handoff) {
+void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     namespace fs = std::filesystem;
     using namespace AnkaCoreRoute;
     using Common::FS::EdenPath;
 
     // The two cores never run at the same time
     if (emulation_running) {
-        QMessageBox::information(this, tr("Anka"),
-                                 tr("Stop the running game before starting The Legend of Zelda: "
-                                    "Ocarina of Time."));
+        QMessageBox::information(this, tr("Anka"), tr(Text::StopRunningFirst));
         return;
     }
     const fs::path package{QCoreApplication::applicationDirPath().toStdU16String()};
-    const auto core = FindZeldaCore(package, true);
+    const auto core = FindSecondCore(package, true);
     if (!core) {
-        QMessageBox::warning(
-            this, tr("Anka"),
-            tr("The Zelda core is missing: %1 was not found. Extract the whole Anka package.")
-                .arg(QString::fromStdU16String(
-                    (package / "zelda" / "anka-zelda-cli.exe").make_preferred().u16string())));
+        QMessageBox::warning(this, tr("Anka"),
+                             tr(Text::Missing)
+                                 .arg(QString::fromStdU16String(
+                                     (package / Names::Folder / Names::CliProgram)
+                                         .make_preferred()
+                                         .u16string())));
         return;
     }
     const fs::path user = Common::FS::GetEdenPath(EdenPath::EdenDir);
@@ -2858,21 +2853,21 @@ void MainWindow::StartZeldaCore(const QString& game, bool restart_handoff) {
         state.data_storage.emplace_back(
             "save_directory",
             save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
-        const fs::path ini = ZeldaIniPath(user);
+        const fs::path ini = SecondCoreIniPath(user);
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);
         std::ofstream out{ini, std::ios::binary | std::ios::trunc};
-        out << MakeZeldaIni(text.str(), state);
+        out << MakeSecondCoreIni(text.str(), state);
         if (!out) {
             QMessageBox::warning(this, tr("Anka"),
-                                 tr("The Zelda core's settings could not be written to %1.")
+                                 tr(Text::IniNotWritten)
                                      .arg(QString::fromStdU16String(ini.u16string())));
             return;
         }
     }
 
-    const Launch launch = PlanZelda(*core, user, game.toStdString(),
-                                    ui->action_Fullscreen->isChecked(), restart_handoff);
+    const Launch launch = PlanSecondCore(*core, user, game.toStdString(),
+                                         ui->action_Fullscreen->isChecked(), restart_handoff);
     QProcess process;
     process.setProgram(QString::fromStdU16String(launch.program.u16string()));
     QStringList args;
@@ -2891,13 +2886,13 @@ void MainWindow::StartZeldaCore(const QString& game, bool restart_handoff) {
     qint64 pid = 0;
     if (!process.startDetached(&pid)) {
         QMessageBox::warning(this, tr("Anka"),
-                             tr("The Zelda core could not be started: %1")
+                             tr(Text::NotStarted)
                                  .arg(process.errorString()));
         return;
     }
-    LOG_INFO(Frontend, "Zelda core started: {} {} (pid {}{})", launch.program.string(),
+    LOG_INFO(Frontend, "Second core started: {} {} (pid {}{})", launch.program.string(),
              fmt::join(launch.args, " "), pid, restart_handoff ? ", restart handoff" : "");
-    statusBar()->showMessage(tr("Zelda core started"), 10000);
+    statusBar()->showMessage(tr(Text::Starting), 10000);
 
 #ifdef _WIN32
     // Its exit code decides what follows (a restart, a message)
@@ -2906,53 +2901,49 @@ void MainWindow::StartZeldaCore(const QString& game, bool restart_handoff) {
     if (handle == nullptr) {
         return;
     }
-    zelda_process = handle;
+    second_core_process = handle;
     auto* notifier = new QWinEventNotifier(handle, this);
-    zelda_notifier = notifier;
+    second_core_notifier = notifier;
     connect(notifier, &QWinEventNotifier::activated, this,
-            [this, game](HANDLE) { OnZeldaCoreExited(game); });
+            [this, game](HANDLE) { OnSecondCoreExited(game); });
 #endif
 }
 
-void MainWindow::OnZeldaCoreExited(const QString& game) {
+void MainWindow::OnSecondCoreExited(const QString& game) {
     using namespace AnkaCoreRoute;
     std::uint32_t code = 0;
 #ifdef _WIN32
     DWORD exit_code = 0;
-    GetExitCodeProcess(static_cast<HANDLE>(zelda_process), &exit_code);
+    GetExitCodeProcess(static_cast<HANDLE>(second_core_process), &exit_code);
     code = exit_code;
-    if (zelda_notifier != nullptr) {
-        static_cast<QWinEventNotifier*>(zelda_notifier)->setEnabled(false);
-        zelda_notifier->deleteLater();
+    if (second_core_notifier != nullptr) {
+        static_cast<QWinEventNotifier*>(second_core_notifier)->setEnabled(false);
+        second_core_notifier->deleteLater();
     }
-    CloseHandle(static_cast<HANDLE>(zelda_process));
+    CloseHandle(static_cast<HANDLE>(second_core_process));
 #endif
-    zelda_process = nullptr;
-    zelda_notifier = nullptr;
-    LOG_INFO(Frontend, "Zelda core exited with {:#x}", code);
+    second_core_process = nullptr;
+    second_core_notifier = nullptr;
+    LOG_INFO(Frontend, "Second core exited with {:#x}", code);
 
     const QString log = QString::fromStdU16String(
-        ZeldaLogPath(Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir)).u16string());
+        SecondCoreLogPath(Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir)).u16string());
     switch (ForExitCode(code)) {
     case ExitReaction::None:
-        statusBar()->showMessage(tr("Zelda core closed"), 5000);
+        statusBar()->showMessage(tr(Text::Closed), 5000);
         break;
     case ExitReaction::Restart:
-        StartZeldaCore(game, true);
+        StartSecondCore(game, true);
         break;
     case ExitReaction::StartFailed:
-        QMessageBox::warning(this, tr("Anka"),
-                             tr("The Zelda core could not start the game. The details are in "
-                                "its log:\n%1")
-                                 .arg(log));
+        QMessageBox::warning(this, tr("Anka"), tr(Text::StartFailed).arg(log));
         break;
     case ExitReaction::AlreadyRunning:
-        QMessageBox::information(this, tr("Anka"), tr("The Zelda core is already running."));
+        QMessageBox::information(this, tr("Anka"), tr(Text::AlreadyRunning));
         break;
     case ExitReaction::Crashed:
         QMessageBox::warning(this, tr("Anka"),
-                             tr("The Zelda core closed unexpectedly (exit code 0x%1). Its "
-                                "log:\n%2")
+                             tr(Text::Crashed)
                                  .arg(code, 8, 16, QLatin1Char('0'))
                                  .arg(log));
         break;

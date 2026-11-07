@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -23,7 +25,7 @@ struct TempDir {
         path = fs::temp_directory_path() /
                ("anka_core_route_" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        fs::create_directories(path / "zelda");
+        fs::create_directories(path / Names::Folder);
     }
     ~TempDir() {
         std::error_code ec;
@@ -39,7 +41,7 @@ bool Has(const std::string& text, const std::string& line) {
     return ("\n" + text).find("\n" + line + "\n") != std::string::npos;
 }
 
-// The parts of a qt-config.ini the Zelda core's settings change
+// The parts of a qt-config.ini the second core's settings change
 constexpr const char* QtConfig = "[DisabledAddOns]\n"
                                  "size=2\n"
                                  "1\\title_id\\default=false\n"
@@ -66,6 +68,14 @@ constexpr const char* QtConfig = "[DisabledAddOns]\n"
                                  "scaling_filter=1\n"
                                  "astc_recompression\\default=true\n"
                                  "astc_recompression=0\n"
+                                 "frame_gen\\default=false\n"
+                                 "frame_gen=true\n"
+                                 "frame_gen_type\\default=true\n"
+                                 "frame_gen_type=1\n"
+                                 "frame_gen_multiplier\\default=false\n"
+                                 "frame_gen_multiplier=2\n"
+                                 "frame_gen_target_rate\\default=false\n"
+                                 "frame_gen_target_rate=120\n"
                                  "dk_30fps\\default=false\n"
                                  "dk_30fps=true\n"
                                  "\n"
@@ -88,50 +98,82 @@ IniState State(bool docked) {
 
 } // Anonymous namespace
 
-TEST_CASE("Anka route: only Ocarina of Time goes to the Zelda core", "[yuzu][anka_route]") {
-    REQUIRE(IsZelda(0x0400486024DEC000ULL));
-    REQUIRE(IsZelda(0x0400486024DEC800ULL)); // its update
-    REQUIRE_FALSE(IsZelda(Bananza));
-    REQUIRE_FALSE(IsZelda(0));
-    REQUIRE_FALSE(IsZelda(0x0400486024DED000ULL));
+TEST_CASE("Anka route: only its game goes to the second core", "[yuzu][anka_route]") {
+    REQUIRE(RunsOnSecondCore(0x0400486024DEC000ULL));
+    REQUIRE(RunsOnSecondCore(0x0400486024DEC800ULL)); // its update
+    REQUIRE_FALSE(RunsOnSecondCore(Bananza));
+    REQUIRE_FALSE(RunsOnSecondCore(0));
+    REQUIRE_FALSE(RunsOnSecondCore(0x0400486024DED000ULL));
+    REQUIRE(SecondCoreProgramId == 0x0400486024DEC000ULL);
 }
 
-TEST_CASE("Anka route: the Zelda core in the package", "[yuzu][anka_route]") {
+TEST_CASE("Anka route: the second core's names are the contract's", "[yuzu][anka_route]") {
+    const fs::path user{"D:/Anka/user"};
+    REQUIRE(SecondCoreIniPath(user) == user / "config" / "sdl2-config-zelda.ini");
+    REQUIRE(SecondCoreLogPath(user) == user / "log" / "zelda" / "eden_log.txt");
+    REQUIRE(Names::Folder == "zelda");
+    REQUIRE(Names::CliProgram == "anka-zelda-cli.exe");
+    REQUIRE(Names::QtProgram == "anka-zelda.exe");
+    REQUIRE(Names::CacheFolder == "zelda");
+    REQUIRE(Names::Lock == "Local\\AnkaZeldaCore");
+}
+
+TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]") {
+    const std::array texts{Text::Starting,      Text::Closed,         Text::StillRunning,
+                           Text::StopRunningFirst, Text::PropertiesNote, Text::Missing,
+                           Text::IniNotWritten, Text::NotStarted,     Text::StartFailed,
+                           Text::AlreadyRunning, Text::Crashed};
+    for (const std::string_view text : texts) {
+        REQUIRE(text.find("Zelda") == std::string_view::npos);
+        REQUIRE(text.find("zelda") == std::string_view::npos);
+        REQUIRE(text.find("Ocarina") == std::string_view::npos);
+    }
+    REQUIRE(std::string_view{Text::Starting} == "Starting this game on Anka's second core");
+    REQUIRE(std::string_view{Text::StillRunning}.starts_with(
+        "Another game is still running on Anka's second core"));
+    REQUIRE(std::string_view{Text::PropertiesNote} ==
+            "These settings have no effect on this game's core.");
+}
+
+TEST_CASE("Anka route: the second core in the package", "[yuzu][anka_route]") {
     TempDir t;
-    REQUIRE_FALSE(FindZeldaCore(t.path, true).has_value());
-    REQUIRE_FALSE(FindZeldaCore(t.path, false).has_value());
-    Touch(t.path / "zelda" / "anka-zelda-cli.exe");
-    REQUIRE(FindZeldaCore(t.path, true) == t.path / "zelda" / "anka-zelda-cli.exe");
-    REQUIRE(FindZeldaCore(t.path, false) == t.path / "zelda" / "anka-zelda-cli.exe");
-    Touch(t.path / "zelda" / "anka-zelda.exe");
-    REQUIRE(FindZeldaCore(t.path, true) == t.path / "zelda" / "anka-zelda.exe");
-    REQUIRE(FindZeldaCore(t.path, false) == t.path / "zelda" / "anka-zelda-cli.exe");
+    const fs::path cli = t.path / Names::Folder / Names::CliProgram;
+    const fs::path qt = t.path / Names::Folder / Names::QtProgram;
+    REQUIRE_FALSE(FindSecondCore(t.path, true).has_value());
+    REQUIRE_FALSE(FindSecondCore(t.path, false).has_value());
+    Touch(cli);
+    REQUIRE(FindSecondCore(t.path, true) == cli);
+    REQUIRE(FindSecondCore(t.path, false) == cli);
+    Touch(qt);
+    REQUIRE(FindSecondCore(t.path, true) == qt);
+    REQUIRE(FindSecondCore(t.path, false) == cli);
 }
 
-TEST_CASE("Anka route: the Zelda core's command line and environment", "[yuzu][anka_route]") {
-    const fs::path core = fs::path{"D:/Anka"} / "zelda" / "anka-zelda-cli.exe";
+TEST_CASE("Anka route: the second core's command line and environment", "[yuzu][anka_route]") {
+    const fs::path core = fs::path{"D:/Anka"} / Names::Folder / Names::CliProgram;
     const fs::path user = fs::path{"D:/Anka"} / "user";
-    const auto ini = ZeldaIniPath(user).make_preferred().u8string();
+    const auto ini = SecondCoreIniPath(user).make_preferred().u8string();
     const std::string ini_utf8(ini.begin(), ini.end());
 
-    const auto windowed = PlanZelda(core, user, "D:/Games/Zelda.nup", false, false);
+    const auto windowed = PlanSecondCore(core, user, "D:/Games/Game.nup", false, false);
     REQUIRE(windowed.program == fs::path{core}.make_preferred());
     REQUIRE(windowed.working_dir == fs::path{core}.make_preferred().parent_path());
-    REQUIRE(windowed.args == std::vector<std::string>{"-c", ini_utf8, "-g", "D:/Games/Zelda.nup"});
+    REQUIRE(windowed.args == std::vector<std::string>{"-c", ini_utf8, "-g", "D:/Games/Game.nup"});
     REQUIRE(windowed.env.size() == 1);
     REQUIRE(windowed.env[0].first == "ANKA_USER_DIR");
 
-    const auto full = PlanZelda(core, user, "D:/Games/Zelda.nup", true, true);
+    const auto full = PlanSecondCore(core, user, "D:/Games/Game.nup", true, true);
     REQUIRE(full.args.front() == "-f");
     REQUIRE(full.args.size() == 5);
     REQUIRE(full.env.size() == 2);
     REQUIRE(full.env[1] == std::pair<std::string, std::string>{"EDEN_CLI_RESTART_HANDOFF", "1"});
+
 }
 
 TEST_CASE("Anka route: Windows command line quoting", "[yuzu][anka_route]") {
     REQUIRE(QuoteWindowsArg("-g") == "-g");
     REQUIRE(QuoteWindowsArg("") == "\"\"");
-    REQUIRE(QuoteWindowsArg("D:\\My Games\\Zelda.nup") == "\"D:\\My Games\\Zelda.nup\"");
+    REQUIRE(QuoteWindowsArg("D:\\My Games\\Game.nup") == "\"D:\\My Games\\Game.nup\"");
     REQUIRE(QuoteWindowsArg("D:\\path\\") == "D:\\path\\");
     REQUIRE(QuoteWindowsArg("D:\\a b\\") == "\"D:\\a b\\\\\"");
     REQUIRE(QuoteWindowsArg("say \"hi\"") == "\"say \\\"hi\\\"\"");
@@ -149,7 +191,7 @@ TEST_CASE("Anka route: what the exit codes mean", "[yuzu][anka_route]") {
 }
 
 TEST_CASE("Anka route: written keys carry their \\default=false line", "[yuzu][anka_route]") {
-    const auto ini = MakeZeldaIni(QtConfig, State(true));
+    const auto ini = MakeSecondCoreIni(QtConfig, State(true));
     REQUIRE(Has(ini, "use_docked_mode\\default=false"));
     REQUIRE(Has(ini, "nand_directory\\default=false"));
     REQUIRE(Has(ini, "sdmc_directory\\default=false"));
@@ -159,29 +201,30 @@ TEST_CASE("Anka route: written keys carry their \\default=false line", "[yuzu][a
 }
 
 TEST_CASE("Anka route: docked or handheld always written", "[yuzu][anka_route]") {
-    REQUIRE(Has(MakeZeldaIni(QtConfig, State(true)), "use_docked_mode=1"));
-    REQUIRE(Has(MakeZeldaIni(QtConfig, State(false)), "use_docked_mode=0"));
+    REQUIRE(Has(MakeSecondCoreIni(QtConfig, State(true)), "use_docked_mode=1"));
+    REQUIRE(Has(MakeSecondCoreIni(QtConfig, State(false)), "use_docked_mode=0"));
     // A config without a [System] section gets one
-    const auto ini = MakeZeldaIni("[Renderer]\nanti_aliasing=0\n", State(false));
+    const auto ini = MakeSecondCoreIni("[Renderer]\nanti_aliasing=0\n", State(false));
     REQUIRE(Has(ini, "[System]"));
     REQUIRE(Has(ini, "use_docked_mode=0"));
 }
 
-TEST_CASE("Anka route: unchanged AA, filter and ASTC stay the Zelda core's", "[yuzu][anka_route]") {
-    const auto ini = MakeZeldaIni(QtConfig, State(true));
+TEST_CASE("Anka route: unchanged AA, filter and ASTC stay the second core's",
+          "[yuzu][anka_route]") {
+    const auto ini = MakeSecondCoreIni(QtConfig, State(true));
     REQUIRE(Has(ini, "anti_aliasing\\default=true"));
     REQUIRE(Has(ini, "astc_recompression\\default=true"));
     // Changed in the menu: the menu's value
     REQUIRE(Has(ini, "scaling_filter\\default=false"));
     REQUIRE(Has(ini, "scaling_filter=1"));
-    // Settings only the Zelda core has are not written
+    // Settings only the second core has are not written
     REQUIRE(ini.find("dk_30fps") == std::string::npos);
     // Controls go over as they are
     REQUIRE(Has(ini, "player_0_button_a=\"engine:sdl,button:1\""));
 }
 
-TEST_CASE("Anka route: Ocarina of Time keeps its frame rate patch", "[yuzu][anka_route]") {
-    const auto ini = MakeZeldaIni(QtConfig, State(true));
+TEST_CASE("Anka route: its game keeps its frame rate patch", "[yuzu][anka_route]") {
+    const auto ini = MakeSecondCoreIni(QtConfig, State(true));
     REQUIRE(Has(ini, "size=2"));
     REQUIRE(Has(ini, "1\\title_id=288309953924349952"));
     REQUIRE(Has(ini, "1\\disabled\\1\\d=Other Mod"));
@@ -193,7 +236,7 @@ TEST_CASE("Anka route: Ocarina of Time keeps its frame rate patch", "[yuzu][anka
 }
 
 TEST_CASE("Anka route: the data storage paths as the menu uses them", "[yuzu][anka_route]") {
-    const auto ini = MakeZeldaIni(QtConfig, State(true));
+    const auto ini = MakeSecondCoreIni(QtConfig, State(true));
     REQUIRE(Has(ini, "nand_directory=D:/Anka/user/nand"));
     REQUIRE(Has(ini, "sdmc_directory=D:/Anka/user/sdmc"));
     REQUIRE(Has(ini, "save_directory="));
@@ -201,12 +244,12 @@ TEST_CASE("Anka route: the data storage paths as the menu uses them", "[yuzu][an
     // A path QSettings quotes
     IniState state = State(true);
     state.data_storage = {{"nand_directory", "D:/a,b/nand"}};
-    REQUIRE(Has(MakeZeldaIni(QtConfig, state), "nand_directory=\"D:/a,b/nand\""));
+    REQUIRE(Has(MakeSecondCoreIni(QtConfig, state), "nand_directory=\"D:/a,b/nand\""));
 }
 
 TEST_CASE("Anka route: CRLF files stay CRLF and nothing else moves", "[yuzu][anka_route]") {
     const std::string crlf = "[UI]\r\ntheme=dark\r\n\r\n[System]\r\nuse_docked_mode=1\r\n";
-    const auto ini = MakeZeldaIni(crlf, IniState{.docked = true, .data_storage = {}});
+    const auto ini = MakeSecondCoreIni(crlf, IniState{.docked = true, .data_storage = {}});
     REQUIRE(ini.starts_with("[UI]\r\ntheme=dark\r\n\r\n[System]\r\n"));
     REQUIRE(ini.find("\r\nuse_docked_mode\\default=false\r\nuse_docked_mode=1\r\n") !=
             std::string::npos);

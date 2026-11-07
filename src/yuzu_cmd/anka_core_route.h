@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -12,46 +11,82 @@
 #include <utility>
 #include <vector>
 
-// Anka 1.1 ships two cores: this program (Donkey Kong Bananza and every other game) and the Zelda
-// core next to it, <package>/zelda/anka-zelda-cli.exe. The menu (yuzu/main_window.cpp) and
-// anka-cli (yuzu_cmd/yuzu.cpp) start the Zelda core for Ocarina of Time; the decisions without Qt
-// or the emulator (src/tests/yuzu/anka_core_route.cpp). The contract is the Zelda core's
+// Anka 1.1 ships two cores: this program (Donkey Kong Bananza and every other game) and a second
+// core next to it for The Legend of Zelda: Ocarina of Time. The menu (yuzu/main_window.cpp) and
+// anka-cli (yuzu_cmd/yuzu.cpp) start the second core for that game; the decisions without Qt or
+// the emulator (src/tests/yuzu/anka_core_route.cpp). The contract is the second core's
 // (anka-birlesim 455f2a90cd): ANKA_USER_DIR, -f / -c / -g, exit codes 0 / 1 / 75 / 76.
+//
+// Every name the second core goes by (its folder, programs, settings file, cache and log folders,
+// lock) and every text the user reads about it are here and only here: a rename is one commit.
 namespace AnkaCoreRoute {
 
-/// The Legend of Zelda: Ocarina of Time (its updates share the base id's upper bits).
-constexpr std::uint64_t ZeldaProgramId = 0x0400486024DEC000ULL;
-/// ZeldaProgramId as [DisabledAddOns] stores it.
-constexpr std::uint64_t ZeldaTitleId = ZeldaProgramId;
+/// The second core's file names (the contract with it).
+namespace Names {
+constexpr std::string_view Folder = "zelda";              ///< <package>/<Folder>
+constexpr std::string_view CliProgram = "anka-zelda-cli.exe";
+constexpr std::string_view QtProgram = "anka-zelda.exe";  ///< with a window of its own; none in 1.1
+constexpr std::string_view Ini = "sdl2-config-zelda.ini"; ///< <user>/config/<Ini>
+constexpr std::string_view CacheFolder = "zelda";         ///< <user>/cache/<CacheFolder>: its caches
+constexpr std::string_view LogFolder = "zelda";           ///< <user>/log/<LogFolder>/eden_log.txt
+constexpr std::string_view LogFile = "eden_log.txt";
+constexpr std::string_view Lock = "Local\\AnkaZeldaCore"; ///< its single instance (exit 76)
+} // namespace Names
 
-constexpr bool IsZelda(std::uint64_t program_id) {
-    return (program_id & ~std::uint64_t{0xFFF}) == ZeldaProgramId;
+/// What the user reads about the second core (English, as the rest of Anka). No game's name.
+namespace Text {
+constexpr const char* Starting = "Starting this game on Anka's second core";
+constexpr const char* Closed = "Anka's second core closed";
+constexpr const char* StillRunning = "Another game is still running on Anka's second core. Close "
+                                     "it before starting another game.";
+constexpr const char* StopRunningFirst =
+    "Stop the running game first: this game runs on Anka's second core.";
+constexpr const char* PropertiesNote = "These settings have no effect on this game's core.";
+constexpr const char* Missing = "Anka's second core is missing: %1 was not found. Extract the "
+                                "whole Anka package.";
+constexpr const char* IniNotWritten =
+    "The settings of Anka's second core could not be written to %1.";
+constexpr const char* NotStarted = "Anka's second core could not be started: %1";
+constexpr const char* StartFailed = "The game could not start on Anka's second core. The details "
+                                    "are in its log:\n%1";
+constexpr const char* AlreadyRunning = "Anka's second core is already running.";
+constexpr const char* Crashed = "Anka's second core closed unexpectedly (exit code 0x%1). Its "
+                                "log:\n%2";
+} // namespace Text
+
+/// The game the second core plays (its updates share the base id's upper bits).
+constexpr std::uint64_t SecondCoreProgramId = 0x0400486024DEC000ULL;
+/// SecondCoreProgramId as [DisabledAddOns] stores it.
+constexpr std::uint64_t SecondCoreTitleId = SecondCoreProgramId;
+
+constexpr bool RunsOnSecondCore(std::uint64_t program_id) {
+    return (program_id & ~std::uint64_t{0xFFF}) == SecondCoreProgramId;
 }
 
-/// The Zelda core in the package: zelda/anka-zelda.exe (with a window of its own) when the menu
-/// starts it and it is there, else zelda/anka-zelda-cli.exe. Empty: neither is there.
-inline std::optional<std::filesystem::path> FindZeldaCore(const std::filesystem::path& package_dir,
-                                                          bool prefer_qt) {
+/// The second core in the package: Names::QtProgram when the menu starts it and it is there, else
+/// Names::CliProgram. Empty: neither is there.
+inline std::optional<std::filesystem::path> FindSecondCore(const std::filesystem::path& package_dir,
+                                                           bool prefer_qt) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path dir = package_dir / "zelda";
-    if (prefer_qt && fs::is_regular_file(dir / "anka-zelda.exe", ec)) {
-        return dir / "anka-zelda.exe";
+    const fs::path dir = package_dir / Names::Folder;
+    if (prefer_qt && fs::is_regular_file(dir / Names::QtProgram, ec)) {
+        return dir / Names::QtProgram;
     }
-    if (fs::is_regular_file(dir / "anka-zelda-cli.exe", ec)) {
-        return dir / "anka-zelda-cli.exe";
+    if (fs::is_regular_file(dir / Names::CliProgram, ec)) {
+        return dir / Names::CliProgram;
     }
     return std::nullopt;
 }
 
-/// The Zelda core's settings file, written by the starting program at every start.
-inline std::filesystem::path ZeldaIniPath(const std::filesystem::path& user_dir) {
-    return user_dir / "config" / "sdl2-config-zelda.ini";
+/// The second core's settings file, written by the starting program at every start.
+inline std::filesystem::path SecondCoreIniPath(const std::filesystem::path& user_dir) {
+    return user_dir / "config" / Names::Ini;
 }
 
-/// The Zelda core's log (for the messages after a failed start).
-inline std::filesystem::path ZeldaLogPath(const std::filesystem::path& user_dir) {
-    return user_dir / "log" / "zelda" / "eden_log.txt";
+/// The second core's log (for the messages after a failed start).
+inline std::filesystem::path SecondCoreLogPath(const std::filesystem::path& user_dir) {
+    return user_dir / "log" / Names::LogFolder / Names::LogFile;
 }
 
 struct Launch {
@@ -61,10 +96,11 @@ struct Launch {
     std::vector<std::pair<std::string, std::string>> env;
 };
 
-/// The Zelda core's command line: `-f` when full screen, `-c <user>/config/sdl2-config-zelda.ini`,
+/// The second core's command line: `-f` when full screen, `-c <user>/config/<Names::Ini>`,
 /// `-g <game>`; ANKA_USER_DIR always, EDEN_CLI_RESTART_HANDOFF=1 only to restart after exit 75.
-inline Launch PlanZelda(const std::filesystem::path& core, const std::filesystem::path& user_dir,
-                        const std::string& game_utf8, bool fullscreen, bool restart_handoff) {
+inline Launch PlanSecondCore(const std::filesystem::path& core,
+                             const std::filesystem::path& user_dir, const std::string& game_utf8,
+                             bool fullscreen, bool restart_handoff) {
     Launch launch;
     launch.program = std::filesystem::path{core}.make_preferred();
     launch.working_dir = launch.program.parent_path();
@@ -72,7 +108,7 @@ inline Launch PlanZelda(const std::filesystem::path& core, const std::filesystem
         launch.args.emplace_back("-f");
     }
     launch.args.emplace_back("-c");
-    const auto ini = ZeldaIniPath(user_dir).make_preferred().u8string();
+    const auto ini = SecondCoreIniPath(user_dir).make_preferred().u8string();
     launch.args.emplace_back(ini.begin(), ini.end());
     launch.args.emplace_back("-g");
     launch.args.push_back(game_utf8);
@@ -118,12 +154,12 @@ inline std::string WindowsCommandLine(const std::filesystem::path& program,
     return line;
 }
 
-/// What the starting program does when the Zelda core exits.
+/// What the starting program does when the second core exits.
 enum class ExitReaction {
     None,           ///< 0: closed normally
     StartFailed,    ///< 1: the game did not start; the details are in its log
     Restart,        ///< 75: the game asked for a restart: the same arguments + the handoff
-    AlreadyRunning, ///< 76: another Zelda core is open; it touched nothing
+    AlreadyRunning, ///< 76: the second core is already open; it touched nothing
     Crashed,        ///< anything else (0xC0000005...)
 };
 
@@ -142,19 +178,19 @@ constexpr ExitReaction ForExitCode(std::uint32_t code) {
     }
 }
 
-/// The menu's state the Zelda core's settings take over (besides the config file itself).
+/// The menu's state the second core's settings take over (besides the config file itself).
 struct IniState {
     bool docked{};
     /// [Data%20Storage] keys and the paths in use (nand_directory, sdmc_directory, ...).
     std::vector<std::pair<std::string, std::string>> data_storage;
 };
 
-/// Settings only the Zelda core has; the menu has no value for them and leaves its own.
-constexpr std::string_view ZeldaOnlyKeys[] = {"nvidia_dlss", "game_dlss_network", "mkw_30fps",
+/// Settings only the second core has; the menu has no value for them and leaves its own.
+constexpr std::string_view SecondCoreOnlyKeys[] = {"nvidia_dlss", "game_dlss_network", "mkw_30fps",
                                               "mkw_dynamic_fps", "mkw_smooth", "dk_30fps"};
 
-/// The add-on the Zelda core needs on (its dynamic frame rate patch).
-constexpr std::string_view ZeldaKeptAddOn = "Dynamic FPS by Dark";
+/// The add-on the second core needs on (its dynamic frame rate patch).
+constexpr std::string_view SecondCoreKeptAddOn = "Dynamic FPS by Dark";
 
 namespace Detail {
 
@@ -256,7 +292,7 @@ inline void Append(Section& section, std::string line) {
     section.lines.insert(it, std::move(line));
 }
 
-/// `key\default=false` and `key=value`: without the first line the Zelda core takes its own
+/// `key\default=false` and `key=value`: without the first line the second core takes its own
 /// default and ignores the value.
 inline void SetKey(Section& section, std::string_view key, std::string_view value) {
     DropKey(section, key);
@@ -264,8 +300,8 @@ inline void SetKey(Section& section, std::string_view key, std::string_view valu
     Append(section, std::string{key} + "=" + Quote(value));
 }
 
-/// [DisabledAddOns] without ZeldaKeptAddOn for the Zelda title, renumbered.
-inline void KeepZeldaAddOn(Section& section) {
+/// [DisabledAddOns] without SecondCoreKeptAddOn for its game, renumbered.
+inline void KeepSecondCoreAddOn(Section& section) {
     struct Entry {
         std::string title_id;
         std::vector<std::string> disabled; ///< raw values
@@ -316,12 +352,12 @@ inline void KeepZeldaAddOn(Section& section) {
         }
     }
     for (auto& e : entries) {
-        if (e.title_id != std::to_string(ZeldaTitleId)) {
+        if (e.title_id != std::to_string(SecondCoreTitleId)) {
             continue;
         }
         const auto before = e.disabled.size();
         std::erase_if(e.disabled, [](const std::string& raw) {
-            return Unquote(raw) == ZeldaKeptAddOn;
+            return Unquote(raw) == SecondCoreKeptAddOn;
         });
         changed |= e.disabled.size() != before;
     }
@@ -353,22 +389,22 @@ inline void KeepZeldaAddOn(Section& section) {
 
 } // namespace Detail
 
-/// The Zelda core's settings from the menu's (qt-config.ini, or anka-cli's sdl2-config.ini: the
+/// The second core's settings from the menu's (qt-config.ini, or anka-cli's sdl2-config.ini: the
 /// same sections and keys): the file as it is, then
-/// - [System] use_docked_mode always the starting program's (the Zelda core's default differs);
-/// - [Data%20Storage] the paths in use, the Zelda core writing them back as absolute paths;
-/// - [DisabledAddOns] without the Zelda core's own frame rate patch for Ocarina of Time;
-/// - no setting only the Zelda core has.
+/// - [System] use_docked_mode always the starting program's (the second core's default differs);
+/// - [Data%20Storage] the paths in use, the second core writing them back as absolute paths;
+/// - [DisabledAddOns] without the frame rate patch its game needs on;
+/// - no setting only the second core has.
 /// anti_aliasing / scaling_filter / astc_recompression go over as they are: left at the
-/// default (`\default=true`) the Zelda core keeps its own (FXAA, ScaleForce, BC3).
+/// default (`\default=true`) the second core keeps its own (FXAA, ScaleForce, BC3).
 /// TODO(contract): the full key list and any renamed keys come from anka-birlesim's contract.
-inline std::string MakeZeldaIni(std::string_view config_text, const IniState& state) {
+inline std::string MakeSecondCoreIni(std::string_view config_text, const IniState& state) {
     using namespace Detail;
     auto sections = Parse(config_text);
     const std::string newline = config_text.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
 
     for (auto& section : sections) {
-        for (const auto key : ZeldaOnlyKeys) {
+        for (const auto key : SecondCoreOnlyKeys) {
             DropKey(section, key);
         }
     }
@@ -381,7 +417,7 @@ inline std::string MakeZeldaIni(std::string_view config_text, const IniState& st
     }
     for (auto& section : sections) {
         if (section.header == "[DisabledAddOns]") {
-            KeepZeldaAddOn(section);
+            KeepSecondCoreAddOn(section);
         }
     }
 
