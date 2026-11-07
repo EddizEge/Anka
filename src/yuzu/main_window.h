@@ -26,6 +26,7 @@
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 #include "yuzu/hotkeys.h"
+#include "yuzu/nx2_auto_run.h"
 #include "yuzu/user_data_migration.h"
 
 #ifdef __unix__
@@ -543,6 +544,11 @@ private:
     bool emulation_running = false;
     // EDEN_NX2_OSD (frontend_common/nx2_osd.h): from the game's start to its shutdown.
     Nx2Osd::WriterPtr nx2_osd;
+    // EDEN_NX2_AUTO_INPUT_FILE / EDEN_NX2_AUTO_EXIT (yuzu/nx2_auto_run.h), ticked by its timer.
+    std::unique_ptr<Nx2AutoRun> nx2_auto;
+    QTimer nx2_auto_timer;
+    // Its exit closes the window without ConfirmClose's question.
+    bool nx2_auto_closing = false;
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)

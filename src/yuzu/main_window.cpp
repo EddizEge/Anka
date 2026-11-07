@@ -476,6 +476,18 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
     update_input_timer.start();
 
+    // About the rate of yuzu_cmd's main loop, which runs its EDEN_NX2_AUTO_* script.
+    nx2_auto_timer.setInterval(4);
+    connect(&nx2_auto_timer, &QTimer::timeout, this, [this] {
+        if (nx2_auto && nx2_auto->Tick(*QtCommon::system, *input_subsystem)) {
+            nx2_auto_timer.stop();
+            nx2_auto.reset();
+            // Unattended: close without the "close Anka?" question, as closing the window does.
+            nx2_auto_closing = true;
+            close();
+        }
+    });
+
     if (has_broken_vulkan) {
         UISettings::values.has_broken_vulkan = true;
 
@@ -1982,6 +1994,12 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             : std::function<s64()>{
                   [] { return QtCommon::system->CoreTiming().GetGlobalTimeUs().count(); }});
 
+    // Unattended runs (yuzu/nx2_auto_run.h); its boot clock starts with the emulation thread.
+    nx2_auto = Nx2AutoRun::StartFromEnvironment();
+    if (nx2_auto) {
+        nx2_auto_timer.start();
+    }
+
     // Register an ExecuteProgram callback such that Core can execute a sub-program
     QtCommon::system->RegisterExecuteProgramCallback(
         [this](std::size_t program_index_) { render_window->ExecuteProgram(program_index_); });
@@ -2213,6 +2231,9 @@ void MainWindow::OnEmulationStopped() {
     render_window->setAttribute(Qt::WA_Hover, false);
 
     UpdateWindowTitle();
+
+    nx2_auto_timer.stop();
+    nx2_auto.reset();
 
     // Disable status bar updates
     status_bar_update_timer.stop();
@@ -4605,7 +4626,7 @@ bool MainWindow::ConfirmClose() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (!ConfirmClose()) {
+    if (!nx2_auto_closing && !ConfirmClose()) {
         event->ignore();
         return;
     }
