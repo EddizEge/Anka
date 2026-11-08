@@ -363,6 +363,19 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
     }
     const fs::path user = Common::FS::GetEdenPath(EdenPath::EdenDir);
 
+    // The Anka tab's options for the second core, as the menu saved them in its settings file
+    // (qt-config.ini, UISettings' path); none saved yet: the second core's defaults
+    SecondCoreValues options = SecondCoreDefaults();
+    {
+        const fs::path menu_ini = Common::FS::GetEdenPath(EdenPath::ConfigDir) / "qt-config.ini";
+        if (const auto menu = ReadStartingSettings(menu_ini)) {
+            options = SecondCoreOptionsFromMenu(*menu);
+        } else {
+            LOG_INFO(Frontend, "Second core: no menu settings in {}, its options at their defaults",
+                     Common::FS::PathToUTF8String(menu_ini));
+        }
+    }
+
     // Its settings from this program's (the same sections and keys), written at every start
     {
         const auto text = ReadStartingSettings(PathFromUtf8(config.GetConfigFilePath()));
@@ -386,6 +399,7 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
         state.data_storage.emplace_back(
             "save_directory",
             save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
+        state.options = options;
         const fs::path ini = SecondCoreIniPath(user);
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);
@@ -400,7 +414,7 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
 
     // The child inherits this environment: not this program's switches (a launcher of the main
     // core sets them), nor a handoff; its own come from PlanSecondCore. anka-cli has no Anka tab:
-    // no settings variables.
+    // of its variables only the second core's options (SecondCoreOptionEnv).
     {
         std::vector<std::wstring> cleared;
         if (wchar_t* block = GetEnvironmentStringsW()) {
@@ -425,7 +439,8 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
     }
     bool restart = false;
     for (;;) {
-        const Launch launch = PlanSecondCore(*core, user, lp.filepath, lp.fullscreen, restart);
+        const Launch launch = PlanSecondCore(*core, user, lp.filepath, lp.fullscreen, restart,
+                                             SecondCoreOptionEnv(options));
         _wputenv_s(L"EDEN_CLI_RESTART_HANDOFF", L"");
         for (const auto& [name, value] : launch.env) {
             _wputenv_s(Common::UTF8ToUTF16W(name).c_str(), Common::UTF8ToUTF16W(value).c_str());

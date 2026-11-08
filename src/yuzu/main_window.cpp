@@ -2856,6 +2856,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         state.data_storage.emplace_back(
             "save_directory",
             save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
+        state.options = UISettings::values.second_core;
         const fs::path ini = SecondCoreIniPath(user);
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);
@@ -2869,9 +2870,10 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         }
     }
 
-    // The Anka tab's settings the second core has a counterpart for, and the preset's there
+    // The Anka tab's settings the second core has a counterpart for, the preset's there, and its
+    // own options (the "Anka's second core" section)
     const auto& anka = UISettings::values.nx2perf;
-    const auto settings_env = SecondCoreEnv(
+    auto settings_env = SecondCoreEnv(
         [&anka](std::string_view key) {
             for (const auto& k : Core::Nx2PerfSettings::Keys) {
                 if (k.name == key) {
@@ -2881,6 +2883,8 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
             return false;
         },
         static_cast<int>(anka.preset));
+    const auto options_env = SecondCoreOptionEnv(UISettings::values.second_core);
+    settings_env.insert(settings_env.end(), options_env.begin(), options_env.end());
     const Launch launch = PlanSecondCore(*core, user, game.toStdString(),
                                          ui->action_Fullscreen->isChecked(), restart_handoff,
                                          settings_env);
