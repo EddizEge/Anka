@@ -2892,9 +2892,11 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         static_cast<int>(anka.preset));
     const auto options_env = SecondCoreOptionEnv(UISettings::values.second_core);
     settings_env.insert(settings_env.end(), options_env.begin(), options_env.end());
-    const Launch launch = PlanSecondCore(*core, user, game.toStdString(),
-                                         ui->action_Fullscreen->isChecked(), restart_handoff,
-                                         settings_env);
+    // Full screen by the game group's box or View > Fullscreen
+    const Launch launch = PlanSecondCore(
+        *core, user, game.toStdString(),
+        SecondCoreFullscreen(ui->action_Fullscreen->isChecked(), UISettings::values.second_core),
+        restart_handoff, settings_env);
     QProcess process;
     process.setProgram(QString::fromStdU16String(launch.program.u16string()));
     QStringList args;

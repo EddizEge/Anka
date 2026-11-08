@@ -704,12 +704,15 @@ TEST_CASE("Anka route: CRLF files stay CRLF and nothing else moves", "[yuzu][ank
 
 namespace {
 
-constexpr std::size_t MaxResolutionAt = 0;
-constexpr std::size_t VisualTweakAt = 1;
-constexpr std::size_t OcclusionOffAt = 2;
+constexpr std::size_t FullScreenAt = 0;
+constexpr std::size_t MaxResolutionAt = 1;
+constexpr std::size_t VisualTweakAt = 2;
+constexpr std::size_t OcclusionOffAt = 3;
 
-SecondCoreValues Options(int max_resolution, int visual_tweak, int occlusion_off) {
+SecondCoreValues Options(int max_resolution, int visual_tweak, int occlusion_off,
+                         int full_screen = 1) {
     SecondCoreValues values{};
+    values[FullScreenAt] = full_screen;
     values[MaxResolutionAt] = max_resolution;
     values[VisualTweakAt] = visual_tweak;
     values[OcclusionOffAt] = occlusion_off;
@@ -765,21 +768,25 @@ std::vector<std::string_view> MainCoreNames() {
 } // Anonymous namespace
 
 TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_route]") {
-    REQUIRE(SecondCoreOptions.size() == 3);
+    REQUIRE(SecondCoreOptions.size() == 4);
+    REQUIRE(SecondCoreOptions[FullScreenAt].key == "second_core_full_screen");
+    REQUIRE(SecondCoreOptions[FullScreenAt].target == OptionTarget::Arg);
+    REQUIRE(SecondCoreOptions[FullScreenAt].name == "-f");
     REQUIRE(SecondCoreOptions[MaxResolutionAt].key == "second_core_max_resolution");
     REQUIRE(SecondCoreOptions[VisualTweakAt].key == "second_core_visual_tweak");
     REQUIRE(SecondCoreOptions[OcclusionOffAt].key == "second_core_occlusion_off");
     REQUIRE(SecondCoreOptions[MaxResolutionAt].name == "EDEN_OOT_MAX_RESOLUTION");
     REQUIRE(SecondCoreOptions[VisualTweakAt].name == "EDEN_NX2_OOT_VISUAL_WORKAROUND");
     REQUIRE(SecondCoreOptions[OcclusionOffAt].name == "EDEN_OOT_OCCLUSION_OFF");
-    // The defaults: full-resolution 3D on (the second core's own), the haze and bloom tweak off
-    // (the user's decision of 08.11.2026; the second core's own is on), occlusion off off
-    REQUIRE(SecondCoreDefaults() == Options(1, 0, 0));
+    // The defaults: full screen on, full-resolution 3D on (the second core's own), the haze and
+    // bloom tweak off (the user's decision of 08.11.2026; the second core's own is on), occlusion
+    // off off
+    REQUIRE(SecondCoreDefaults() == Options(1, 0, 0, 1));
     const auto main_core = MainCoreNames();
     for (std::size_t i = 0; i < SecondCoreOptions.size(); ++i) {
         const auto& option = SecondCoreOptions[i];
         REQUIRE(option.kind == OptionKind::Toggle);
-        REQUIRE(option.target == OptionTarget::Env);
+        REQUIRE((option.target == OptionTarget::Env) == (i != FullScreenAt));
         // Not a key of the main core's settings: no preset, plan or DKB variable sees it
         REQUIRE(std::none_of(Perf::Keys.begin(), Perf::Keys.end(),
                              [&](const Perf::Key& key) { return key.name == option.key; }));
@@ -791,6 +798,9 @@ TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_ro
         }
         REQUIRE(option.label != nullptr);
         REQUIRE(option.text != nullptr);
+        if (option.target != OptionTarget::Env) {
+            continue;
+        }
         // An EDEN_* name: the starting program's own value of it is never passed on
         REQUIRE(option.name.starts_with("EDEN_"));
         REQUIRE(ClearedForSecondCore(option.name));
@@ -809,8 +819,10 @@ TEST_CASE("Anka route: the options' variables, always written as 1 or 0", "[yuzu
     // The default: all written, at the second core's own default
     REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()) == OptionEnv(1, 0, 0));
     // The tweak at its default is turned off explicitly: the second core's own default is on
-    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults())[VisualTweakAt] ==
-            std::pair<std::string, std::string>{"EDEN_NX2_OOT_VISUAL_WORKAROUND", "0"});
+    const auto defaults = SecondCoreOptionEnv(SecondCoreDefaults());
+    REQUIRE(std::count(defaults.begin(), defaults.end(),
+                       std::pair<std::string, std::string>{"EDEN_NX2_OOT_VISUAL_WORKAROUND",
+                                                           "0"}) == 1);
     for (const int a : {0, 1}) {
         for (const int b : {0, 1}) {
             for (const int c : {0, 1}) {
@@ -1136,4 +1148,58 @@ TEST_CASE("Anka route: the box decides its built-in patch, not [DisabledAddOns]"
                                   "1\\disabled\\1\\d=Other Mod\n"
                                   "1\\disabled\\size=1\n";
     REQUIRE(MakeSecondCoreIni(untouched, State(true)).starts_with(untouched));
+}
+
+TEST_CASE("Anka route: full screen by the box or View > Fullscreen", "[yuzu][anka_route]") {
+    REQUIRE(std::string_view{Text::FullScreen} == "Full screen");
+    REQUIRE(std::string_view{Text::FullScreenText} ==
+            "Starts the game in full screen. Alt+F4 closes it.");
+    const fs::path core = fs::path{"D:/Anka"} / Names::Folder / Names::CliProgram;
+    for (const int box : {0, 1}) {
+        for (const bool view : {false, true}) {
+            const auto values = Options(1, 0, 0, box);
+            const bool full = SecondCoreFullscreen(view, values);
+            REQUIRE(full == (box == 1 || view));
+            const auto launch = PlanSecondCore(core, "D:/Anka/user", "g.nup", full, false,
+                                               SecondCoreOptionEnv(values));
+            const bool has_f =
+                std::find(launch.args.begin(), launch.args.end(), "-f") != launch.args.end();
+            REQUIRE(has_f == (box == 1 || view));
+            // Only the switch: no variable for it
+            for (const auto& [name, value] : launch.env) {
+                REQUIRE(name != "-f");
+                REQUIRE(name.find("FULLSCREEN") == std::string::npos);
+            }
+            // Nor a settings key: the second core's sdl_config reads no `fullscreen`, and the
+            // menu's fullscreen_mode (borderless / exclusive) goes over as it is
+            IniState state = State(true);
+            state.options.assign(values.begin(), values.end());
+            const std::string renderer = "[Renderer]\n";
+            std::string config = QtConfig;
+            config.insert(config.find(renderer) + renderer.size(),
+                          "fullscreen_mode\\default=false\nfullscreen_mode=1\n");
+            config += "\n[UI]\nfullscreen\\default=true\nfullscreen=false\n";
+            const auto ini = MakeSecondCoreIni(config, state);
+            REQUIRE(Has(ini, "fullscreen_mode\\default=false"));
+            REQUIRE(Has(ini, "fullscreen_mode=1"));
+            REQUIRE(Has(ini, "fullscreen\\default=true"));
+            REQUIRE(Has(ini, "fullscreen=false"));
+            REQUIRE_FALSE(Has(ini, "fullscreen=true"));
+            REQUIRE(ini.find("fullscreen\\default=false") == std::string::npos);
+        }
+    }
+    // The default is on: the second core has no menu to switch it from
+    REQUIRE(SecondCoreFullscreen(false, SecondCoreDefaults()));
+    REQUIRE(SecondCoreFullscreen(false, std::span<const int>{}));
+    // anka-cli reads the box from the menu's file as the menu saved it, its own -f besides
+    const auto off = SecondCoreOptionsFromMenu("[Anka]\nsecond_core_full_screen\\default=false\n"
+                                               "second_core_full_screen=false\n");
+    REQUIRE(off == Options(1, 0, 0, 0));
+    REQUIRE_FALSE(SecondCoreFullscreen(false, off));
+    REQUIRE(SecondCoreFullscreen(true, off));
+    REQUIRE(SecondCoreFullscreen(false, SecondCoreOptionsFromMenu("")));
+    // A table without the row: as asked
+    constexpr std::array<SecondCoreOption, 0> none{};
+    REQUIRE_FALSE(SecondCoreFullscreen(false, std::span<const int>{}, none));
+    REQUIRE(SecondCoreFullscreen(true, std::span<const int>{}, none));
 }

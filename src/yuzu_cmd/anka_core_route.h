@@ -83,6 +83,8 @@ constexpr const char* PresetOnSecondCore =
 /// The Anka tab's group of the second core's own settings (SecondCoreOptions), as the main core's
 /// game group is titled
 constexpr const char* OptionsTitle = "%1 only (off in other games)";
+constexpr const char* FullScreen = "Full screen";
+constexpr const char* FullScreenText = "Starts the game in full screen. Alt+F4 closes it.";
 constexpr const char* MaxResolution = "Full-resolution 3D";
 constexpr const char* MaxResolutionText =
     "On: the game draws its 3D at full resolution. Off: it lowers it under load, down to 480p: "
@@ -243,6 +245,9 @@ enum class OptionTarget : std::uint8_t {
     /// A Choice's item writes its own keys of the settings file (`writes`), no variable: one choice
     /// that is several settings there (frame generation: a multiplier and a target rate)
     IniWrites,
+    /// The command line switch `name` while on (a Toggle; PlanSecondCore's): no variable, nothing
+    /// in the settings file
+    Arg,
 };
 
 /// A key an item of an OptionTarget::IniWrites choice writes in the second core's settings file.
@@ -286,6 +291,11 @@ struct SecondCoreOption {
 /// The variables are written "1" / "0" exactly (the second core reads their first character, or
 /// "0" alone). Every name is an EDEN_* one: the starting program's own never reach the second core
 /// (ClearedForSecondCore), so only these rows set them there.
+/// - Full screen: `-f`, the only thing the second core starts full screen by (its
+///   core/launch_params.cpp `p.fullscreen`, given to EmuWindow_SDL3_VK, which calls Fullscreen() in
+///   [Renderer] fullscreen_mode: borderless or exclusive, the menu's value passed on). Its
+///   sdl_config reads no `fullscreen` key: none is written. On by default: the second core has no
+///   menu to switch it from (SecondCoreFullscreen).
 /// - Full-resolution 3D / Occlusion off: built-in patches of the second core (its
 ///   file_sys/patch_manager.cpp, BUILTIN_PATCHES, BuiltinPatchOffered): '1' offers the patch, '0'
 ///   hides it. Max Resolution: its 3D at full scale instead of the GPU-time controller's, down to
@@ -299,6 +309,13 @@ struct SecondCoreOption {
 ///   row has one target: when the second core reads an ini key for it too, writing both takes a
 ///   second target on the row.
 inline constexpr std::array SecondCoreOptions{
+    SecondCoreOption{.key = "second_core_full_screen",
+                     .kind = OptionKind::Toggle,
+                     .default_value = 1,
+                     .target = OptionTarget::Arg,
+                     .name = "-f",
+                     .label = Text::FullScreen,
+                     .text = Text::FullScreenText},
     SecondCoreOption{.key = "second_core_max_resolution",
                      .kind = OptionKind::Toggle,
                      .default_value = 1,
@@ -389,6 +406,9 @@ inline std::vector<OptionOutput> SecondCoreOptionOutputs(
     for (std::size_t i = 0; i < table.size(); ++i) {
         const auto& option = table[i];
         const int value = i < values.size() ? values[i] : option.default_value;
+        if (option.target == OptionTarget::Arg) {
+            continue; // the command line's (SecondCoreFullscreen)
+        }
         if (option.target == OptionTarget::IniWrites) {
             const int chosen = ValidOption(option, value);
             for (const auto& choice : option.choices) {
@@ -421,6 +441,20 @@ inline std::vector<std::pair<std::string, std::string>> SecondCoreOptionEnv(
         }
     }
     return env;
+}
+
+/// Whether the second core starts full screen (PlanSecondCore's `fullscreen`, `-f`): asked by the
+/// starting program (the menu's View > Fullscreen, anka-cli's own -f) or by the option row of `-f`.
+inline bool SecondCoreFullscreen(bool asked, std::span<const int> values,
+                                 std::span<const SecondCoreOption> table = SecondCoreOptions) {
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        const auto& option = table[i];
+        if (option.target == OptionTarget::Arg && option.name == "-f" &&
+            ValidOption(option, i < values.size() ? values[i] : option.default_value) != 0) {
+            return true;
+        }
+    }
+    return asked;
 }
 
 /// Reads the options of the [Anka] group: a Toggle through `read_bool(key, default)`, the others

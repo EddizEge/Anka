@@ -439,7 +439,9 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
     }
     bool restart = false;
     for (;;) {
-        const Launch launch = PlanSecondCore(*core, user, lp.filepath, lp.fullscreen, restart,
+        // Full screen by its own -f or the menu's box, as the menu decides it
+        const Launch launch = PlanSecondCore(*core, user, lp.filepath,
+                                             SecondCoreFullscreen(lp.fullscreen, options), restart,
                                              SecondCoreOptionEnv(options));
         _wputenv_s(L"EDEN_CLI_RESTART_HANDOFF", L"");
         for (const auto& [name, value] : launch.env) {
