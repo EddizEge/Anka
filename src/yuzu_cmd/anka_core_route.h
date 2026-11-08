@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -68,7 +69,26 @@ constexpr const char* NoEffectOnSecondCore = "Anka's second core: no effect";
 /// The Anka tab's preset: what it means on the second core (SecondCorePresetVars)
 constexpr const char* PresetOnSecondCore =
     "On Anka's second core Reactive Flushing stays off, so both Recommended presets are the "
-    "same there; Safe also turns off its GPU shortcuts and its GPU thread split.";
+    "same there; Safe also turns off its GPU shortcuts and its GPU thread split. No preset "
+    "changes the settings under Anka's second core.";
+/// The Anka tab's section of the second core's own settings (SecondCoreOptions): its title and the
+/// quiet line under it
+constexpr const char* OptionsTitle = "Anka's second core";
+constexpr const char* OptionsNote =
+    "Used only when a game starts on Anka's second core. Presets don't change these.";
+constexpr const char* MaxResolution = "Max resolution patch";
+constexpr const char* MaxResolutionText =
+    "The game renders at full resolution instead of lowering it when the GPU falls behind "
+    "(built-in patch). On by default; turn off if the GPU can't keep up.";
+constexpr const char* OcclusionOff = "Occlusion off patch";
+constexpr const char* OcclusionOffText =
+    "Turns off the game's occlusion queries and depth pre-pass (built-in patch). Off by default; "
+    "can change performance either way.";
+constexpr const char* GameDlss = "Game's own DLSS";
+constexpr const char* GameDlssText =
+    "Upscales with the game's own DLSS network, translated for this GPU, instead of AMD FSR 3.1. "
+    "FSR 3.1 still draws where the network can't run, with resolution scaling, or if its output "
+    "fails Anka's checks.";
 } // namespace Text
 
 /// The game the second core plays (its updates share the base id's upper bits).
@@ -202,6 +222,195 @@ std::vector<std::pair<std::string, std::string>> SecondCoreEnv(
         }
     }
     return env;
+}
+
+/// The kind of control a SecondCoreOption has; its value is an int either way.
+enum class OptionKind : std::uint8_t {
+    Toggle, ///< a box: 0 off, 1 on
+    Number, ///< a whole number from `min` to `max`
+    Choice, ///< one of `choices`, by its value
+};
+
+/// Where a SecondCoreOption's value goes on the second core.
+enum class OptionTarget : std::uint8_t {
+    Env, ///< the variable `name`: a Toggle as "1" / "0", the others as the number
+    Ini, ///< `name` in [`section`] of its settings file: a Toggle as "true" / "false"
+};
+
+/// An item of a Choice: the value kept and handed over, and what the user reads.
+struct OptionChoice {
+    int value;
+    const char* label;
+};
+
+/// A setting of the Anka tab's "Anka's second core" section: one the second core has and the main
+/// core does not. Kept in the [Anka] group under `key` (beside Core::Nx2PerfSettings::Keys, never
+/// one of them: no preset and no main core plan sees it), handed to the second core at each start.
+struct SecondCoreOption {
+    std::string_view key;
+    OptionKind kind;
+    int default_value; ///< the second core's own default
+    OptionTarget target;
+    std::string_view name;      ///< the variable, or the key in its settings file
+    std::string_view section{}; ///< OptionTarget::Ini
+    const char* label{};        ///< Text::
+    const char* text{};         ///< Text::, under the control
+    int min{};                  ///< OptionKind::Number
+    int max{1};                 ///< OptionKind::Number
+    std::span<const OptionChoice> choices{}; ///< OptionKind::Choice
+};
+
+/// The second core's own settings. One row each: the tab (configure_nx2perf.cpp), the [Anka] keys
+/// (LoadSecondCoreOptions / SaveSecondCoreOptions), anka-cli (SecondCoreOptionsFromMenu), the
+/// variables and the settings file (SecondCoreOptionOutputs) all follow it.
+/// - Max resolution / Occlusion off: built-in patches of the second core (its
+///   file_sys/patch_manager.cpp, BUILTIN_PATCHES); a variable starting with '1' offers the patch,
+///   '0' hides it, anything else leaves its default.
+/// - Game's own DLSS: its [Renderer] game_dlss_network (common/settings.h, default false), which its
+///   game_settings.cpp turns off while left at the default: written here always.
+inline constexpr std::array SecondCoreOptions{
+    SecondCoreOption{.key = "second_core_max_resolution",
+                     .kind = OptionKind::Toggle,
+                     .default_value = 1,
+                     .target = OptionTarget::Env,
+                     .name = "EDEN_OOT_MAX_RESOLUTION",
+                     .label = Text::MaxResolution,
+                     .text = Text::MaxResolutionText},
+    SecondCoreOption{.key = "second_core_occlusion_off",
+                     .kind = OptionKind::Toggle,
+                     .default_value = 0,
+                     .target = OptionTarget::Env,
+                     .name = "EDEN_OOT_OCCLUSION_OFF",
+                     .label = Text::OcclusionOff,
+                     .text = Text::OcclusionOffText},
+    SecondCoreOption{.key = "second_core_game_dlss",
+                     .kind = OptionKind::Toggle,
+                     .default_value = 0,
+                     .target = OptionTarget::Ini,
+                     .name = "game_dlss_network",
+                     .section = "Renderer",
+                     .label = Text::GameDlss,
+                     .text = Text::GameDlssText},
+};
+
+/// The values of SecondCoreOptions, in its order.
+using SecondCoreValues = std::array<int, SecondCoreOptions.size()>;
+
+/// A value the option can hold: a Toggle 0 or 1, a Number within its range, a Choice one of its
+/// values (else the default).
+constexpr int ValidOption(const SecondCoreOption& option, int value) {
+    switch (option.kind) {
+    case OptionKind::Toggle:
+        return value != 0 ? 1 : 0;
+    case OptionKind::Number:
+        return std::clamp(value, option.min, option.max);
+    case OptionKind::Choice:
+        return std::any_of(option.choices.begin(), option.choices.end(),
+                           [value](const OptionChoice& choice) { return choice.value == value; })
+                   ? value
+                   : option.default_value;
+    }
+    return option.default_value;
+}
+
+/// Every option at the second core's own default.
+template <std::size_t N>
+constexpr std::array<int, N> OptionDefaults(const std::array<SecondCoreOption, N>& table) {
+    std::array<int, N> values{};
+    for (std::size_t i = 0; i < N; ++i) {
+        values[i] = table[i].default_value;
+    }
+    return values;
+}
+
+constexpr SecondCoreValues SecondCoreDefaults() {
+    return OptionDefaults(SecondCoreOptions);
+}
+
+/// An option's value as the second core reads it.
+inline std::string OptionValueText(const SecondCoreOption& option, int value) {
+    value = ValidOption(option, value);
+    if (option.kind == OptionKind::Toggle) {
+        if (option.target == OptionTarget::Env) {
+            return value != 0 ? "1" : "0";
+        }
+        return value != 0 ? "true" : "false";
+    }
+    return std::to_string(value);
+}
+
+/// One value handed to the second core.
+struct OptionOutput {
+    OptionTarget target;
+    std::string section; ///< OptionTarget::Ini
+    std::string name;
+    std::string value;
+
+    bool operator==(const OptionOutput&) const = default;
+};
+
+/// What the options hand over, every one of them and always explicitly, the default too: the
+/// value is the one the tab shows whatever the second core's default is (or becomes), and its log
+/// names it. A value missing from `values` is the option's default.
+inline std::vector<OptionOutput> SecondCoreOptionOutputs(
+    std::span<const int> values, std::span<const SecondCoreOption> table = SecondCoreOptions) {
+    std::vector<OptionOutput> out;
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        const auto& option = table[i];
+        const int value = i < values.size() ? values[i] : option.default_value;
+        out.push_back({option.target,
+                       option.target == OptionTarget::Ini ? std::string{option.section}
+                                                          : std::string{},
+                       std::string{option.name}, OptionValueText(option, value)});
+    }
+    return out;
+}
+
+/// The options' variables (PlanSecondCore's settings_env). The starting program's own EDEN_* never
+/// reach the second core (ClearedForSecondCore): a variable of these is always this value.
+inline std::vector<std::pair<std::string, std::string>> SecondCoreOptionEnv(
+    std::span<const int> values, std::span<const SecondCoreOption> table = SecondCoreOptions) {
+    std::vector<std::pair<std::string, std::string>> env;
+    for (const auto& out : SecondCoreOptionOutputs(values, table)) {
+        if (out.target == OptionTarget::Env) {
+            env.emplace_back(out.name, out.value);
+        }
+    }
+    return env;
+}
+
+/// Reads the options of the [Anka] group: a Toggle through `read_bool(key, default)`, the others
+/// through `read_int(key, default)` (as QtConfig reads the tab's other settings).
+template <std::size_t N, typename ReadBool, typename ReadInt>
+std::array<int, N> LoadSecondCoreOptions(const std::array<SecondCoreOption, N>& table,
+                                         ReadBool&& read_bool, ReadInt&& read_int) {
+    std::array<int, N> values{};
+    for (std::size_t i = 0; i < N; ++i) {
+        const auto& option = table[i];
+        const int value =
+            option.kind == OptionKind::Toggle
+                ? (read_bool(option.key, option.default_value != 0) ? 1 : 0)
+                : static_cast<int>(read_int(option.key, option.default_value));
+        values[i] = ValidOption(option, value);
+    }
+    return values;
+}
+
+/// Writes the options to the [Anka] group: a Toggle through `write_bool(key, value, default)`, the
+/// others through `write_int(key, value, default)`.
+template <typename WriteBool, typename WriteInt>
+void SaveSecondCoreOptions(std::span<const SecondCoreOption> table, std::span<const int> values,
+                           WriteBool&& write_bool, WriteInt&& write_int) {
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        const auto& option = table[i];
+        const int value =
+            ValidOption(option, i < values.size() ? values[i] : option.default_value);
+        if (option.kind == OptionKind::Toggle) {
+            write_bool(option.key, value != 0, option.default_value != 0);
+        } else {
+            write_int(option.key, value, option.default_value);
+        }
+    }
 }
 
 /// Variables of the starting program's environment the second core does not get: Anka's switches
@@ -341,9 +550,12 @@ struct IniState {
     bool docked{};
     /// [Data%20Storage] keys and the paths in use (nand_directory, sdmc_directory, ...).
     std::vector<std::pair<std::string, std::string>> data_storage;
+    /// The Anka tab's second core options (UISettings, or SecondCoreOptionsFromMenu)
+    SecondCoreValues options = SecondCoreDefaults();
 };
 
-/// Settings only the second core has; the menu has no value for them and leaves its own.
+/// Settings only the second core has; the menu has no value for them and leaves its own. Those of
+/// SecondCoreOptions (game_dlss_network) are then written from the Anka tab's choice.
 constexpr std::string_view SecondCoreOnlyKeys[] = {"nvidia_dlss", "game_dlss_network", "mkw_30fps",
                                               "mkw_dynamic_fps", "mkw_smooth", "dk_30fps"};
 
@@ -559,7 +771,106 @@ inline void KeepSecondCoreAddOn(Section& section) {
     section.lines.insert(section.lines.end(), blank_tail.begin(), blank_tail.end());
 }
 
+inline char Lower(char c) {
+    return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c;
+}
+
+inline bool SameText(std::string_view a, std::string_view b) {
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                      [](char x, char y) { return Lower(x) == Lower(y); });
+}
+
+inline std::string_view Trim(std::string_view text) {
+    const auto first = text.find_first_not_of(" \t");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+}
+
+/// A value as SimpleIni's GetBoolValue reads it: t / y / 1 / on true, f / n / 0 / off false.
+inline std::optional<bool> IniBool(std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    switch (value[0]) {
+    case 't': case 'T': case 'y': case 'Y': case '1':
+        return true;
+    case 'f': case 'F': case 'n': case 'N': case '0':
+        return false;
+    case 'o': case 'O':
+        if (value.size() > 1 && Lower(value[1]) == 'n') {
+            return true;
+        }
+        if (value.size() > 1 && Lower(value[1]) == 'f') {
+            return false;
+        }
+        return std::nullopt;
+    default:
+        return std::nullopt;
+    }
+}
+
 } // namespace Detail
+
+/// The second core's options from the menu's settings file (qt-config.ini), for anka-cli, which
+/// has no Anka tab: its [Anka] group read as QtConfig reads it (Config::ReadBooleanSetting /
+/// ReadIntegerSetting: a Toggle at its default unless `key\default` is false, a number unless
+/// `key\default` is there and false; the last line of a key counts, names in any case). No file or
+/// no group: the defaults.
+template <std::size_t N>
+std::array<int, N> SecondCoreOptionsFromMenu(std::string_view menu_ini,
+                                             const std::array<SecondCoreOption, N>& table) {
+    using namespace Detail;
+    std::vector<std::pair<std::string, std::string>> keys;
+    for (const auto& section : Parse(menu_ini)) {
+        if (!SameText(section.header, "[Anka]")) {
+            continue;
+        }
+        for (const auto& line : section.lines) {
+            const auto eq = line.find('=');
+            if (eq != std::string::npos) {
+                keys.emplace_back(Trim(std::string_view{line}.substr(0, eq)),
+                                  Trim(std::string_view{line}.substr(eq + 1)));
+            }
+        }
+    }
+    const auto value_of = [&keys](std::string_view key) -> std::optional<std::string_view> {
+        for (auto it = keys.rbegin(); it != keys.rend(); ++it) {
+            if (SameText(it->first, key)) {
+                return std::string_view{it->second};
+            }
+        }
+        return std::nullopt;
+    };
+    const auto read_bool = [&](std::string_view key, bool def) {
+        const auto is_default = value_of(std::string{key} + "\\default");
+        if (is_default && IniBool(*is_default).value_or(false)) {
+            return def;
+        }
+        const auto value = value_of(key);
+        return value ? IniBool(*value).value_or(def) : def;
+    };
+    const auto read_int = [&](std::string_view key, int def) {
+        const auto is_default = value_of(std::string{key} + "\\default");
+        if (!is_default || IniBool(*is_default).value_or(true)) {
+            return def;
+        }
+        const auto value = value_of(key);
+        if (!value) {
+            return def;
+        }
+        int number = 0;
+        const auto [end, error] =
+            std::from_chars(value->data(), value->data() + value->size(), number);
+        return error == std::errc{} && end == value->data() + value->size() ? number : def;
+    };
+    return LoadSecondCoreOptions(table, read_bool, read_int);
+}
+
+inline SecondCoreValues SecondCoreOptionsFromMenu(std::string_view menu_ini) {
+    return SecondCoreOptionsFromMenu(menu_ini, SecondCoreOptions);
+}
 
 /// The second core's settings from the menu's (qt-config.ini, or anka-cli's sdl2-config.ini: the
 /// same sections and keys): the file as it is, then
@@ -568,7 +879,8 @@ inline void KeepSecondCoreAddOn(Section& section) {
 /// - [DisabledAddOns] without the frame rate patch its game needs on;
 /// - [Renderer] use_reactive_flushing always off and barrier_feedback_loops always on (its default),
 ///   whatever the preset wrote: the second core was only ever tested so;
-/// - no setting only the second core has.
+/// - no setting only the second core has, but the Anka tab's choice for those of SecondCoreOptions
+///   (state.options), with `\default=false`: the menu's file never decides them.
 /// anti_aliasing / scaling_filter / astc_recompression go over as they are: left at the
 /// default (`\default=true`) the second core keeps its own (FXAA, ScaleForce, BC3).
 /// TODO(contract): the full key list and any renamed keys come from anka-birlesim's contract.
@@ -585,6 +897,15 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
     SetKey(SectionNamed(sections, "System"), "use_docked_mode", state.docked ? "1" : "0");
     SetKey(SectionNamed(sections, "Renderer"), "use_reactive_flushing", "false");
     SetKey(SectionNamed(sections, "Renderer"), "barrier_feedback_loops", "true");
+    for (const auto& option : SecondCoreOptionOutputs(state.options)) {
+        if (option.target != OptionTarget::Ini) {
+            continue;
+        }
+        for (auto& section : sections) {
+            DropKey(section, option.name);
+        }
+        SetKey(SectionNamed(sections, option.section), option.name, option.value);
+    }
     if (!state.data_storage.empty()) {
         auto& storage = SectionNamed(sections, "Data%20Storage");
         for (const auto& [key, value] : state.data_storage) {
