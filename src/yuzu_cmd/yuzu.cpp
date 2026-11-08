@@ -439,7 +439,7 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
     }
     bool restart = false;
     for (;;) {
-        // Full screen by its own -f or the menu's box, as the menu decides it
+        // Full screen as the menu's box says, or by a -f given here (an explicit request)
         const Launch launch = PlanSecondCore(*core, user, lp.filepath,
                                              SecondCoreFullscreen(lp.fullscreen, options), restart,
                                              SecondCoreOptionEnv(options));

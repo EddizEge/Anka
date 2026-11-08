@@ -1151,21 +1151,23 @@ TEST_CASE("Anka route: the box decides its built-in patch, not [DisabledAddOns]"
     REQUIRE(MakeSecondCoreIni(untouched, State(true)).starts_with(untouched));
 }
 
-TEST_CASE("Anka route: full screen by the box or View > Fullscreen", "[yuzu][anka_route]") {
+TEST_CASE("Anka route: full screen as the box says", "[yuzu][anka_route]") {
     REQUIRE(std::string_view{Text::FullScreen} == "Full screen");
     REQUIRE(std::string_view{Text::FullScreenText} ==
             "Starts the game in full screen. Alt+F4 closes it.");
     const fs::path core = fs::path{"D:/Anka"} / Names::Folder / Names::CliProgram;
     for (const int box : {0, 1}) {
-        for (const bool view : {false, true}) {
+        // The menu: the box alone, whatever its own View > Fullscreen; anka-cli: its -f too
+        for (const bool cli_f : {false, true}) {
             const auto values = Options(1, 0, 0, box);
-            const bool full = SecondCoreFullscreen(view, values);
-            REQUIRE(full == (box == 1 || view));
+            const bool full = SecondCoreFullscreen(cli_f, values);
+            REQUIRE(full == (box == 1 || cli_f));
+            REQUIRE(SecondCoreFullscreen(false, values) == (box == 1));
             const auto launch = PlanSecondCore(core, "D:/Anka/user", "g.nup", full, false,
                                                SecondCoreOptionEnv(values));
             const bool has_f =
                 std::find(launch.args.begin(), launch.args.end(), "-f") != launch.args.end();
-            REQUIRE(has_f == (box == 1 || view));
+            REQUIRE(has_f == (box == 1 || cli_f));
             // Only the switch: no variable for it
             for (const auto& [name, value] : launch.env) {
                 REQUIRE(name != "-f");

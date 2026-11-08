@@ -295,7 +295,8 @@ struct SecondCoreOption {
 ///   core/launch_params.cpp `p.fullscreen`, given to EmuWindow_SDL3_VK, which calls Fullscreen() in
 ///   [Renderer] fullscreen_mode: borderless or exclusive, the menu's value passed on). Its
 ///   sdl_config reads no `fullscreen` key: none is written. On by default: the second core has no
-///   menu to switch it from (SecondCoreFullscreen).
+///   menu to switch it from. The box alone decides it (SecondCoreFullscreen), not the menu's own
+///   View > Fullscreen.
 /// - Full-resolution 3D / Occlusion off: built-in patches of the second core (its
 ///   file_sys/patch_manager.cpp, BUILTIN_PATCHES, BuiltinPatchOffered): '1' offers the patch, '0'
 ///   hides it. Max Resolution: its 3D at full scale instead of the GPU-time controller's, down to
@@ -443,8 +444,10 @@ inline std::vector<std::pair<std::string, std::string>> SecondCoreOptionEnv(
     return env;
 }
 
-/// Whether the second core starts full screen (PlanSecondCore's `fullscreen`, `-f`): asked by the
-/// starting program (the menu's View > Fullscreen, anka-cli's own -f) or by the option row of `-f`.
+/// Whether the second core starts full screen (PlanSecondCore's `fullscreen`, `-f`): the option row
+/// of `-f` decides. `asked`: a -f the user gave anka-cli on its command line, a request for this
+/// start that goes before the box. The menu asks nothing: its View > Fullscreen is a setting of its
+/// own window, and following it made the box look broken.
 inline bool SecondCoreFullscreen(bool asked, std::span<const int> values,
                                  std::span<const SecondCoreOption> table = SecondCoreOptions) {
     for (std::size_t i = 0; i < table.size(); ++i) {
