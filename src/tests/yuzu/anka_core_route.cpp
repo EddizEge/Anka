@@ -856,9 +856,10 @@ TEST_CASE("Anka route: the options' variables, always written as 1 or 0", "[yuzu
     for (const auto& [name, value] : SecondCoreOptionEnv(Options(1, 0, 1))) {
         REQUIRE((value == "1" || value == "0"));
     }
-    // Nothing for the settings file
+    // For the settings file only the haze tweak's [Renderer] key
     for (const auto& out : SecondCoreOptionOutputs(SecondCoreDefaults())) {
-        REQUIRE(out.target == OptionTarget::Env);
+        REQUIRE((out.target == OptionTarget::Env ||
+                 (out.section == "Renderer" && out.name == "oot_visual_workaround")));
     }
 }
 
@@ -1299,4 +1300,48 @@ TEST_CASE("Anka route: the haze tweak's saved settings under its new default",
         REQUIRE(SecondCoreOptionsFromMenu(std::string{QtConfig} + "\n" + MenuAnkaGroup(values)) ==
                 values);
     }
+}
+
+TEST_CASE("Anka route: the haze tweak's box in its variable and its settings file",
+          "[yuzu][anka_route]") {
+    for (const int tweak : {0, 1}) {
+        const auto values = Options(1, tweak, 0);
+        const std::string on = tweak == 1 ? "1" : "0";
+        const std::string ini_value = tweak == 1 ? "true" : "false";
+        // The variable as before
+        const auto env = SecondCoreOptionEnv(values);
+        REQUIRE(std::count(env.begin(), env.end(),
+                           std::pair<std::string, std::string>{"EDEN_NX2_OOT_VISUAL_WORKAROUND",
+                                                               on}) == 1);
+        // And the key, once, in [Renderer], set by hand (\default=false)
+        IniState state = State(true);
+        state.options.assign(values.begin(), values.end());
+        const auto ini = MakeSecondCoreIni(QtConfig, state);
+        REQUIRE(Has(ini, "oot_visual_workaround\\default=false\noot_visual_workaround=" +
+                             ini_value));
+        REQUIRE(ini.find("oot_visual_workaround=") == ini.rfind("oot_visual_workaround="));
+        const auto renderer = ini.find("[Renderer]");
+        const auto key = ini.find("oot_visual_workaround\\default=false");
+        REQUIRE(renderer != std::string::npos);
+        REQUIRE(key > renderer);
+        const auto next = ini.find("\n[", renderer + 1);
+        REQUIRE((next == std::string::npos || key < next));
+    }
+    // At the defaults (the box off): false
+    IniState defaults = State(false);
+    REQUIRE(Has(MakeSecondCoreIni(QtConfig, defaults),
+                "oot_visual_workaround\\default=false\noot_visual_workaround=false"));
+    // The menu's own key of that name, wherever it is, gives way to the box
+    const std::string menu = std::string{QtConfig} +
+                             "\n[Renderer]\noot_visual_workaround\\default=false\n"
+                             "oot_visual_workaround=true\n";
+    IniState off = State(true);
+    const auto off_values = Options(1, 0, 0);
+    off.options.assign(off_values.begin(), off_values.end());
+    const auto ini = MakeSecondCoreIni(menu, off);
+    REQUIRE(ini.find("oot_visual_workaround=true") == std::string::npos);
+    REQUIRE(Has(ini, "oot_visual_workaround=false"));
+    REQUIRE(ini.find("oot_visual_workaround=") == ini.rfind("oot_visual_workaround="));
+    // The other rows' outputs are as they were: three variables
+    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()).size() == 3);
 }

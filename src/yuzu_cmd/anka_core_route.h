@@ -293,6 +293,10 @@ struct SecondCoreOption {
     /// The second core's add-on (its Add-Ons name) this row decides: never left disabled for its
     /// game in [DisabledAddOns], where it would override the row (MakeSecondCoreIni)
     std::string_view addon{};
+    /// A second target beside the variable (OptionTarget::Env): the key `ini_name` in
+    /// [`ini_section`] of its settings file, the same value (a Toggle as "true" / "false")
+    std::string_view ini_section{};
+    std::string_view ini_name{};
 };
 
 /// The second core's own settings. One row each: the tab (configure_nx2perf.cpp), the [Anka] keys
@@ -317,9 +321,10 @@ struct SecondCoreOption {
 /// - Haze and bloom tweak: its renderer_vulkan/vk_pipeline_cache.cpp OotVisualWorkaround (Lichii
 ///   4aa1e429: outdoor haze x0.25, glow / exposure x0.65, shaders only). The second core turns it
 ///   on unless EDEN_NX2_OOT_VISUAL_WORKAROUND is "0"; the row is off by default (the user's
-///   decision of 08.11.2026, in place of 06.11's on), so "0" goes over unless the box is on. A
-///   row has one target: when the second core reads an ini key for it too, writing both takes a
-///   second target on the row.
+///   decision of 08.11.2026, in place of 06.11's on), so "0" goes over unless the box is on. Its
+///   [Renderer] oot_visual_workaround (off in its code, below the variable; its log shows
+///   Renderer.oot_visual_workaround) gets the same value: the log matches the box, and a start
+///   without the variable follows it too.
 inline constexpr std::array SecondCoreOptions{
     SecondCoreOption{.key = "second_core_full_screen",
                      .kind = OptionKind::Toggle,
@@ -342,7 +347,9 @@ inline constexpr std::array SecondCoreOptions{
                      .target = OptionTarget::Env,
                      .name = "EDEN_NX2_OOT_VISUAL_WORKAROUND",
                      .label = Text::VisualTweak,
-                     .text = Text::VisualTweakText},
+                     .text = Text::VisualTweakText,
+                     .ini_section = "Renderer",
+                     .ini_name = "oot_visual_workaround"},
     SecondCoreOption{.key = "second_core_occlusion_off",
                      .kind = OptionKind::Toggle,
                      .default_value = 0,
@@ -387,11 +394,13 @@ constexpr SecondCoreValues SecondCoreDefaults() {
     return OptionDefaults(SecondCoreOptions);
 }
 
-/// An option's value as the second core reads it.
-inline std::string OptionValueText(const SecondCoreOption& option, int value) {
+/// An option's value as the second core reads it, for `target` (the row's own, or Ini for its
+/// ini_name).
+inline std::string OptionValueText(const SecondCoreOption& option, int value,
+                                   OptionTarget target) {
     value = ValidOption(option, value);
     if (option.kind == OptionKind::Toggle) {
-        if (option.target == OptionTarget::Env) {
+        if (target == OptionTarget::Env) {
             return value != 0 ? "1" : "0";
         }
         return value != 0 ? "true" : "false";
@@ -437,7 +446,12 @@ inline std::vector<OptionOutput> SecondCoreOptionOutputs(
         out.push_back({option.target,
                        option.target == OptionTarget::Ini ? std::string{option.section}
                                                           : std::string{},
-                       std::string{option.name}, OptionValueText(option, value)});
+                       std::string{option.name}, OptionValueText(option, value, option.target)});
+        if (!option.ini_name.empty()) {
+            out.push_back({OptionTarget::Ini, std::string{option.ini_section},
+                           std::string{option.ini_name},
+                           OptionValueText(option, value, OptionTarget::Ini)});
+        }
     }
     return out;
 }
