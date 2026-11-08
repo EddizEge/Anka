@@ -1328,6 +1328,12 @@ void TextureCache<P>::PopAsyncFlushes() {
     if (committed_downloads.empty()) {
         return;
     }
+    // Written whole by the CPU since the download was taken: its bytes are older. With only some
+    // pages or layers dirty, the rest still needs the GPU's bytes.
+    const auto cpu_newer = [](const ImageBase& image) {
+        return True(image.flags & ImageFlagBits::CpuModified) && image.partial_dirty_pages.empty() &&
+               image.partial_remapped.empty() && image.dirty_layers.empty();
+    };
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         const auto& download_ids = committed_downloads.front();
         if (download_ids.empty()) {
@@ -1345,7 +1351,10 @@ void TextureCache<P>::PopAsyncFlushes() {
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
-                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+                if (!cpu_newer(image)) {
+                    SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span,
+                                 swizzle_data_buffer);
+                }
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
@@ -1393,7 +1402,10 @@ void TextureCache<P>::PopAsyncFlushes() {
             }
             const ImageBase& image = download_info.GetImage(slot_images);
             const auto copies = FullDownloadCopies(image.info);
-            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+            if (!cpu_newer(image)) {
+                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span,
+                             swizzle_data_buffer);
+            }
             download_map.offset += image.unswizzled_size_bytes;
             download_span = download_span.subspan(image.unswizzled_size_bytes);
         }
