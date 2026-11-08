@@ -16,368 +16,397 @@
   <property name="accessibleName">
    <string>Anka</string>
   </property>
-  <layout class="QVBoxLayout" name="layout">
+  <layout class="QVBoxLayout" name="outer_layout">
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>0</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>0</number>
+   </property>
    <item>
-    <widget class="QLabel" name="intro">
-     <property name="text">
-      <string>Anka's speed settings. They apply when a game starts; once a game has run in this session, a change needs a restart (Anka asks).</string>
+    <widget class="QScrollArea" name="scroll">
+     <property name="frameShape">
+      <enum>QFrame::Shape::NoFrame</enum>
      </property>
-     <property name="wordWrap">
+     <property name="horizontalScrollBarPolicy">
+      <enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
+     </property>
+     <property name="widgetResizable">
       <bool>true</bool>
      </property>
+     <widget class="QWidget" name="scroll_contents">
+      <layout class="QVBoxLayout" name="layout">
+       <item>
+        <widget class="QLabel" name="intro">
+         <property name="text">
+          <string>Anka's speed settings. They apply when a game starts; once a game has run in this session, a change needs a restart (Anka asks).</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="preset_row">
+         <item>
+          <widget class="QLabel" name="preset_label">
+           <property name="text">
+            <string>Preset</string>
+           </property>
+           <property name="buddy">
+            <cstring>preset</cstring>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="preset">
+           <item>
+            <property name="text">
+             <string>Recommended</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Recommended + Reactive Flushing</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Safe</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Custom</string>
+            </property>
+           </item>
+          </widget>
+         </item>
+         <item>
+          <spacer name="preset_spacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>0</width>
+             <height>0</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="preset_text">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="frame_gen_row">
+         <item>
+          <widget class="QLabel" name="frame_gen_label">
+           <property name="text">
+            <string>Frame generation</string>
+           </property>
+           <property name="buddy">
+            <cstring>frame_gen</cstring>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="frame_gen">
+           <item>
+            <property name="text">
+             <string>Off</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>2x</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Dynamic</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Other (Graphics tab)</string>
+            </property>
+           </item>
+          </widget>
+         </item>
+         <item>
+          <spacer name="frame_gen_spacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>0</width>
+             <height>0</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QLabel" name="frame_gen_text">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="all_games">
+         <property name="title">
+          <string>All games</string>
+         </property>
+         <layout class="QVBoxLayout" name="all_games_layout">
+          <item>
+           <widget class="QCheckBox" name="split_gpu_thread">
+            <property name="text">
+             <string>Split GPU thread</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="split_gpu_thread_text">
+            <property name="text">
+             <string>Runs the GPU back end as its own stages, beside the front (EDEN_NX2_BACK_STAGES=1, BACK_CUTS=a).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>split_gpu_thread</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="acquire_peek">
+            <property name="text">
+             <string>Acquire peek</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="acquire_peek_text">
+            <property name="text">
+             <string>A GPU wait goes on at once when guest memory already holds its value (ACQUIRE_PEEK).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>acquire_peek</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="jit_same">
+            <property name="text">
+             <string>Same-value filter in the macro JIT</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="jit_same_text">
+            <property name="text">
+             <string>The front's macro JIT drops state writes that change nothing (JIT_SAME).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>jit_same</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="front_macro_lean">
+            <property name="text">
+             <string>Lean front macro path</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="front_macro_lean_text">
+            <property name="text">
+             <string>Fewer checks on the front's macro path (FRONT_MACRO_LEAN).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>front_macro_lean</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="fg_timed">
+            <property name="text">
+             <string>Timed frame generation</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="fg_timed_text">
+            <property name="text">
+             <string>FSR3 frame generation: each generated frame is blended for the time it is shown. Only does something with frame generation on (FG_TIMED).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>fg_timed</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="osd">
+            <property name="text">
+             <string>FPS overlay in RivaTuner</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="osd_text">
+            <property name="text">
+             <string>Game FPS, display FPS and speed in RivaTuner Statistics Server's on-screen display, when RTSS runs (OSD).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>osd</cstring>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="bananza">
+         <property name="title">
+          <string>Donkey Kong Bananza only (off in other games)</string>
+         </property>
+         <layout class="QVBoxLayout" name="bananza_layout">
+          <item>
+           <widget class="QCheckBox" name="dk_dyn">
+            <property name="text">
+             <string>Dynamic frame rate</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="dk_dyn_text">
+            <property name="text">
+             <string>The game may run at any rate from 40 to 60 fps instead of dropping to 30; patched in memory, no file is changed (DK_DYN).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>dk_dyn</cstring>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="dk_pacing">
+            <property name="text">
+             <string>Frame pacing</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="dk_pacing_text">
+            <property name="text">
+             <string>Follows the game's own 60/30/20 fps choice at the right speed; set aside while the dynamic frame rate applies (PRESENT_INTERVAL_WORD, MODE_PACE, PACE_SPIN_US).</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="indent">
+             <number>22</number>
+            </property>
+            <property name="buddy">
+             <cstring>dk_pacing</cstring>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="second_core">
+         <layout class="QVBoxLayout" name="second_core_layout"/>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="status">
+         <property name="text">
+          <string/>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="bottom_spacer">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>0</width>
+           <height>0</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
     </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout" name="preset_row">
-     <item>
-      <widget class="QLabel" name="preset_label">
-       <property name="text">
-        <string>Preset</string>
-       </property>
-       <property name="buddy">
-        <cstring>preset</cstring>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QComboBox" name="preset">
-       <item>
-        <property name="text">
-         <string>Recommended</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>Recommended + Reactive Flushing</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>Safe</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>Custom</string>
-        </property>
-       </item>
-      </widget>
-     </item>
-     <item>
-      <spacer name="preset_spacer">
-       <property name="orientation">
-        <enum>Qt::Orientation::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>0</width>
-         <height>0</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-    </layout>
-   </item>
-   <item>
-    <widget class="QLabel" name="preset_text">
-     <property name="text">
-      <string/>
-     </property>
-     <property name="wordWrap">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <layout class="QHBoxLayout" name="frame_gen_row">
-     <item>
-      <widget class="QLabel" name="frame_gen_label">
-       <property name="text">
-        <string>Frame generation</string>
-       </property>
-       <property name="buddy">
-        <cstring>frame_gen</cstring>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QComboBox" name="frame_gen">
-       <item>
-        <property name="text">
-         <string>Off</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>2x</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>Dynamic</string>
-        </property>
-       </item>
-       <item>
-        <property name="text">
-         <string>Other (Graphics tab)</string>
-        </property>
-       </item>
-      </widget>
-     </item>
-     <item>
-      <spacer name="frame_gen_spacer">
-       <property name="orientation">
-        <enum>Qt::Orientation::Horizontal</enum>
-       </property>
-       <property name="sizeHint" stdset="0">
-        <size>
-         <width>0</width>
-         <height>0</height>
-        </size>
-       </property>
-      </spacer>
-     </item>
-    </layout>
-   </item>
-   <item>
-    <widget class="QLabel" name="frame_gen_text">
-     <property name="text">
-      <string/>
-     </property>
-     <property name="wordWrap">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="all_games">
-     <property name="title">
-      <string>All games</string>
-     </property>
-     <layout class="QVBoxLayout" name="all_games_layout">
-      <item>
-       <widget class="QCheckBox" name="split_gpu_thread">
-        <property name="text">
-         <string>Split GPU thread</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="split_gpu_thread_text">
-        <property name="text">
-         <string>Runs the GPU back end as its own stages, beside the front (EDEN_NX2_BACK_STAGES=1, BACK_CUTS=a).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>split_gpu_thread</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="acquire_peek">
-        <property name="text">
-         <string>Acquire peek</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="acquire_peek_text">
-        <property name="text">
-         <string>A GPU wait goes on at once when guest memory already holds its value (ACQUIRE_PEEK).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>acquire_peek</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="jit_same">
-        <property name="text">
-         <string>Same-value filter in the macro JIT</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="jit_same_text">
-        <property name="text">
-         <string>The front's macro JIT drops state writes that change nothing (JIT_SAME).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>jit_same</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="front_macro_lean">
-        <property name="text">
-         <string>Lean front macro path</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="front_macro_lean_text">
-        <property name="text">
-         <string>Fewer checks on the front's macro path (FRONT_MACRO_LEAN).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>front_macro_lean</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="fg_timed">
-        <property name="text">
-         <string>Timed frame generation</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="fg_timed_text">
-        <property name="text">
-         <string>FSR3 frame generation: each generated frame is blended for the time it is shown. Only does something with frame generation on (FG_TIMED).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>fg_timed</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="osd">
-        <property name="text">
-         <string>FPS overlay in RivaTuner</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="osd_text">
-        <property name="text">
-         <string>Game FPS, display FPS and speed in RivaTuner Statistics Server's on-screen display, when RTSS runs (OSD).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>osd</cstring>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="bananza">
-     <property name="title">
-      <string>Donkey Kong Bananza only (off in other games)</string>
-     </property>
-     <layout class="QVBoxLayout" name="bananza_layout">
-      <item>
-       <widget class="QCheckBox" name="dk_dyn">
-        <property name="text">
-         <string>Dynamic frame rate</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="dk_dyn_text">
-        <property name="text">
-         <string>The game may run at any rate from 40 to 60 fps instead of dropping to 30; patched in memory, no file is changed (DK_DYN).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>dk_dyn</cstring>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="dk_pacing">
-        <property name="text">
-         <string>Frame pacing</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLabel" name="dk_pacing_text">
-        <property name="text">
-         <string>Follows the game's own 60/30/20 fps choice at the right speed; set aside while the dynamic frame rate applies (PRESENT_INTERVAL_WORD, MODE_PACE, PACE_SPIN_US).</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-        <property name="indent">
-         <number>22</number>
-        </property>
-        <property name="buddy">
-         <cstring>dk_pacing</cstring>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="second_core">
-     <layout class="QVBoxLayout" name="second_core_layout"/>
-    </widget>
-   </item>
-   <item>
-    <widget class="QLabel" name="status">
-     <property name="text">
-      <string/>
-     </property>
-     <property name="wordWrap">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <spacer name="bottom_spacer">
-     <property name="orientation">
-      <enum>Qt::Orientation::Vertical</enum>
-     </property>
-     <property name="sizeHint" stdset="0">
-      <size>
-       <width>0</width>
-       <height>0</height>
-      </size>
-     </property>
-    </spacer>
    </item>
   </layout>
  </widget>
