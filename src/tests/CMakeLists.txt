@@ -45,6 +45,7 @@ add_executable(tests
     video_core/nx2_macro_jit.cpp
     video_core/nx2_reactive.cpp
     video_core/nx2_record_list.cpp
+    video_core/nx2_reinterpret_log.cpp
     video_core/nx2_reg_replica.cpp
     video_core/nx2_root.cpp
     video_core/nx2_desc_secondary.cpp

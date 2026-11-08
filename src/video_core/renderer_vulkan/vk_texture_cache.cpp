@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <optional>
 #include <span>
@@ -1376,6 +1377,10 @@ void RecordInPassFeedbackBarrier(Scheduler& scheduler, bool light) {
     });
 }
 
+static_assert(Nx2ReinterpretLog::AspectColor == VK_IMAGE_ASPECT_COLOR_BIT);
+static_assert(Nx2ReinterpretLog::AspectDepth == VK_IMAGE_ASPECT_DEPTH_BIT);
+static_assert(Nx2ReinterpretLog::AspectStencil == VK_IMAGE_ASPECT_STENCIL_BIT);
+
 void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                                            std::span<const VideoCommon::ImageCopy> copies) {
     if (ENABLE_MSAA_RESOLVE_CONSUME) {
@@ -1396,6 +1401,19 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
     };
     const VkImageAspectFlags src_copy_aspect = copy_aspect(src_aspect_mask);
     const VkImageAspectFlags dst_copy_aspect = copy_aspect(dst_aspect_mask);
+    // Which copies reach here on the drivers that lose the device (a line for the first few)
+    if (const u64 number = reinterpret_log.Note(Nx2ReinterpretLog::IsDepthStencil(src_aspect_mask) ||
+                                                Nx2ReinterpretLog::IsDepthStencil(dst_aspect_mask))) {
+        LOG_INFO(Render_Vulkan,
+                 "nx2 reinterpret #{}: {} ({}) {}x{}x{} {} layers -> {} ({}) {}x{}x{} {} layers, "
+                 "{} copies",
+                 number, src.info.format, Nx2ReinterpretLog::AspectName(src_aspect_mask),
+                 src.info.size.width, src.info.size.height, src.info.size.depth,
+                 src.info.resources.layers, dst.info.format,
+                 Nx2ReinterpretLog::AspectName(dst_aspect_mask), dst.info.size.width,
+                 dst.info.size.height, dst.info.size.depth, dst.info.resources.layers,
+                 copies.size());
+    }
 
     const auto bpp_in = BytesPerBlock(src.info.format) / DefaultBlockWidth(src.info.format);
     const auto bpp_out = BytesPerBlock(dst.info.format) / DefaultBlockWidth(dst.info.format);
@@ -2154,6 +2172,12 @@ void TextureCacheRuntime::TickFrame() {
     std::erase_if(pending_resolve_shadows, [this](const auto& pending) {
         return scheduler.IsFree(pending.first);
     });
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch());
+    if (const auto summary = reinterpret_log.SummaryDue(static_cast<u64>(seconds.count()))) {
+        LOG_INFO(Render_Vulkan, "nx2 reinterpret: {} calls, {} with DEPTH|STENCIL", summary->total,
+                 summary->depth_stencil);
+    }
 }
 
 Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu_addr_,

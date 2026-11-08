@@ -176,6 +176,7 @@ add_library(video_core STATIC
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
     renderer_vulkan/nx2_desc_secondary.h
+    renderer_vulkan/nx2_reinterpret_log.h
     renderer_vulkan/nx2_record_list.h
     renderer_vulkan/pipeline_helper.h
     renderer_vulkan/pipeline_statistics.cpp
