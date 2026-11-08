@@ -223,7 +223,8 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
     REQUIRE(std::string_view{Text::Closed} == "%1 closed");
     REQUIRE(std::string_view{Text::StillRunning} ==
             "%1 is still running. Close it before starting another game.");
-    REQUIRE(std::string_view{Text::StopRunningFirst} == "Stop the running game before starting %1.");
+    REQUIRE(std::string_view{Text::StopRunningFirst} ==
+            "Stop the running game before starting %1.");
     REQUIRE(std::string_view{Text::PropertiesNote} ==
             "For this game only the add-on choices are used. Changes apply the next time the game "
             "starts.");
@@ -972,7 +973,8 @@ TEST_CASE("Anka route: options of other kinds follow the same table", "[yuzu][an
         {"Renderer", "frame_gen_target_rate", "0"},
         {"Renderer", "frame_gen_multiplier", "2"},
     }};
-    static constexpr std::array<IniWrite, 1> dynamic{{{"Renderer", "frame_gen_target_rate", "120"}}};
+    static constexpr std::array<IniWrite, 1> dynamic{
+        {{"Renderer", "frame_gen_target_rate", "120"}}};
     static constexpr std::array<OptionChoice, 2> frame_gen{{
         {0, "2x (recommended)", times_two},
         {1, "Dynamic", dynamic},

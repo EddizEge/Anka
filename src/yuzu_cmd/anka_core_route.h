@@ -64,7 +64,8 @@ constexpr const char* AlwaysOnAddOn = "Always on for this game";
 /// %2: the second core's program, so the user sees which file of the package is missing
 constexpr const char* Missing =
     "%1 cannot start: %2 was not found. Extract the whole Anka package.";
-constexpr const char* IniNotWritten = "%1 was not started: its settings could not be written to %2.";
+constexpr const char* IniNotWritten =
+    "%1 was not started: its settings could not be written to %2.";
 constexpr const char* SettingsNotRead =
     "%1 was not started: the settings could not be read from %2.";
 constexpr const char* NotStarted = "%1 could not be started: %2";
@@ -257,9 +258,10 @@ struct OptionChoice {
     std::span<const IniWrite> writes{}; ///< OptionTarget::IniWrites
 };
 
-/// A setting of the Anka tab's section of the second core's game: one the second core has and the
-/// main core does not. Kept in the [Anka] group under `key` (beside Core::Nx2PerfSettings::Keys, never
-/// one of them: no preset and no main core plan sees it), handed to the second core at each start.
+/// A setting of the Anka tab's group of the second core's game: one the second core has and the
+/// main core does not. Kept in the [Anka] group under `key` (beside Core::Nx2PerfSettings::Keys,
+/// never one of them: no preset and no main core plan sees it), handed to the second core at each
+/// start.
 struct SecondCoreOption {
     std::string_view key;
     OptionKind kind;
