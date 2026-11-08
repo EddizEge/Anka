@@ -274,6 +274,9 @@ struct SecondCoreOption {
     int min{};                  ///< OptionKind::Number
     int max{1};                 ///< OptionKind::Number
     std::span<const OptionChoice> choices{}; ///< OptionKind::Choice
+    /// The second core's add-on (its Add-Ons name) this row decides: never left disabled for its
+    /// game in [DisabledAddOns], where it would override the row (MakeSecondCoreIni)
+    std::string_view addon{};
 };
 
 /// The second core's own settings. One row each: the tab (configure_nx2perf.cpp), the [Anka] keys
@@ -286,6 +289,8 @@ struct SecondCoreOption {
 ///   file_sys/patch_manager.cpp, BUILTIN_PATCHES, BuiltinPatchOffered): '1' offers the patch, '0'
 ///   hides it. Max Resolution: its 3D at full scale instead of the GPU-time controller's, down to
 ///   480p (FZ-MAXRES0: off was a few percent faster). Occlusion Off: no speed change measured.
+///   An offered patch also shows in its Add-Ons, by `addon` (BUILTIN_PATCHES' names), and a
+///   [DisabledAddOns] entry would turn it off whatever the row says: MakeSecondCoreIni drops it.
 /// - Haze and bloom tweak: its renderer_vulkan/vk_pipeline_cache.cpp OotVisualWorkaround, on
 ///   unless EDEN_NX2_OOT_VISUAL_WORKAROUND is "0": thinner haze, lower exposure, shaders only.
 inline constexpr std::array SecondCoreOptions{
@@ -295,7 +300,8 @@ inline constexpr std::array SecondCoreOptions{
                      .target = OptionTarget::Env,
                      .name = "EDEN_OOT_MAX_RESOLUTION",
                      .label = Text::MaxResolution,
-                     .text = Text::MaxResolutionText},
+                     .text = Text::MaxResolutionText,
+                     .addon = "Max Resolution (built-in)"},
     SecondCoreOption{.key = "second_core_visual_tweak",
                      .kind = OptionKind::Toggle,
                      .default_value = 1,
@@ -309,7 +315,8 @@ inline constexpr std::array SecondCoreOptions{
                      .target = OptionTarget::Env,
                      .name = "EDEN_OOT_OCCLUSION_OFF",
                      .label = Text::OcclusionOff,
-                     .text = Text::OcclusionOffText},
+                     .text = Text::OcclusionOffText,
+                     .addon = "Occlusion Off (built-in)"},
 };
 
 /// The values of SecondCoreOptions, in its order.
@@ -702,7 +709,7 @@ inline void SetKey(Section& section, std::string_view key, std::string_view valu
     Append(section, std::string{key} + "=" + Quote(value));
 }
 
-/// The most entries KeepSecondCoreAddOn takes from an array.
+/// The most entries KeepSecondCoreAddOns takes from an array.
 constexpr std::size_t MaxArray = 4096;
 
 /// A QSettings array index or size: digits only (else 0), at most MaxArray + 1.
@@ -717,11 +724,11 @@ inline std::size_t ArrayNumber(std::string_view text) {
     return n;
 }
 
-/// [DisabledAddOns] without SecondCoreKeptAddOn for its game, renumbered. Read as
+/// [DisabledAddOns] without the add-ons `kept` for its game, renumbered. Read as
 /// Config::ReadDisabledAddOnValues reads it: entries 1..`size`, of each `N\disabled\1..size`; a
 /// missing size is 0. Config::SaveDisabledAddOnValues writes only the sizes when a list gets
 /// shorter: the entries past them are old ones and must not come back.
-inline void KeepSecondCoreAddOn(Section& section) {
+inline void KeepSecondCoreAddOns(Section& section, std::span<const std::string_view> kept) {
     struct Entry {
         std::string title_id;
         std::size_t disabled_size{};
@@ -770,8 +777,9 @@ inline void KeepSecondCoreAddOn(Section& section) {
             continue;
         }
         const auto before = e.disabled.size();
-        std::erase_if(e.disabled, [](const std::string& raw) {
-            return Unquote(raw) == SecondCoreKeptAddOn;
+        std::erase_if(e.disabled, [kept](const std::string& raw) {
+            const std::string name = Unquote(raw);
+            return std::find(kept.begin(), kept.end(), name) != kept.end();
         });
         changed |= e.disabled.size() != before;
     }
@@ -908,7 +916,8 @@ inline SecondCoreValues SecondCoreOptionsFromMenu(std::string_view menu_ini) {
 /// same sections and keys): the file as it is, then
 /// - [System] use_docked_mode always the starting program's (the second core's default differs);
 /// - [Data%20Storage] the paths in use, the second core writing them back as absolute paths;
-/// - [DisabledAddOns] without the frame rate patch its game needs on;
+/// - [DisabledAddOns] without the frame rate patch its game needs on, nor the built-in patches the
+///   options decide (SecondCoreOption::addon): the Anka tab's box is the one place they are set;
 /// - [Renderer] use_reactive_flushing always off and barrier_feedback_loops always on (its default),
 ///   whatever the preset wrote: the second core was only ever tested so;
 /// - no setting only the second core has;
@@ -947,9 +956,15 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
             SetKey(storage, key, value);
         }
     }
+    std::vector<std::string_view> kept{SecondCoreKeptAddOn};
+    for (const auto& option : options) {
+        if (!option.addon.empty()) {
+            kept.push_back(option.addon);
+        }
+    }
     for (auto& section : sections) {
         if (section.header == "[DisabledAddOns]") {
-            KeepSecondCoreAddOn(section);
+            KeepSecondCoreAddOns(section, kept);
         }
     }
 

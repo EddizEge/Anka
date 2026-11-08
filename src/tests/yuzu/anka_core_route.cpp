@@ -1064,3 +1064,73 @@ TEST_CASE("Anka route: options of other kinds follow the same table", "[yuzu][an
     REQUIRE(Has(ini, "frame_gen_multiplier=2"));
     REQUIRE(count_of(ini, "frame_gen_target_rate") == 2);
 }
+
+TEST_CASE("Anka route: the box decides its built-in patch, not [DisabledAddOns]",
+          "[yuzu][anka_route]") {
+    // The patches the boxes decide, by the names the second core's Add-Ons show (its
+    // patch_manager.cpp BUILTIN_PATCHES)
+    REQUIRE(SecondCoreOptions[MaxResolutionAt].addon == "Max Resolution (built-in)");
+    REQUIRE(SecondCoreOptions[OcclusionOffAt].addon == "Occlusion Off (built-in)");
+    REQUIRE(SecondCoreOptions[VisualTweakAt].addon.empty());
+    REQUIRE(std::to_string(SecondCoreTitleId) == "288309953924349952");
+    // Its game has Max Resolution and Occlusion Off disabled there, beside a mod of the user's;
+    // another title has the same names
+    const std::string disabled = "[DisabledAddOns]\n"
+                                 "size=2\n"
+                                 "1\\title_id\\default=false\n"
+                                 "1\\title_id=288309953924349952\n"
+                                 "1\\disabled\\1\\d\\default=false\n"
+                                 "1\\disabled\\1\\d=Max Resolution (built-in)\n"
+                                 "1\\disabled\\2\\d\\default=false\n"
+                                 "1\\disabled\\2\\d=Other Mod\n"
+                                 "1\\disabled\\3\\d\\default=false\n"
+                                 "1\\disabled\\3\\d=Occlusion Off (built-in)\n"
+                                 "1\\disabled\\size=3\n"
+                                 "2\\title_id\\default=false\n"
+                                 "2\\title_id=288358607164088320\n"
+                                 "2\\disabled\\1\\d\\default=false\n"
+                                 "2\\disabled\\1\\d=Max Resolution (built-in)\n"
+                                 "2\\disabled\\size=1\n";
+    for (const auto& values : {Options(1, 1, 0), Options(0, 1, 1), Options(1, 0, 1)}) {
+        IniState state = State(true);
+        state.options.assign(values.begin(), values.end());
+        const auto ini = MakeSecondCoreIni(disabled, state);
+        // Its game: neither patch left disabled, the user's mod kept and renumbered
+        REQUIRE(Has(ini, "size=2"));
+        REQUIRE(Has(ini, "1\\title_id=288309953924349952"));
+        REQUIRE(Has(ini, "1\\disabled\\1\\d=Other Mod"));
+        REQUIRE(Has(ini, "1\\disabled\\size=1"));
+        REQUIRE(ini.find("Occlusion Off (built-in)") == std::string::npos);
+        // Another title's list is left alone
+        REQUIRE(Has(ini, "2\\disabled\\1\\d=Max Resolution (built-in)"));
+        REQUIRE(Has(ini, "2\\disabled\\size=1"));
+        REQUIRE(ini.find("Max Resolution (built-in)") == ini.rfind("Max Resolution (built-in)"));
+    }
+    // Box on with the patch disabled in the menu's file: the second core gets it on
+    IniState state = State(true);
+    const auto on = Options(1, 1, 0);
+    state.options.assign(on.begin(), on.end());
+    const auto ini = MakeSecondCoreIni(disabled, state);
+    REQUIRE(ini.find("1\\disabled\\1\\d=Max Resolution (built-in)") == std::string::npos);
+    const auto env = SecondCoreOptionEnv(on);
+    REQUIRE(std::count(env.begin(), env.end(),
+                       std::pair<std::string, std::string>{"EDEN_OOT_MAX_RESOLUTION", "1"}) == 1);
+    // The frame rate patch is still kept on with them
+    const std::string with_dark = "[DisabledAddOns]\n"
+                                  "size=1\n"
+                                  "1\\title_id=288309953924349952\n"
+                                  "1\\disabled\\1\\d=Dynamic FPS by Dark\n"
+                                  "1\\disabled\\2\\d=Max Resolution (built-in)\n"
+                                  "1\\disabled\\size=2\n";
+    const auto dark = MakeSecondCoreIni(with_dark, State(true));
+    REQUIRE(Has(dark, "1\\disabled\\size=0"));
+    REQUIRE(dark.find("Dynamic FPS by Dark") == std::string::npos);
+    REQUIRE(dark.find("Max Resolution (built-in)") == std::string::npos);
+    // Nothing of theirs disabled: the section is left exactly as it was
+    const std::string untouched = "[DisabledAddOns]\n"
+                                  "size=1\n"
+                                  "1\\title_id=288309953924349952\n"
+                                  "1\\disabled\\1\\d=Other Mod\n"
+                                  "1\\disabled\\size=1\n";
+    REQUIRE(MakeSecondCoreIni(untouched, State(true)).starts_with(untouched));
+}
