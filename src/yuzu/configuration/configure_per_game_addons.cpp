@@ -107,7 +107,7 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
     std::vector<std::string> disabled_addons;
 
     for (const auto& item : list_items) {
-        if (!always_on.isEmpty() && item.front()->text() == always_on) {
+        if (always_on.contains(item.front()->text())) {
             continue;
         }
         const auto disabled = item.front()->checkState() == Qt::Unchecked;
@@ -143,8 +143,8 @@ void ConfigurePerGameAddons::SetTitleId(u64 id) {
     this->title_id = id;
 }
 
-void ConfigurePerGameAddons::SetAlwaysOn(const QString& name, const QString& reason) {
-    always_on = name;
+void ConfigurePerGameAddons::SetAlwaysOn(const QStringList& names, const QString& reason) {
+    always_on = names;
     always_on_reason = reason;
 }
 
@@ -401,7 +401,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         }
 
         first_item->setCheckState(should_enable ? Qt::Checked : Qt::Unchecked);
-        if (!always_on.isEmpty() && name == always_on) {
+        if (always_on.contains(name)) {
             first_item->setCheckState(Qt::Checked);
             first_item->setFlags(first_item->flags() & ~Qt::ItemIsUserCheckable);
             first_item->setToolTip(always_on_reason);

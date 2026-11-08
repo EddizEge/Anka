@@ -59,7 +59,7 @@ constexpr const char* PropertiesNote = "For this game only the add-on choices ar
 /// The Properties window of its game while it runs: why installing and deleting add-ons are off
 constexpr const char* AddOnFilesInUse =
     "%1 is running: its add-on files can't be changed until it closes.";
-/// That window's frame rate patch (SecondCoreKeptAddOn), which the second core keeps on
+/// That window's frame rate patch (SecondCoreKeptAddOns), which the second core keeps on
 constexpr const char* AlwaysOnAddOn = "Always on for this game";
 /// %2: the second core's program, so the user sees which file of the package is missing
 constexpr const char* Missing =
@@ -638,7 +638,11 @@ constexpr std::string_view SecondCoreOnlyKeys[] = {"nvidia_dlss", "game_dlss_net
                                               "mkw_dynamic_fps", "mkw_smooth", "dk_30fps"};
 
 /// The add-on the second core needs on (its dynamic frame rate patch).
-constexpr std::string_view SecondCoreKeptAddOn = "Dynamic FPS by Dark";
+/// Two names: the second core's built-in patch, as its Add-Ons show it and its patch_manager.cpp
+/// looks it up in [DisabledAddOns] (BUILTIN_PATCHES), and a mod of the same name in its game's
+/// load folder.
+constexpr std::array<std::string_view, 2> SecondCoreKeptAddOns{"Dynamic FPS by Dark",
+                                                               "Dynamic FPS by Dark (built-in)"};
 
 namespace Detail {
 
@@ -995,7 +999,7 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
             SetKey(storage, key, value);
         }
     }
-    std::vector<std::string_view> kept{SecondCoreKeptAddOn};
+    std::vector<std::string_view> kept{SecondCoreKeptAddOns.begin(), SecondCoreKeptAddOns.end()};
     for (const auto& option : options) {
         if (!option.addon.empty()) {
             kept.push_back(option.addon);

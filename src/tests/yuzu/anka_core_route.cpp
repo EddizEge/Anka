@@ -240,7 +240,8 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
     REQUIRE(std::string_view{Text::AddOnFilesInUse} ==
             "%1 is running: its add-on files can't be changed until it closes.");
     REQUIRE(std::string_view{Text::AlwaysOnAddOn} == "Always on for this game");
-    REQUIRE(SecondCoreKeptAddOn == "Dynamic FPS by Dark");
+    REQUIRE(SecondCoreKeptAddOns[0] == "Dynamic FPS by Dark");
+    REQUIRE(SecondCoreKeptAddOns[1] == "Dynamic FPS by Dark (built-in)");
     REQUIRE(std::string_view{Text::PresetOnSecondCore}.starts_with(
         "In %1 Reactive Flushing stays off"));
     REQUIRE(std::string_view{Text::PresetOnSecondCore}.ends_with(
@@ -1202,4 +1203,43 @@ TEST_CASE("Anka route: full screen by the box or View > Fullscreen", "[yuzu][ank
     constexpr std::array<SecondCoreOption, 0> none{};
     REQUIRE_FALSE(SecondCoreFullscreen(false, std::span<const int>{}, none));
     REQUIRE(SecondCoreFullscreen(true, std::span<const int>{}, none));
+}
+
+TEST_CASE("Anka route: the frame rate patch stays on by both its names", "[yuzu][anka_route]") {
+    // The second core looks its built-in patch up by "Dynamic FPS by Dark (built-in)"; a mod of
+    // the user's may be called "Dynamic FPS by Dark"
+    const std::string built_in = "[DisabledAddOns]\n"
+                                 "size=1\n"
+                                 "1\\title_id\\default=false\n"
+                                 "1\\title_id=288309953924349952\n"
+                                 "1\\disabled\\1\\d\\default=false\n"
+                                 "1\\disabled\\1\\d=Dynamic FPS by Dark (built-in)\n"
+                                 "1\\disabled\\2\\d\\default=false\n"
+                                 "1\\disabled\\2\\d=Other Mod\n"
+                                 "1\\disabled\\size=2\n";
+    auto ini = MakeSecondCoreIni(built_in, State(true));
+    REQUIRE(ini.find("Dynamic FPS by Dark") == std::string::npos);
+    REQUIRE(Has(ini, "1\\disabled\\1\\d=Other Mod"));
+    REQUIRE(Has(ini, "1\\disabled\\size=1"));
+    // Both names together, and the user's other mod between them
+    const std::string both = "[DisabledAddOns]\n"
+                             "size=1\n"
+                             "1\\title_id=288309953924349952\n"
+                             "1\\disabled\\1\\d=Dynamic FPS by Dark\n"
+                             "1\\disabled\\2\\d=Other Mod\n"
+                             "1\\disabled\\3\\d=\"Dynamic FPS by Dark (built-in)\"\n"
+                             "1\\disabled\\size=3\n";
+    ini = MakeSecondCoreIni(both, State(true));
+    REQUIRE(ini.find("Dynamic FPS by Dark") == std::string::npos);
+    REQUIRE(Has(ini, "1\\disabled\\1\\d=Other Mod"));
+    REQUIRE(Has(ini, "1\\disabled\\size=1"));
+    REQUIRE(ini.find("1\\disabled\\2\\d") == std::string::npos);
+    // Another title keeps both
+    const std::string other = "[DisabledAddOns]\n"
+                              "size=1\n"
+                              "1\\title_id=288358607164088320\n"
+                              "1\\disabled\\1\\d=Dynamic FPS by Dark (built-in)\n"
+                              "1\\disabled\\2\\d=Dynamic FPS by Dark\n"
+                              "1\\disabled\\size=2\n";
+    REQUIRE(MakeSecondCoreIni(other, State(true)).starts_with(other));
 }

@@ -44,9 +44,9 @@ public:
 
     void SetTitleId(u64 id);
 
-    /// Keeps the add-on named `name` checked and not changeable (`reason` its tooltip), never
-    /// written as disabled. Before LoadFromFile.
-    void SetAlwaysOn(const QString& name, const QString& reason);
+    /// Keeps the add-ons named `names` (whichever the list shows) checked and not changeable
+    /// (`reason` their tooltip), never written as disabled. Before LoadFromFile.
+    void SetAlwaysOn(const QStringList& names, const QString& reason);
 
     /// The game's add-on files are in use (it runs on Anka's second core): installing and deleting
     /// are off, `reason` says why; the check boxes stay.
@@ -82,7 +82,7 @@ private:
     std::vector<QList<QStandardItem*>> list_items;
     std::vector<QStandardItem*> update_items;
 
-    QString always_on;
+    QStringList always_on;
     QString always_on_reason;
     QString files_in_use; ///< why the files can't change now; empty: they can
 
