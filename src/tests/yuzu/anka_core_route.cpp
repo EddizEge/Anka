@@ -1255,3 +1255,40 @@ TEST_CASE("Anka route: the frame rate patch stays on by both its names", "[yuzu]
                               "1\\disabled\\size=2\n";
     REQUIRE(MakeSecondCoreIni(other, State(true)).starts_with(other));
 }
+
+TEST_CASE("Anka route: the haze tweak's saved settings under its new default",
+          "[yuzu][anka_route]") {
+    // Saved while its default was on (06.11): at the default, kept as off by hand, or turned on.
+    // QtConfig wrote `\default=true` for a value at the default: it now reads the new one (off)
+    const auto read = [](const char* is_default, const char* value) {
+        return SecondCoreOptionsFromMenu(std::string{"[Anka]\n"} +
+                                         "second_core_visual_tweak\\default=" + is_default +
+                                         "\nsecond_core_visual_tweak=" + value + "\n");
+    };
+    const auto tweak_env = [](const SecondCoreValues& values) {
+        for (const auto& [name, value] : SecondCoreOptionEnv(values)) {
+            if (name == "EDEN_NX2_OOT_VISUAL_WORKAROUND") {
+                return value;
+            }
+        }
+        return std::string{"none"};
+    };
+    const auto at_old_default = read("true", "true");
+    REQUIRE(at_old_default[VisualTweakAt] == 0);
+    REQUIRE(tweak_env(at_old_default) == "0");
+    const auto off_by_hand = read("false", "false");
+    REQUIRE(off_by_hand[VisualTweakAt] == 0);
+    REQUIRE(tweak_env(off_by_hand) == "0");
+    const auto on_by_hand = read("false", "true");
+    REQUIRE(on_by_hand[VisualTweakAt] == 1);
+    REQUIRE(tweak_env(on_by_hand) == "1");
+    // The other options keep their defaults meanwhile
+    REQUIRE(at_old_default == SecondCoreDefaults());
+    // Every combination of the four boxes, saved by the tab and read back by anka-cli
+    for (int bits = 0; bits < 16; ++bits) {
+        const auto values = Options(bits & 1, (bits >> 1) & 1, (bits >> 2) & 1, (bits >> 3) & 1);
+        REQUIRE(SecondCoreOptionsFromMenu(MenuAnkaGroup(values)) == values);
+        REQUIRE(SecondCoreOptionsFromMenu(std::string{QtConfig} + "\n" + MenuAnkaGroup(values)) ==
+                values);
+    }
+}
