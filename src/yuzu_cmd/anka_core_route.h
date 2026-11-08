@@ -47,8 +47,10 @@ constexpr const char* StillRunning = "Another game is still running on Anka's se
                                      "it before starting another game.";
 constexpr const char* StopRunningFirst =
     "Stop the running game first: this game runs on Anka's second core.";
-constexpr const char* PropertiesNote =
-    "Per-game settings are not used on Anka's second core; the add-on choices still apply.";
+/// Over the Properties window of the game on the second core, which has only the Add-Ons tab: the
+/// choices reach the second core at its next start (MakeSecondCoreIni), not while it runs
+constexpr const char* PropertiesNote = "Only the add-on choices are used on Anka's second core. "
+                                       "Changes apply the next time the game starts.";
 constexpr const char* Missing = "Anka's second core is missing: %1 was not found. Extract the "
                                 "whole Anka package.";
 constexpr const char* IniNotWritten =

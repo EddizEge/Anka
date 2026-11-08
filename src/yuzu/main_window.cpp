@@ -2798,13 +2798,9 @@ void MainWindow::OnGameListOpenPerGameProperties(const std::string& file) {
         return;
     }
 
-    // The second core reads no per-game settings (config/custom/*.ini)
-    if (AnkaCoreRoute::RunsOnSecondCore(title_id)) {
-        QMessageBox::information(this, tr("Properties"), tr(AnkaCoreRoute::Text::PropertiesNote));
-        return;
-    }
-
-    OpenPerGameConfiguration(title_id, file);
+    // The second core reads no per-game settings (config/custom/*.ini), only the add-on choices
+    // ([DisabledAddOns], which MakeSecondCoreIni hands it at every start)
+    OpenPerGameConfiguration(title_id, file, AnkaCoreRoute::RunsOnSecondCore(title_id));
 }
 
 bool MainWindow::SecondCoreRunning() const {
@@ -4011,11 +4007,13 @@ void MainWindow::OnConfigurePerGame() {
     OpenPerGameConfiguration(title_id, current_game_path.toStdString());
 }
 
-void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_name) {
+void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_name,
+                                          bool addons_only) {
     const auto v_file = Core::GetGameFileFromPath(QtCommon::vfs, file_name);
 
     Settings::SetConfiguringGlobal(false);
-    ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system);
+    ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system,
+                            addons_only);
     dialog.LoadFromFile(v_file);
 
     const auto result = dialog.exec();

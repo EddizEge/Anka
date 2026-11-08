@@ -15,6 +15,7 @@
 
 #include <QAbstractButton>
 #include <QCheckBox>
+#include <QLabel>
 #include <QPushButton>
 #include <QString>
 #include <QTimer>
@@ -46,45 +47,58 @@
 #include "yuzu/configuration/configure_per_game_addons.h"
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/util/util.h"
+#include "yuzu_cmd/anka_core_route.h"
 
 ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::string& file_name,
                                    std::vector<VkDeviceInfo::Record>& vk_device_records,
-                                   Core::System& system_)
+                                   Core::System& system_, bool addons_only_)
     : QDialog(parent), ui(std::make_unique<Ui::ConfigurePerGame>()), title_id{title_id_},
-      system{system_},
+      addons_only{addons_only_}, system{system_},
       builder{std::make_unique<ConfigurationShared::Builder>(this, !system_.IsPoweredOn())},
       tab_group{std::make_shared<std::vector<ConfigurationShared::Tab*>>()} {
-    const auto file_path = std::filesystem::path(Common::FS::ToU8String(file_name));
-    const auto config_file_name = title_id == 0 ? Common::FS::PathToUTF8String(file_path.filename())
-                                                : fmt::format("{:016X}", title_id);
-    game_config = std::make_unique<QtConfig>(config_file_name, Config::ConfigType::PerGameConfig);
     addons_tab = std::make_unique<ConfigurePerGameAddons>(system_, this);
-    audio_tab = std::make_unique<ConfigureAudio>(system_, tab_group, *builder, this);
-    cpu_tab = std::make_unique<ConfigureCpu>(system_, tab_group, *builder, this);
-    graphics_advanced_tab =
-        std::make_unique<ConfigureGraphicsAdvanced>(system_, tab_group, *builder, this);
-    graphics_extensions_tab =
-        std::make_unique<ConfigureGraphicsExtensions>(system_, tab_group, *builder, this);
-    graphics_tab = std::make_unique<ConfigureGraphics>(
-        system_, vk_device_records, [&]() { graphics_advanced_tab->ExposeComputeOption(); },
-        [](Settings::AspectRatio, Settings::ResolutionSetup) {}, tab_group, *builder, this);
-    input_tab = std::make_unique<ConfigureInputPerGame>(system_, game_config.get(), this);
-    system_tab = std::make_unique<ConfigureSystem>(system_, tab_group, *builder, this);
-    network_tab = std::make_unique<ConfigureNetwork>(system_, this);
-    applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
+    // Anka's second core takes the add-on choices ([DisabledAddOns], in the global settings) and
+    // no config/custom/*.ini: that file is not read, written or shown
+    if (!addons_only) {
+        const auto file_path = std::filesystem::path(Common::FS::ToU8String(file_name));
+        const auto config_file_name = title_id == 0
+                                          ? Common::FS::PathToUTF8String(file_path.filename())
+                                          : fmt::format("{:016X}", title_id);
+        game_config =
+            std::make_unique<QtConfig>(config_file_name, Config::ConfigType::PerGameConfig);
+        audio_tab = std::make_unique<ConfigureAudio>(system_, tab_group, *builder, this);
+        cpu_tab = std::make_unique<ConfigureCpu>(system_, tab_group, *builder, this);
+        graphics_advanced_tab =
+            std::make_unique<ConfigureGraphicsAdvanced>(system_, tab_group, *builder, this);
+        graphics_extensions_tab =
+            std::make_unique<ConfigureGraphicsExtensions>(system_, tab_group, *builder, this);
+        graphics_tab = std::make_unique<ConfigureGraphics>(
+            system_, vk_device_records, [&]() { graphics_advanced_tab->ExposeComputeOption(); },
+            [](Settings::AspectRatio, Settings::ResolutionSetup) {}, tab_group, *builder, this);
+        input_tab = std::make_unique<ConfigureInputPerGame>(system_, game_config.get(), this);
+        system_tab = std::make_unique<ConfigureSystem>(system_, tab_group, *builder, this);
+        network_tab = std::make_unique<ConfigureNetwork>(system_, this);
+        applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
+    }
 
     ui->setupUi(this);
 
     ui->tabWidget->addTab(addons_tab.get(), tr("Add-Ons"));
-    ui->tabWidget->addTab(system_tab.get(), tr("System"));
-    ui->tabWidget->addTab(cpu_tab.get(), tr("CPU"));
-    ui->tabWidget->addTab(graphics_tab.get(), tr("Graphics"));
-    ui->tabWidget->addTab(graphics_advanced_tab.get(), tr("Adv. Graphics"));
-    ui->tabWidget->addTab(graphics_extensions_tab.get(), tr("Ext. Graphics"));
-    ui->tabWidget->addTab(audio_tab.get(), tr("Audio"));
-    ui->tabWidget->addTab(input_tab.get(), tr("Input Profiles"));
-    ui->tabWidget->addTab(network_tab.get(), tr("Network"));
-    ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
+    if (addons_only) {
+        auto* const note = new QLabel(tr(AnkaCoreRoute::Text::PropertiesNote), this);
+        note->setWordWrap(true);
+        ui->verticalLayout_3->insertWidget(0, note);
+    } else {
+        ui->tabWidget->addTab(system_tab.get(), tr("System"));
+        ui->tabWidget->addTab(cpu_tab.get(), tr("CPU"));
+        ui->tabWidget->addTab(graphics_tab.get(), tr("Graphics"));
+        ui->tabWidget->addTab(graphics_advanced_tab.get(), tr("Adv. Graphics"));
+        ui->tabWidget->addTab(graphics_extensions_tab.get(), tr("Ext. Graphics"));
+        ui->tabWidget->addTab(audio_tab.get(), tr("Audio"));
+        ui->tabWidget->addTab(input_tab.get(), tr("Input Profiles"));
+        ui->tabWidget->addTab(network_tab.get(), tr("Network"));
+        ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
+    }
 
     setFocusPolicy(Qt::ClickFocus);
     setWindowTitle(tr("Properties"));
@@ -94,7 +108,9 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     scene = new QGraphicsScene;
     ui->icon_view->setScene(scene);
 
-    if (system.IsPoweredOn()) {
+    // A running game greys the add-on list out (ConfigurePerGameAddons): the add-ons-only window
+    // has nothing to apply then
+    if (system.IsPoweredOn() && !addons_only) {
         QPushButton* apply_button = ui->buttonBox->addButton(QDialogButtonBox::Apply);
         connect(apply_button, &QAbstractButton::clicked, this,
                 &ConfigurePerGame::HandleApplyButtonClicked);
@@ -106,6 +122,11 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
 ConfigurePerGame::~ConfigurePerGame() = default;
 
 void ConfigurePerGame::ApplyConfiguration() {
+    if (addons_only) {
+        addons_tab->ApplyConfiguration();
+        return;
+    }
+
     for (const auto tab : *tab_group) {
         tab->ApplyConfiguration();
     }

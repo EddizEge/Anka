@@ -55,9 +55,11 @@ class ConfigurePerGame : public QDialog {
 
 public:
     // Cannot use std::filesystem::path due to https://bugreports.qt.io/browse/QTBUG-73263
+    /// addons_only_: only the Add-Ons tab, for a game on Anka's second core
+    /// (yuzu_cmd/anka_core_route.h), which takes no other per-game setting
     explicit ConfigurePerGame(QWidget* parent, u64 title_id_, const std::string& file_name,
                               std::vector<VkDeviceInfo::Record>& vk_device_records,
-                              Core::System& system_);
+                              Core::System& system_, bool addons_only_ = false);
     ~ConfigurePerGame() override;
 
     /// Save all button configurations to settings file
@@ -76,6 +78,7 @@ private:
     std::unique_ptr<Ui::ConfigurePerGame> ui;
     FileSys::VirtualFile file;
     u64 title_id;
+    bool addons_only;
 
     QGraphicsScene* scene;
 

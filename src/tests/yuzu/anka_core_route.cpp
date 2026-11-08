@@ -162,8 +162,8 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     REQUIRE(std::string_view{Text::StillRunning}.starts_with(
         "Another game is still running on Anka's second core"));
     REQUIRE(std::string_view{Text::PropertiesNote} ==
-            "Per-game settings are not used on Anka's second core; the add-on choices still "
-            "apply.");
+            "Only the add-on choices are used on Anka's second core. Changes apply the next time "
+            "the game starts.");
     REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "Anka's second core: no effect");
 }
 
