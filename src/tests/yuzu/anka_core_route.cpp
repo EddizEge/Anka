@@ -197,6 +197,7 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
         Named{Text::Crashed, 3},            Named{Text::NoEffectOnSecondCore, 1},
         Named{Text::PresetOnSecondCore, 1}, Named{Text::OptionsTitle, 1},
         Named{Text::PropertiesNote, 0},     Named{Text::AddOnFilesInUse, 1},
+        Named{Text::AlwaysOnAddOn, 0},
     };
     std::vector<std::string_view> all;
     for (const auto& [text, args] : named) {
@@ -234,9 +235,11 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
     REQUIRE(std::string_view{Text::Crashed} ==
             "%1 closed unexpectedly (exit code 0x%2). Its log:\n%3");
     REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "No effect in %1");
-    // The add-on window of its game: why its files can't change while it runs
+    // The add-on window of its game: why its files can't change while it runs, and its kept patch
     REQUIRE(std::string_view{Text::AddOnFilesInUse} ==
             "%1 is running: its add-on files can't be changed until it closes.");
+    REQUIRE(std::string_view{Text::AlwaysOnAddOn} == "Always on for this game");
+    REQUIRE(SecondCoreKeptAddOn == "Dynamic FPS by Dark");
     REQUIRE(std::string_view{Text::PresetOnSecondCore}.starts_with(
         "In %1 Reactive Flushing stays off"));
     REQUIRE(std::string_view{Text::PresetOnSecondCore}.ends_with(

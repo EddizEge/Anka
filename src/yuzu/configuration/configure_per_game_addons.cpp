@@ -107,6 +107,9 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
     std::vector<std::string> disabled_addons;
 
     for (const auto& item : list_items) {
+        if (!always_on.isEmpty() && item.front()->text() == always_on) {
+            continue;
+        }
         const auto disabled = item.front()->checkState() == Qt::Unchecked;
         if (disabled) {
             QVariant userData = item.front()->data(Qt::UserRole);
@@ -138,6 +141,11 @@ void ConfigurePerGameAddons::LoadFromFile(FileSys::VirtualFile file_) {
 
 void ConfigurePerGameAddons::SetTitleId(u64 id) {
     this->title_id = id;
+}
+
+void ConfigurePerGameAddons::SetAlwaysOn(const QString& name, const QString& reason) {
+    always_on = name;
+    always_on_reason = reason;
 }
 
 void ConfigurePerGameAddons::SetFilesInUse(const QString& reason) {
@@ -393,6 +401,11 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         }
 
         first_item->setCheckState(should_enable ? Qt::Checked : Qt::Unchecked);
+        if (!always_on.isEmpty() && name == always_on) {
+            first_item->setCheckState(Qt::Checked);
+            first_item->setFlags(first_item->flags() & ~Qt::ItemIsUserCheckable);
+            first_item->setToolTip(always_on_reason);
+        }
 
         list_items.push_back(QList<QStandardItem*>{
             first_item, new QStandardItem{QString::fromStdString(patch.version)}});

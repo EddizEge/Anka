@@ -88,6 +88,11 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         auto* const note = new QLabel(tr(AnkaCoreRoute::Text::PropertiesNote), this);
         note->setWordWrap(true);
         ui->verticalLayout_3->insertWidget(0, note);
+        // The second core keeps its frame rate patch on whatever [DisabledAddOns] says
+        // (KeepSecondCoreAddOn): the list shows it so and never writes it off
+        const auto kept = AnkaCoreRoute::SecondCoreKeptAddOn;
+        addons_tab->SetAlwaysOn(QString::fromUtf8(kept.data(), static_cast<qsizetype>(kept.size())),
+                                tr(AnkaCoreRoute::Text::AlwaysOnAddOn));
     } else {
         ui->tabWidget->addTab(system_tab.get(), tr("System"));
         ui->tabWidget->addTab(cpu_tab.get(), tr("CPU"));

@@ -59,6 +59,8 @@ constexpr const char* PropertiesNote = "For this game only the add-on choices ar
 /// The Properties window of its game while it runs: why installing and deleting add-ons are off
 constexpr const char* AddOnFilesInUse =
     "%1 is running: its add-on files can't be changed until it closes.";
+/// That window's frame rate patch (SecondCoreKeptAddOn), which the second core keeps on
+constexpr const char* AlwaysOnAddOn = "Always on for this game";
 /// %2: the second core's program, so the user sees which file of the package is missing
 constexpr const char* Missing =
     "%1 cannot start: %2 was not found. Extract the whole Anka package.";
