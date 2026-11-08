@@ -88,7 +88,8 @@ constexpr const char* MaxResolutionText =
     "On: the game draws its 3D at full resolution. Off: it lowers it under load, down to 480p: "
     "blurrier, a few percent more FPS.";
 constexpr const char* VisualTweak = "Haze and bloom tweak";
-constexpr const char* VisualTweakText = "Thinner haze and lower exposure. No effect on speed.";
+constexpr const char* VisualTweakText =
+    "Thinner outdoor haze and lower glow / exposure. Off by default. No effect on speed.";
 constexpr const char* OcclusionOff = "Occlusion off (experimental)";
 constexpr const char* OcclusionOffText =
     "Turns off the game's occlusion queries and depth pre-pass. Experimental; no measured speed "
@@ -291,8 +292,12 @@ struct SecondCoreOption {
 ///   480p (FZ-MAXRES0: off was a few percent faster). Occlusion Off: no speed change measured.
 ///   An offered patch also shows in its Add-Ons, by `addon` (BUILTIN_PATCHES' names), and a
 ///   [DisabledAddOns] entry would turn it off whatever the row says: MakeSecondCoreIni drops it.
-/// - Haze and bloom tweak: its renderer_vulkan/vk_pipeline_cache.cpp OotVisualWorkaround, on
-///   unless EDEN_NX2_OOT_VISUAL_WORKAROUND is "0": thinner haze, lower exposure, shaders only.
+/// - Haze and bloom tweak: its renderer_vulkan/vk_pipeline_cache.cpp OotVisualWorkaround (Lichii
+///   4aa1e429: outdoor haze x0.25, glow / exposure x0.65, shaders only). The second core turns it
+///   on unless EDEN_NX2_OOT_VISUAL_WORKAROUND is "0"; the row is off by default (the user's
+///   decision of 08.11.2026, in place of 06.11's on), so "0" goes over unless the box is on. A
+///   row has one target: when the second core reads an ini key for it too, writing both takes a
+///   second target on the row.
 inline constexpr std::array SecondCoreOptions{
     SecondCoreOption{.key = "second_core_max_resolution",
                      .kind = OptionKind::Toggle,
@@ -304,7 +309,7 @@ inline constexpr std::array SecondCoreOptions{
                      .addon = "Max Resolution (built-in)"},
     SecondCoreOption{.key = "second_core_visual_tweak",
                      .kind = OptionKind::Toggle,
-                     .default_value = 1,
+                     .default_value = 0,
                      .target = OptionTarget::Env,
                      .name = "EDEN_NX2_OOT_VISUAL_WORKAROUND",
                      .label = Text::VisualTweak,

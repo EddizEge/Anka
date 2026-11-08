@@ -772,9 +772,9 @@ TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_ro
     REQUIRE(SecondCoreOptions[MaxResolutionAt].name == "EDEN_OOT_MAX_RESOLUTION");
     REQUIRE(SecondCoreOptions[VisualTweakAt].name == "EDEN_NX2_OOT_VISUAL_WORKAROUND");
     REQUIRE(SecondCoreOptions[OcclusionOffAt].name == "EDEN_OOT_OCCLUSION_OFF");
-    // The second core's own defaults: full-resolution 3D on, the haze and bloom tweak on,
-    // occlusion off off
-    REQUIRE(SecondCoreDefaults() == Options(1, 1, 0));
+    // The defaults: full-resolution 3D on (the second core's own), the haze and bloom tweak off
+    // (the user's decision of 08.11.2026; the second core's own is on), occlusion off off
+    REQUIRE(SecondCoreDefaults() == Options(1, 0, 0));
     const auto main_core = MainCoreNames();
     for (std::size_t i = 0; i < SecondCoreOptions.size(); ++i) {
         const auto& option = SecondCoreOptions[i];
@@ -807,7 +807,10 @@ TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_ro
 
 TEST_CASE("Anka route: the options' variables, always written as 1 or 0", "[yuzu][anka_route]") {
     // The default: all written, at the second core's own default
-    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()) == OptionEnv(1, 1, 0));
+    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()) == OptionEnv(1, 0, 0));
+    // The tweak at its default is turned off explicitly: the second core's own default is on
+    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults())[VisualTweakAt] ==
+            std::pair<std::string, std::string>{"EDEN_NX2_OOT_VISUAL_WORKAROUND", "0"});
     for (const int a : {0, 1}) {
         for (const int b : {0, 1}) {
             for (const int c : {0, 1}) {
@@ -818,7 +821,7 @@ TEST_CASE("Anka route: the options' variables, always written as 1 or 0", "[yuzu
     // A box's value is 0 or 1 whatever the file held
     REQUIRE(SecondCoreOptionEnv(Options(7, 0, -2)) == OptionEnv(1, 0, 1));
     // Fewer values than options: the defaults
-    REQUIRE(SecondCoreOptionEnv(std::span<const int>{}) == OptionEnv(1, 1, 0));
+    REQUIRE(SecondCoreOptionEnv(std::span<const int>{}) == OptionEnv(1, 0, 0));
     // Exactly "1" / "0": the second core reads the first character, the tweak "0" alone
     for (const auto& [name, value] : SecondCoreOptionEnv(Options(1, 0, 1))) {
         REQUIRE((value == "1" || value == "0"));
@@ -950,7 +953,7 @@ TEST_CASE("Anka route: anka-cli reads the options the menu saved", "[yuzu][anka_
                                       "second_core_max_resolution=false\n") ==
             SecondCoreDefaults());
     REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_max_resolution=false\n") ==
-            Options(0, 1, 0));
+            Options(0, 0, 0));
     // As SimpleIni reads it: CRLF, spaces, any case, 1 / on / yes / off, the last line of a key
     REQUIRE(SecondCoreOptionsFromMenu("[anka]\r\n"
                                       "Second_Core_Occlusion_Off = 1\r\n"
