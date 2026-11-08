@@ -6,6 +6,7 @@
 #include <fmt/format.h>
 #include "common/fs/fs.h"
 #include "common/fs/fs_types.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "frontend_common/data_manager.h"
 #include "mod_manager.h"
@@ -45,8 +46,15 @@ ModInstallResult InstallMod(const std::filesystem::path& path, const u64 program
     const auto mod_dir =
         DataManager::GetDataDir(DataManager::DataDir::Mods) / program_id_string / mod_name;
 
-    // pre-emptively remove any existing mod here
-    std::filesystem::remove_all(mod_dir);
+    // pre-emptively remove any existing mod here; one whose files are in use (Windows: open
+    // without FILE_SHARE_DELETE) fails the install instead of throwing
+    std::error_code ec;
+    std::filesystem::remove_all(mod_dir, ec);
+    if (ec) {
+        LOG_ERROR(Frontend, "Mod install failed: {} could not be removed: {}",
+                  Common::FS::PathToUTF8String(mod_dir), ec.message());
+        return Failed;
+    }
 
     // now copy
     try {

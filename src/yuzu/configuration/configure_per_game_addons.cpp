@@ -236,12 +236,29 @@ void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
     if (choice == QtCommon::Frontend::StandardButton::No)
         return;
 
+    // A file another program holds open (Windows: without FILE_SHARE_DELETE) can't be removed:
+    // reported, not thrown (an uncaught filesystem_error closed the program)
+    QStringList failed;
     for (const QModelIndex& index : filtered) {
-        std::filesystem::remove_all(index.data(PATCH_LOCATION).toString().toStdString());
+        std::error_code ec;
+        std::filesystem::remove_all(
+            std::filesystem::path{index.data(PATCH_LOCATION).toString().toStdU16String()}, ec);
+        if (ec) {
+            failed << QStringLiteral("%1 (%2)").arg(index.data().toString(),
+                                                    QString::fromLocal8Bit(ec.message()));
+        }
     }
 
-    QtCommon::Frontend::Information(tr("Successfully deleted"),
-                                    tr("Successfully deleted all selected mods."));
+    if (failed.isEmpty()) {
+        QtCommon::Frontend::Information(tr("Successfully deleted"),
+                                        tr("Successfully deleted all selected mods."));
+    } else {
+        QtCommon::Frontend::Critical(
+            tr("Delete Failed"),
+            tr("These mods could not be deleted, or only in part:\n\t%1\nA program may be using "
+               "their files: close it and try again.")
+                .arg(failed.join(QStringLiteral("\n\t"))));
+    }
 
     item_model->removeRows(0, item_model->rowCount());
     list_items.clear();
