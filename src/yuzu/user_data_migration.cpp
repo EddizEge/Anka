@@ -148,24 +148,16 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 }
 
 void UserDataMigrator::ShowMigrationCancelledMessage(QMainWindow* main_window) {
-    // Portable: deleting the config folder brings the prompt back, but the migration then refuses
-    // to replace a user folder that holds data (MigrationPlan::MayReplace)
-    if (IsPortable()) {
-        QMessageBox::information(
-            main_window, QObject::tr("Migration"),
-            QObject::tr("You can bring this prompt back by moving everything in the user folder "
-                        "somewhere else:\n%1")
-                .arg(QString::fromStdString(
-                    Common::FS::GetEdenPathString(Common::FS::EdenPath::EdenDir))),
-            QMessageBox::Ok);
-        return;
-    }
-    QMessageBox::information(main_window, QObject::tr("Migration"),
-                             QObject::tr("You can manually re-trigger this prompt by deleting the "
-                                         "new config directory:\n%1")
-                                 .arg(QString::fromStdString(Common::FS::GetEdenPathString(
-                                     Common::FS::EdenPath::ConfigDir))),
-                             QMessageBox::Ok);
+    // Deleting only the config folder brings the prompt back, but this first start has already
+    // written to the data folder (log/eden_log.txt): the migration then refuses to replace a data
+    // folder that holds data (MigrationPlan::MayReplace), portable or not
+    QMessageBox::information(
+        main_window, QObject::tr("Migration"),
+        QObject::tr("You can bring this prompt back by moving everything in the data folder "
+                    "somewhere else:\n%1")
+            .arg(QString::fromStdString(
+                Common::FS::GetEdenPathString(Common::FS::EdenPath::EdenDir))),
+        QMessageBox::Ok);
 }
 
 void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clear_shader_cache,
