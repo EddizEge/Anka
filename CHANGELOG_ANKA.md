@@ -85,7 +85,8 @@ and `=0` brings back the 2.0.0 code path.
   kept (ddd328587f, by MythosOfs, from Eglantine PR #724, ported from Orchid); the add-on content
   is parsed once per boot again. A `dlc` folder in an unpacked dump is not supported.
 - A missing mod folder no longer crashes the start (19e444cb52, c02d4f9c43, by SavageCore).
-- Shaders: the BRA.U / .DIV / .CONV branch modes are captured and lowered (98c230ca9b).
+- Shaders: the BRA.U / .DIV / .CONV branch modes are captured and lowered (98c230ca9b, based on
+  work by vibecodekun and Zortos, Lichii #55); a draw skipped in the logs of GitHub #1 and #3.
 - Vulkan: the colour <-> depth-stencil copies in ReinterpretImage (the path NVIDIA GPUs take)
   no longer make invalid copy commands (31a7923e3f, by cr1ckt). This is the likely cause of the
   crash on newer NVIDIA drivers; it is not yet confirmed there (see "Known issues" in the README).
