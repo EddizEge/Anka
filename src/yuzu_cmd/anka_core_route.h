@@ -88,7 +88,8 @@ constexpr const char* PresetOnSecondCore =
 /// game group is titled
 constexpr const char* OptionsTitle = "%1 only (off in other games)";
 constexpr const char* FullScreen = "Full screen";
-constexpr const char* FullScreenText = "Starts the game in full screen. Alt+F4 closes it.";
+constexpr const char* FullScreenText = "Starts the game in full screen. F11 or Alt+Enter switches "
+                                       "between window and full screen; Alt+F4 closes it.";
 constexpr const char* MaxResolution = "Full-resolution 3D";
 constexpr const char* MaxResolutionText =
     "On: the game draws its 3D at full resolution. Off: it lowers it under load, down to 480p: "
@@ -303,9 +304,10 @@ struct SecondCoreOption {
 /// - Full screen: `-f`, the only thing the second core starts full screen by (its
 ///   core/launch_params.cpp `p.fullscreen`, given to EmuWindow_SDL3_VK, which calls Fullscreen() in
 ///   [Renderer] fullscreen_mode: borderless or exclusive, the menu's value passed on). Its
-///   sdl_config reads no `fullscreen` key: none is written. On by default: the second core has no
-///   menu to switch it from. The box alone decides it (SecondCoreFullscreen), not the menu's own
-///   View > Fullscreen.
+///   sdl_config reads no `fullscreen` key: none is written. On by default; in the game F11 or
+///   Alt+Enter switches between window and full screen (its window, by the same fullscreen_mode),
+///   so the box decides how it starts. The box alone decides that (SecondCoreFullscreen), not the
+///   menu's own View > Fullscreen.
 /// - Full-resolution 3D / Occlusion off: built-in patches of the second core (its
 ///   file_sys/patch_manager.cpp, BUILTIN_PATCHES, BuiltinPatchOffered): '1' offers the patch, '0'
 ///   hides it. Max Resolution: its 3D at full scale instead of the GPU-time controller's, down to

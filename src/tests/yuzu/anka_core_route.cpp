@@ -268,6 +268,13 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
     }
     REQUIRE(std::string_view{Text::OcclusionOffText}.ends_with("no measured speed change."));
     REQUIRE(std::string_view{Text::VisualTweakText}.ends_with("No effect on speed."));
+    // Full screen: how it starts, the keys that switch it in the game, and the one that closes it
+    const std::string_view full_screen{Text::FullScreenText};
+    REQUIRE_FALSE(full_screen.empty());
+    REQUIRE(full_screen.starts_with("Starts the game in full screen."));
+    REQUIRE(full_screen.find("F11") != std::string_view::npos);
+    REQUIRE(full_screen.find("Alt+Enter") != std::string_view::npos);
+    REQUIRE(full_screen.ends_with("Alt+F4 closes it."));
 }
 
 TEST_CASE("Anka route: a UTF-8 settings path under a folder named in any script",
@@ -1164,7 +1171,8 @@ TEST_CASE("Anka route: the box decides its built-in patch, not [DisabledAddOns]"
 TEST_CASE("Anka route: full screen as the box says", "[yuzu][anka_route]") {
     REQUIRE(std::string_view{Text::FullScreen} == "Full screen");
     REQUIRE(std::string_view{Text::FullScreenText} ==
-            "Starts the game in full screen. Alt+F4 closes it.");
+            "Starts the game in full screen. F11 or Alt+Enter switches between window and full "
+            "screen; Alt+F4 closes it.");
     const fs::path core = fs::path{"D:/Anka"} / Names::Folder / Names::CliProgram;
     for (const int box : {0, 1}) {
         // The menu: the box alone, whatever its own View > Fullscreen; anka-cli: its -f too
