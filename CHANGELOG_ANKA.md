@@ -18,13 +18,14 @@ and `=0` brings back the 2.0.0 code path.
 - `anka.exe` and `anka-cli.exe` recognize that game by its title id and start the second core
   for it, with the same `user\` folder (keys, firmware, saves). The second core keeps its own
   settings file (`user\config\sdl2-config-core2.ini`), caches (`user\cache\core2`) and log
-  (`user\log\core2\eden_log.txt`), and runs once at a time. Its texts name it "Anka's second
-  core"; product names, folders and programs carry no game name.
-- The Anka tab marks the settings the second core does not take ("Anka's second core: no
-  effect"). On the second core Reactive Flushing stays off, so the two Recommended presets are the
-  same there; Safe also turns off its GPU shortcuts and its GPU thread split. It takes the OSD,
-  timed frame generation and the add-on choices of the game's Properties; barrier feedback loops
-  stay on under every preset.
+  (`user\log\core2\eden_log.txt`), and runs once at a time. Its messages name the game
+  ("Starting The Legend of Zelda: Ocarina of Time"); product names, folders and programs carry
+  no game name (80fe2ca88d).
+- The Anka tab marks the settings the second core does not take ("No effect in The Legend of
+  Zelda: Ocarina of Time"). On the second core Reactive Flushing stays off, so the two
+  Recommended presets are the same there; Safe also turns off its GPU shortcuts and its GPU
+  thread split. It takes the OSD, timed frame generation and the add-on choices of the game's
+  Properties; barrier feedback loops stay on under every preset.
 - Shaders on the first start: the first time a game starts on Anka's second core after its
   shaders were cached, Anka rebuilds them for your graphics driver. The window title shows
   "preparing shaders 812/1938" meanwhile; this can take about a minute (also after a driver
@@ -32,6 +33,38 @@ and `=0` brings back the 2.0.0 code path.
   the start.
 - The second core was not measured the way the first core was (see "Known issues" in the README):
   its in-game frame rate is low.
+
+### The Anka tab and the menu for that game
+
+- The Anka tab has a group "The Legend of Zelda: Ocarina of Time only (off in other games)". Its
+  settings are used only when that game starts, and the presets do not change them:
+  - **Full screen** (on by default): the game starts in full screen; F11 or Alt+Enter switches
+    between window and full screen, Alt+F4 closes it. The menu's View > Fullscreen no longer
+    decides this.
+  - **Full-resolution 3D** (on by default): the game draws its 3D at full resolution; off, it
+    lowers it under load, down to 480p.
+  - **Haze and bloom tweak** (off by default): thinner outdoor haze and lower glow / exposure.
+  - **Occlusion off (experimental)** (off by default): turns off the game's occlusion queries
+    and depth pre-pass.
+
+  These boxes are the one place these patches are set; the game's Add-Ons list no longer
+  overrides them (1e45f8534e, 4867d56e09, 8f66833242, e746ae4066, 58ad03481a, fa91a56136,
+  7eb7227d81, 9497fcf88e, 41b6b83018, d5fc371877, c415b43540).
+- Dark's frame rate patch ("Dynamic FPS by Dark") stays on in that game: its Add-Ons list shows
+  it ticked and locked ("Always on for this game"), under both names the patch has (417a721609,
+  248caa7c94).
+- While that game runs, also when it was started from `anka-cli.exe` or a shortcut, the menu
+  refuses the actions that change its files: removing its installed contents or cache storage,
+  linking its save to Ryujinx, installing its contents to the NAND, and deleting or installing
+  its add-ons. The message names the game; other games are unchanged (1b8d47e0e3, e05118e0f7).
+- Properties of that game opens with its Add-Ons tab only (the game takes no per-game
+  settings); the choices apply at its next start (a5aeb244b9, 3c6c4c2ac0). Add-ons removed from
+  its list no longer come back there (a99c2d64ab).
+- The Anka tab scrolls when it is taller than the settings window (7dcadb42f8).
+- The game no longer inherits the menu's open files, its log among them (db967f6b02).
+- In a package under a folder named with letters outside the system code page (an "ö", a
+  Japanese name), the settings for that game are read from the right path; when they cannot be
+  read, the game does not start and Anka says so (b45db032d3).
 
 ### Fixes
 
@@ -43,12 +76,29 @@ and `=0` brings back the 2.0.0 code path.
   part was taken).
 - The yuzu data migration window copies instead of moving, never empties a portable user folder
   and never moves the old one (8c6d0faee4, by PastaLaPate; 2ec216ff22; GitHub issue #6). Its
-  messages say where a partial copy is.
+  messages say where a partial copy is and, after a cancelled migration, how to bring the prompt
+  back (move the contents of the data or `user` folder somewhere else, after closing Anka; on
+  Linux and macOS outside portable mode both folders are named). Folder and file names outside
+  the system code page (a Japanese folder name, an emoji) no longer stop the migration. Nothing
+  is deleted (bc44b264ff, 26b58f97d9, 00cb1a64d4, 9f43e2f41e).
 - `.nup` files: add-on content (DLC) inside the package is mounted, and the edition metadata is
-  kept (ddd328587f, by MythosOfs); the add-on content is parsed once per boot again.
+  kept (ddd328587f, by MythosOfs, from Eglantine PR #724, ported from Orchid); the add-on content
+  is parsed once per boot again. A `dlc` folder in an unpacked dump is not supported.
 - A missing mod folder no longer crashes the start (19e444cb52, c02d4f9c43, by SavageCore).
 - Shaders: the BRA.U / .DIV / .CONV branch modes are captured and lowered (98c230ca9b).
-- Vulkan: invalid depth-stencil copies in ReinterpretImage are fixed (31a7923e3f, by cr1ckt).
+- Vulkan: the colour <-> depth-stencil copies in ReinterpretImage (the path NVIDIA GPUs take)
+  no longer make invalid copy commands (31a7923e3f, by cr1ckt). This is the likely cause of the
+  crash on newer NVIDIA drivers; it is not yet confirmed there (see "Known issues" in the README).
+- Windows: when reserving the 14 GiB of memory a Switch 2 game needs fails because the system's
+  free commit is only just enough, Anka grows the page file and tries again, up to five times,
+  instead of closing with "Failed to allocate ... backing memory" (8397ceea4d, by Frysix
+  (Felix), from Lichii PR #645).
+- RivaTuner (RTSS): a start without the FPS overlay empties the overlay text an Anka process left
+  behind when it was ended from outside (Task Manager), so old FPS figures no longer stay on the
+  screen (3a7fa4c4e1).
+- Mods: a mod that cannot be deleted (a file another program holds open) is reported instead of
+  closing the program, and mod folders named outside the system code page can be deleted
+  (f92ed1e4c2).
 - Donkey Kong Bananza's dynamic frame rate (DK_DYN) steps aside when an ExeFS mod changes the
   game's frame rate code (7a9d6fda36).
 - Frame generation: Dynamic steps down when the display's refresh rate changes, and
@@ -58,6 +108,15 @@ and `=0` brings back the 2.0.0 code path.
 - Safe (the preset and `start-safe.bat`) no longer turns off `HSETP2_REG` and the upscaler
   stand-in: they are not shortcuts, and without them Bananza's scene stayed a flat blue
   (6ce302c7f6).
+
+### Diagnostics
+
+- When the GPU device is lost (`VK_ERROR_DEVICE_LOST`), the log gets "nx2 device fault" lines:
+  what the driver reports about the fault, if it supports `VK_EXT_device_fault` (93565a2408).
+- "nx2 reinterpret" lines in the log count the colour <-> depth-stencil copies above: the first
+  eight in detail, then a summary at most once a minute (2e7bf3b1f1).
+- `EDEN_NX2_FRAME_TIMES=<file>` writes every frame's time to that file, for 1% lows. Off unless
+  the variable is set (93ae6d8c17).
 
 ## Anka 1.0.1 (`anka-v1.0.1`)
 

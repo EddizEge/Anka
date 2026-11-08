@@ -197,6 +197,17 @@ decided what to try, played and tested the builds, and is responsible for the re
 commit made with the assistant says so with an `Assisted-by:` line, as the Eden project's AI
 policy asks.
 
+## Known issues
+
+- **Crash on NVIDIA drivers 617 and newer** when something breaks or explodes in the game
+  (`VK_ERROR_DEVICE_LOST`; issues #3, #7, #8, #10). 1.1.0 includes a likely fix; it is not yet
+  confirmed on newer drivers. Workaround: NVIDIA driver 610.88. If it still crashes, please
+  attach the log (below): 1.1.0 writes extra lines about the crash to it.
+- **Grass and plants missing** (#1): the Recommended preset turns Reactive Flushing off; the
+  Recommended + Reactive Flushing preset shows them, but is slower in some places.
+- **White / black bands on the island** (#4): open; Reactive Flushing does not fully remove them.
+- The full list: "Known issues" in [`README_ANKA.md`](../README_ANKA.md).
+
 ## Issues
 
 Report problems at https://github.com/EddizEge/Anka/issues (please not to Franseven, the Eden

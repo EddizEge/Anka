@@ -87,8 +87,9 @@ project, one file that holds a game's program, its update and its metadata (name
 version). Open one with **File > Load File**, or keep it in a game folder of the game list (it
 shows its name, icon and version), or put it in the `Games` folder for the launchers;
 `anka-cli.exe` opens a `.nup` path too. A Donkey Kong Bananza `.nup` gets Anka's settings for
-that game like any other format. Anka only reads NUP: it does not make, edit or extract one.
-Only use NUP files made from your own dumps.
+that game like any other format. Since 1.1.0 add-on content (DLC) inside a `.nup` is mounted;
+a `dlc` folder in an unpacked dump is not supported. Anka only reads NUP: it does not make, edit
+or extract one. Only use NUP files made from your own dumps.
 
 Compressed parts are decompressed on use; a cache of 512 MiB keeps them
 (`EDEN_NUP_CACHE_MIB=<n>`, 64 or more, sets another size), and a part larger than half of it is
@@ -129,21 +130,25 @@ Ocarina of Time (title id `0400486024DEC000`); every other game stays on the fir
 
 You do not start it yourself: when you start that game, `anka.exe` (and `anka-cli.exe`, also
 from a launcher) recognizes it by its title id and starts the second core instead ("Starting
-this game on Anka's second core"). The second core uses the same `user\` folder (keys,
+The Legend of Zelda: Ocarina of Time"). The second core uses the same `user\` folder (keys,
 firmware, saves) and keeps its own settings file (`user\config\sdl2-config-core2.ini`), caches
 (`user\cache\core2`) and log (`user\log\core2\eden_log.txt`). Only one game runs on it at a
-time. Keep the `core2\` folder next to `anka.exe`: without it Anka says the second core is
-missing.
+time. Keep the `core2\` folder next to `anka.exe`: without it Anka says the game cannot start
+and names the missing program. Anka's messages name the game, not "the second core".
 
 The first time a game starts on Anka's second core after its shaders were cached, Anka rebuilds
 them for your graphics driver. The window title shows "preparing shaders 812/1938" meanwhile;
 this can take about a minute (also after a driver update), later starts take a few seconds. The
 window stays responsive, and closing it cancels the start.
 
-The Anka tab applies to the second core only in part: a setting it does not take says "Anka's
-second core: no effect". On the second core Reactive Flushing stays off, so both Recommended
-presets are the same there; Safe also turns off its GPU shortcuts and its GPU thread split. Its
-in-game frame rate is low (see "Known issues").
+The Anka tab applies to the second core only in part: a setting it does not take says "No
+effect in The Legend of Zelda: Ocarina of Time". On the second core Reactive Flushing stays
+off, so both Recommended presets are the same there; Safe also turns off its GPU shortcuts and
+its GPU thread split. Its in-game frame rate is low (see "Known issues"). The game's own
+settings are in the Anka tab (below); its Properties window has only the Add-Ons tab, and
+those choices apply at its next start. While the game runs, the menu does not change its files
+(removing or installing its contents or add-ons, its cache storage, linking its save to
+Ryujinx) and says why.
 
 ### The Anka tab
 
@@ -213,6 +218,20 @@ of your own that starts `anka.exe`, or in a `nx2_switches.txt` next to `anka.exe
 `%APPDATA%\eden`) is never changed by Anka. A box whose switches are all set outside is greyed
 out; when only some are (one of the three frame pacing ones, say), the box sets the rest. The
 tooltip names the variables set outside, with their values.
+
+**The Legend of Zelda: Ocarina of Time only (off in other games).** A third group holds the
+settings of the game on Anka's second core. They are used only when that game starts, and the
+presets do not change them:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Full screen | on | The game starts in full screen. F11 or Alt+Enter switches between window and full screen; Alt+F4 closes it |
+| Full-resolution 3D | on | The game draws its 3D at full resolution. Off: it lowers it under load, down to 480p (blurrier, a few percent more FPS) |
+| Haze and bloom tweak | off | Thinner outdoor haze and lower glow / exposure. No effect on speed |
+| Occlusion off (experimental) | off | Turns off the game's occlusion queries and depth pre-pass. No measured speed change |
+
+These boxes are the one place these patches are set (the game's Add-Ons list does not override
+them). Dark's frame rate patch is always on in that game; its Add-Ons list shows it locked.
 
 The tab's settings are kept in the `[Anka]` group of `user\config\qt-config.ini`.
 
@@ -453,10 +472,21 @@ session, not a benchmark.
 
 ## Known issues
 
-- **GitHub issue #3:** with a recent NVIDIA driver a purple mask was reported, and the device
-  was lost (`VK_ERROR_DEVICE_LOST`). Open.
-- **GitHub issue #4:** corrupted graphics on the island. Reactive Flushing on (the Recommended +
-  Reactive Flushing preset, or `start-reactive-experimental.bat`) works around it for now.
+- **Crash on NVIDIA drivers 617 and newer** when something breaks or explodes in the game
+  (`VK_ERROR_DEVICE_LOST`; GitHub issues #3, #7, #8 and #10; #3 also reported a purple mask).
+  Open. Anka 1.1.0 includes a likely fix for the main suspect (the depth-stencil copies of
+  31a7923e3f, see the changelog); it is not yet confirmed on newer drivers. Workaround: NVIDIA
+  driver 610.88, which worked for a user in #3. If it still crashes, 1.1.0 writes extra lines
+  to the log ("nx2 device fault", "nx2 reinterpret"): please attach `user\log\eden_log.txt` to
+  the issue.
+- **GitHub issue #1: grass and plants missing.** The Recommended preset turns Reactive Flushing
+  off, and without it some grass and plants are not drawn. The Recommended + Reactive Flushing
+  preset (or `start-reactive-experimental.bat`) shows them, but is slower in some places.
+- **GitHub issue #4:** corrupted graphics (white / black bands) on the island. Open; Reactive
+  Flushing on (the Recommended + Reactive Flushing preset, or
+  `start-reactive-experimental.bat`) does not fully remove it.
+- **DLC:** add-on content inside a `.nup` is mounted; a `dlc` folder in an unpacked dump is not
+  supported.
 - **The second core's in-game frame rate is low.** It was not measured like the first core; the
   numbers in this README are all from the first core in Donkey Kong Bananza.
 - **The menu program was not measured.** `anka.exe` runs the same emulator code with the same
