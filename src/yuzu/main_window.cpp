@@ -1924,7 +1924,9 @@ bool MainWindow::SelectAndSetCurrentUser(
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
     if (SecondCoreRunning()) {
-        QMessageBox::information(this, tr("Anka"), tr(AnkaCoreRoute::Text::StillRunning));
+        QMessageBox::information(this, tr("Anka"),
+                                 tr(AnkaCoreRoute::Text::StillRunning)
+                                     .arg(QString::fromUtf8(AnkaCoreRoute::Text::GameName)));
         return;
     }
 
@@ -2812,9 +2814,10 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     using namespace AnkaCoreRoute;
     using Common::FS::EdenPath;
 
+    const QString game_name = QString::fromUtf8(Text::GameName);
     // The two cores never run at the same time
     if (emulation_running) {
-        QMessageBox::information(this, tr("Anka"), tr(Text::StopRunningFirst));
+        QMessageBox::information(this, tr("Anka"), tr(Text::StopRunningFirst).arg(game_name));
         return;
     }
     const fs::path package{QCoreApplication::applicationDirPath().toStdU16String()};
@@ -2822,6 +2825,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     if (!core) {
         QMessageBox::warning(this, tr("Anka"),
                              tr(Text::Missing)
+                                 .arg(game_name)
                                  .arg(QString::fromStdU16String(
                                      (package / Names::Folder / Names::CliProgram)
                                          .make_preferred()
@@ -2837,6 +2841,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         if (!text) {
             QMessageBox::warning(this, tr("Anka"),
                                  tr(Text::SettingsNotRead)
+                                     .arg(game_name)
                                      .arg(QString::fromStdU16String(
                                          fs::path{menu_ini}.make_preferred().u16string())));
             return;
@@ -2866,6 +2871,7 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         if (!out) {
             QMessageBox::warning(this, tr("Anka"),
                                  tr(Text::IniNotWritten)
+                                     .arg(game_name)
                                      .arg(QString::fromStdU16String(ini.u16string())));
             return;
         }
@@ -2925,14 +2931,13 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
     qint64 pid = 0;
     if (!process.startDetached(&pid)) {
         QMessageBox::warning(this, tr("Anka"),
-                             tr(Text::NotStarted)
-                                 .arg(process.errorString()));
+                             tr(Text::NotStarted).arg(game_name, process.errorString()));
         return;
     }
     LOG_INFO(Frontend, "Second core started: {} {} (pid {}{}, {} variables of its own)",
              Common::FS::PathToUTF8String(launch.program), fmt::join(launch.args, " "), pid,
              restart_handoff ? ", restart handoff" : "", launch.env.size());
-    statusBar()->showMessage(tr(Text::Starting), 10000);
+    statusBar()->showMessage(tr(Text::Starting).arg(game_name), 10000);
 
 #ifdef _WIN32
     // Its exit code decides what follows (a restart, a message)
@@ -2968,22 +2973,24 @@ void MainWindow::OnSecondCoreExited(const QString& game) {
 
     const QString log = QString::fromStdU16String(
         SecondCoreLogPath(Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir)).u16string());
+    const QString game_name = QString::fromUtf8(Text::GameName);
     switch (ForExitCode(code)) {
     case ExitReaction::None:
-        statusBar()->showMessage(tr(Text::Closed), 5000);
+        statusBar()->showMessage(tr(Text::Closed).arg(game_name), 5000);
         break;
     case ExitReaction::Restart:
         StartSecondCore(game, true);
         break;
     case ExitReaction::StartFailed:
-        QMessageBox::warning(this, tr("Anka"), tr(Text::StartFailed).arg(log));
+        QMessageBox::warning(this, tr("Anka"), tr(Text::StartFailed).arg(game_name, log));
         break;
     case ExitReaction::AlreadyRunning:
-        QMessageBox::information(this, tr("Anka"), tr(Text::AlreadyRunning));
+        QMessageBox::information(this, tr("Anka"), tr(Text::AlreadyRunning).arg(game_name));
         break;
     case ExitReaction::Crashed:
         QMessageBox::warning(this, tr("Anka"),
                              tr(Text::Crashed)
+                                 .arg(game_name)
                                  .arg(code, 8, 16, QLatin1Char('0'))
                                  .arg(log));
         break;

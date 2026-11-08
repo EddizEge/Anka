@@ -147,14 +147,62 @@ TEST_CASE("Anka route: the second core's names are the contract's", "[yuzu][anka
     REQUIRE(Names::Lock == "Local\\AnkaCore2");
 }
 
-TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]") {
-    const std::array texts{Text::Starting,      Text::Closed,         Text::StillRunning,
-                           Text::StopRunningFirst, Text::PropertiesNote, Text::Missing,
-                           Text::IniNotWritten, Text::NotStarted,     Text::StartFailed,
-                           Text::AlreadyRunning, Text::Crashed, Text::NoEffectOnSecondCore,
-                           Text::PresetOnSecondCore, Text::SettingsNotRead, Text::OptionsTitle,
-                           Text::OptionsNote};
-    std::vector<std::string_view> all{texts.begin(), texts.end()};
+TEST_CASE("Anka route: the product's names carry no game", "[yuzu][anka_route]") {
+    // The user's decision (08.11.2026): the game is named in what the user reads, never in the
+    // package's folders, programs, files or lock
+    for (const std::string_view name : {Names::Folder, Names::CliProgram, Names::QtProgram,
+                                        Names::Ini, Names::CacheFolder, Names::LogFolder,
+                                        Names::LogFile, Names::Lock}) {
+        for (const std::string_view game : {"Zelda", "zelda", "ZELDA", "Ocarina", "ocarina", "OOT",
+                                            "OoT", "oot", "Donkey", "Bananza", "Kong"}) {
+            REQUIRE(name.find(game) == std::string_view::npos);
+        }
+    }
+}
+
+namespace {
+
+// The highest %n of a text (0: none), and whether %1..%n are all there
+int HighestArg(std::string_view text) {
+    int highest = 0;
+    for (std::size_t at = text.find('%'); at != std::string_view::npos;
+         at = text.find('%', at + 1)) {
+        if (at + 1 < text.size() && text[at + 1] >= '1' && text[at + 1] <= '9') {
+            highest = std::max(highest, text[at + 1] - '0');
+        }
+    }
+    for (int n = 1; n <= highest; ++n) {
+        if (text.find("%" + std::to_string(n)) == std::string_view::npos) {
+            return -1;
+        }
+    }
+    return highest;
+}
+
+} // Anonymous namespace
+
+TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]") {
+    REQUIRE(std::string_view{Text::GameName} == "The Legend of Zelda: Ocarina of Time");
+    // Each text and its arguments: %1 the game wherever it is named, then the text's own
+    struct Named {
+        const char* text;
+        int args;
+    };
+    const std::array named{
+        Named{Text::Starting, 1},           Named{Text::Closed, 1},
+        Named{Text::StillRunning, 1},       Named{Text::StopRunningFirst, 1},
+        Named{Text::Missing, 2},            Named{Text::IniNotWritten, 2},
+        Named{Text::SettingsNotRead, 2},    Named{Text::NotStarted, 2},
+        Named{Text::StartFailed, 2},        Named{Text::AlreadyRunning, 1},
+        Named{Text::Crashed, 3},            Named{Text::NoEffectOnSecondCore, 1},
+        Named{Text::PresetOnSecondCore, 1}, Named{Text::OptionsTitle, 1},
+        Named{Text::PropertiesNote, 0},
+    };
+    std::vector<std::string_view> all;
+    for (const auto& [text, args] : named) {
+        REQUIRE(HighestArg(text) == args);
+        all.push_back(text);
+    }
     for (const auto& option : SecondCoreOptions) {
         all.push_back(option.label);
         all.push_back(option.text);
@@ -164,31 +212,44 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     }
     for (const std::string_view text : all) {
         REQUIRE_FALSE(text.empty());
-        for (const std::string_view game : {"Zelda", "zelda", "Ocarina", "ocarina", "OOT", "OoT",
-                                            "Donkey", "Bananza", "Kong"}) {
-            REQUIRE(text.find(game) == std::string_view::npos);
-        }
+        // "Second core" means nothing to the user; the name comes from GameName alone
+        REQUIRE(text.find("second core") == std::string_view::npos);
+        REQUIRE(text.find("Second core") == std::string_view::npos);
+        REQUIRE(text.find("Zelda") == std::string_view::npos);
+        REQUIRE(text.find("Ocarina") == std::string_view::npos);
     }
-    // The section's texts as the tab shows them
-    REQUIRE(std::string_view{Text::OptionsTitle} == "Anka's second core");
-    REQUIRE(std::string_view{Text::OptionsNote}.starts_with(
-        "Used only when a game starts on Anka's second core."));
+    REQUIRE(std::string_view{Text::Starting} == "Starting %1");
+    REQUIRE(std::string_view{Text::Closed} == "%1 closed");
+    REQUIRE(std::string_view{Text::StillRunning} ==
+            "%1 is still running. Close it before starting another game.");
+    REQUIRE(std::string_view{Text::StopRunningFirst} == "Stop the running game before starting %1.");
+    REQUIRE(std::string_view{Text::PropertiesNote} ==
+            "For this game only the add-on choices are used. Changes apply the next time the game "
+            "starts.");
+    // The missing file and the way out stay
+    REQUIRE(std::string_view{Text::Missing} ==
+            "%1 cannot start: %2 was not found. Extract the whole Anka package.");
+    REQUIRE(std::string_view{Text::StartFailed} ==
+            "%1 could not start. The details are in its log:\n%2");
+    REQUIRE(std::string_view{Text::Crashed} ==
+            "%1 closed unexpectedly (exit code 0x%2). Its log:\n%3");
+    REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "No effect in %1");
+    REQUIRE(std::string_view{Text::PresetOnSecondCore}.starts_with(
+        "In %1 Reactive Flushing stays off"));
+    REQUIRE(std::string_view{Text::PresetOnSecondCore}.ends_with(
+        "No preset changes that game's own settings."));
+    // The group's title as the main core's game group has it
+    REQUIRE(std::string_view{Text::OptionsTitle} == "%1 only (off in other games)");
     REQUIRE(std::string_view{Text::MaxResolution} == "Full-resolution 3D");
     REQUIRE(std::string_view{Text::VisualTweak} == "Haze and bloom tweak");
     REQUIRE(std::string_view{Text::OcclusionOff} == "Occlusion off (experimental)");
     // No speed figure is promised; the occlusion patch and the tweak promise none at all
     for (const auto& option : SecondCoreOptions) {
+        REQUIRE(HighestArg(option.text) == 0);
         REQUIRE(std::string_view{option.text}.find('%') == std::string_view::npos);
     }
     REQUIRE(std::string_view{Text::OcclusionOffText}.ends_with("no measured speed change."));
     REQUIRE(std::string_view{Text::VisualTweakText}.ends_with("No effect on speed."));
-    REQUIRE(std::string_view{Text::Starting} == "Starting this game on Anka's second core");
-    REQUIRE(std::string_view{Text::StillRunning}.starts_with(
-        "Another game is still running on Anka's second core"));
-    REQUIRE(std::string_view{Text::PropertiesNote} ==
-            "Only the add-on choices are used on Anka's second core. Changes apply the next time "
-            "the game starts.");
-    REQUIRE(std::string_view{Text::NoEffectOnSecondCore} == "Anka's second core: no effect");
 }
 
 TEST_CASE("Anka route: a UTF-8 settings path under a folder named in any script",

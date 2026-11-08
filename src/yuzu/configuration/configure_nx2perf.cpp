@@ -25,6 +25,15 @@
 
 namespace Perf = Core::Nx2PerfSettings;
 
+namespace {
+
+/// The second core's game, as the texts about it name it
+QString SecondCoreGame() {
+    return QString::fromUtf8(AnkaCoreRoute::Text::GameName);
+}
+
+} // Anonymous namespace
+
 ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
     : QWidget(parent), ui{std::make_unique<Ui::ConfigureNx2Perf>()} {
     ui->setupUi(this);
@@ -55,7 +64,7 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
     SetConfiguration();
     MarkSetOutside();
     ShowSecondCoreNotes();
-    ui->preset->setToolTip(tr(AnkaCoreRoute::Text::PresetOnSecondCore));
+    ui->preset->setToolTip(tr(AnkaCoreRoute::Text::PresetOnSecondCore).arg(SecondCoreGame()));
 
     // The preset's item order is Perf::Preset's (configure_nx2perf.ui).
     connect(ui->preset, &QComboBox::activated, this,
@@ -320,7 +329,9 @@ void ConfigureNx2Perf::ShowSecondCoreNotes() {
         row.text->setTextFormat(Qt::RichText);
         row.text->setText(QStringLiteral("%1<br><span style=\"color:%2\">%3</span>")
                               .arg(text, colour,
-                                   tr(AnkaCoreRoute::Text::NoEffectOnSecondCore).toHtmlEscaped()));
+                                   tr(AnkaCoreRoute::Text::NoEffectOnSecondCore)
+                                       .arg(SecondCoreGame())
+                                       .toHtmlEscaped()));
     }
 }
 
@@ -334,7 +345,7 @@ std::string_view ConfigureNx2Perf::KeyName(bool Perf::Switches::*field) {
 }
 
 void ConfigureNx2Perf::BuildSecondCoreOptions() {
-    // The rows of the sections above, from the table: a box with its text under it (indented as
+    // The rows of the game group above, from the table: a box with its text under it (indented as
     // theirs), or a label and a number / choice on one line with the text under it (as Preset)
     using AnkaCoreRoute::OptionKind;
     for (const auto& option : AnkaCoreRoute::SecondCoreOptions) {
@@ -381,12 +392,8 @@ void ConfigureNx2Perf::BuildSecondCoreOptions() {
 
 void ConfigureNx2Perf::RetranslateSecondCoreOptions() {
     namespace Text = AnkaCoreRoute::Text;
-    ui->second_core->setTitle(tr(Text::OptionsTitle));
-    // In the placeholder colour, as the "no effect" lines: where these apply, not a warning
-    ui->second_core_text->setText(
-        QStringLiteral("<span style=\"color:%1\">%2</span>")
-            .arg(palette().color(QPalette::PlaceholderText).name(),
-                 tr(Text::OptionsNote).toHtmlEscaped()));
+    // Titled as the main core's game group above it
+    ui->second_core->setTitle(tr(Text::OptionsTitle).arg(SecondCoreGame()));
     for (std::size_t i = 0; i < option_rows.size(); ++i) {
         const auto& option = AnkaCoreRoute::SecondCoreOptions[i];
         const OptionRow& row = option_rows[i];

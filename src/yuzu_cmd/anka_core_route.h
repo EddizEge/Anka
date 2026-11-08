@@ -40,42 +40,43 @@ constexpr std::string_view LogFile = "eden_log.txt";
 constexpr std::string_view Lock = "Local\\AnkaCore2";     ///< its single instance (exit 76)
 } // namespace Names
 
-/// What the user reads about the second core (English, as the rest of Anka). No game's name.
+/// What the user reads about the second core (English, as the rest of Anka). The user knows the
+/// game, not "the second core": the texts name it, GameName put in as %1 (the user's decision,
+/// 08.11.2026). The product's own names (Names::, the package, its programs and window titles)
+/// never carry it.
 namespace Text {
-constexpr const char* Starting = "Starting this game on Anka's second core";
-constexpr const char* Closed = "Anka's second core closed";
-constexpr const char* StillRunning = "Another game is still running on Anka's second core. Close "
-                                     "it before starting another game.";
-constexpr const char* StopRunningFirst =
-    "Stop the running game first: this game runs on Anka's second core.";
+constexpr const char* GameName = "The Legend of Zelda: Ocarina of Time";
+constexpr const char* Starting = "Starting %1";
+constexpr const char* Closed = "%1 closed";
+/// Another game asked to start while it runs
+constexpr const char* StillRunning = "%1 is still running. Close it before starting another game.";
+/// It asked to start while a game runs on the main core
+constexpr const char* StopRunningFirst = "Stop the running game before starting %1.";
 /// Over the Properties window of the game on the second core, which has only the Add-Ons tab: the
 /// choices reach the second core at its next start (MakeSecondCoreIni), not while it runs
-constexpr const char* PropertiesNote = "Only the add-on choices are used on Anka's second core. "
-                                       "Changes apply the next time the game starts.";
-constexpr const char* Missing = "Anka's second core is missing: %1 was not found. Extract the "
-                                "whole Anka package.";
-constexpr const char* IniNotWritten =
-    "The settings of Anka's second core could not be written to %1.";
+constexpr const char* PropertiesNote = "For this game only the add-on choices are used. Changes "
+                                       "apply the next time the game starts.";
+/// %2: the second core's program, so the user sees which file of the package is missing
+constexpr const char* Missing =
+    "%1 cannot start: %2 was not found. Extract the whole Anka package.";
+constexpr const char* IniNotWritten = "%1 was not started: its settings could not be written to %2.";
 constexpr const char* SettingsNotRead =
-    "Anka's second core was not started: the settings could not be read from %1.";
-constexpr const char* NotStarted = "Anka's second core could not be started: %1";
-constexpr const char* StartFailed = "The game could not start on Anka's second core. The details "
-                                    "are in its log:\n%1";
-constexpr const char* AlreadyRunning = "Anka's second core is already running.";
-constexpr const char* Crashed = "Anka's second core closed unexpectedly (exit code 0x%1). Its "
-                                "log:\n%2";
+    "%1 was not started: the settings could not be read from %2.";
+constexpr const char* NotStarted = "%1 could not be started: %2";
+constexpr const char* StartFailed = "%1 could not start. The details are in its log:\n%2";
+/// Exit 76: it was already open (started from somewhere else)
+constexpr const char* AlreadyRunning = "%1 is already running.";
+constexpr const char* Crashed = "%1 closed unexpectedly (exit code 0x%2). Its log:\n%3";
 /// The Anka tab, under a setting the second core does not take (ReachesSecondCore)
-constexpr const char* NoEffectOnSecondCore = "Anka's second core: no effect";
+constexpr const char* NoEffectOnSecondCore = "No effect in %1";
 /// The Anka tab's preset: what it means on the second core (SecondCorePresetVars)
 constexpr const char* PresetOnSecondCore =
-    "On Anka's second core Reactive Flushing stays off, so both Recommended presets are the "
-    "same there; Safe also turns off its GPU shortcuts and its GPU thread split. No preset "
-    "changes the settings under Anka's second core.";
-/// The Anka tab's section of the second core's own settings (SecondCoreOptions): its title and the
-/// quiet line under it
-constexpr const char* OptionsTitle = "Anka's second core";
-constexpr const char* OptionsNote =
-    "Used only when a game starts on Anka's second core. Presets don't change these.";
+    "In %1 Reactive Flushing stays off, so both Recommended presets are the same there; Safe also "
+    "turns off its GPU shortcuts and its GPU thread split. No preset changes that game's own "
+    "settings.";
+/// The Anka tab's group of the second core's own settings (SecondCoreOptions), as the main core's
+/// game group is titled
+constexpr const char* OptionsTitle = "%1 only (off in other games)";
 constexpr const char* MaxResolution = "Full-resolution 3D";
 constexpr const char* MaxResolutionText =
     "On: the game draws its 3D at full resolution. Off: it lowers it under load, down to 480p: "

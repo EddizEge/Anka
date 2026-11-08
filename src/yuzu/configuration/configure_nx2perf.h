@@ -24,9 +24,9 @@ class ConfigureNx2Perf;
 // The Anka tab: a preset (the launchers' three setups, or Custom) and Anka's settings
 // (core/nx2_perf_settings.h), one box each; a box changed by hand makes the preset Custom. A box
 // whose variables were all set outside the program (yuzu/nx2perf_session.h) is greyed out: theirs
-// is used. A setting Anka's second core does not take says so under its text. Under them the
-// "Anka's second core" section: the second core's own options, one row per
-// AnkaCoreRoute::SecondCoreOptions entry, which no preset changes.
+// is used. A setting Anka's second core does not take says "No effect in <its game>" under its
+// text. Under the main core's game group, the second core's game group: its own options, one row
+// per AnkaCoreRoute::SecondCoreOptions entry, which no preset changes.
 class ConfigureNx2Perf : public QWidget {
     Q_OBJECT
 
