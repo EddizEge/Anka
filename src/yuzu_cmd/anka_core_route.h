@@ -76,19 +76,16 @@ constexpr const char* PresetOnSecondCore =
 constexpr const char* OptionsTitle = "Anka's second core";
 constexpr const char* OptionsNote =
     "Used only when a game starts on Anka's second core. Presets don't change these.";
-constexpr const char* MaxResolution = "Max resolution patch";
+constexpr const char* MaxResolution = "Full-resolution 3D";
 constexpr const char* MaxResolutionText =
-    "The game renders at full resolution instead of lowering it when the GPU falls behind "
-    "(built-in patch). On by default; turn off if the GPU can't keep up.";
-constexpr const char* OcclusionOff = "Occlusion off patch";
+    "On: the game draws its 3D at full resolution. Off: it lowers it under load, down to 480p: "
+    "blurrier, a few percent more FPS.";
+constexpr const char* VisualTweak = "Haze and bloom tweak";
+constexpr const char* VisualTweakText = "Thinner haze and lower exposure. No effect on speed.";
+constexpr const char* OcclusionOff = "Occlusion off (experimental)";
 constexpr const char* OcclusionOffText =
-    "Turns off the game's occlusion queries and depth pre-pass (built-in patch). Off by default; "
-    "can change performance either way.";
-constexpr const char* GameDlss = "Game's own DLSS";
-constexpr const char* GameDlssText =
-    "Upscales with the game's own DLSS network, translated for this GPU, instead of AMD FSR 3.1. "
-    "FSR 3.1 still draws where the network can't run, with resolution scaling, or if its output "
-    "fails Anka's checks.";
+    "Turns off the game's occlusion queries and depth pre-pass. Experimental; no measured speed "
+    "change.";
 } // namespace Text
 
 /// The game the second core plays (its updates share the base id's upper bits).
@@ -235,16 +232,27 @@ enum class OptionKind : std::uint8_t {
 enum class OptionTarget : std::uint8_t {
     Env, ///< the variable `name`: a Toggle as "1" / "0", the others as the number
     Ini, ///< `name` in [`section`] of its settings file: a Toggle as "true" / "false"
+    /// A Choice's item writes its own keys of the settings file (`writes`), no variable: one choice
+    /// that is several settings there (frame generation: a multiplier and a target rate)
+    IniWrites,
+};
+
+/// A key an item of an OptionTarget::IniWrites choice writes in the second core's settings file.
+struct IniWrite {
+    std::string_view section;
+    std::string_view key;
+    std::string_view value;
 };
 
 /// An item of a Choice: the value kept and handed over, and what the user reads.
 struct OptionChoice {
     int value;
     const char* label;
+    std::span<const IniWrite> writes{}; ///< OptionTarget::IniWrites
 };
 
-/// A setting of the Anka tab's "Anka's second core" section: one the second core has and the main
-/// core does not. Kept in the [Anka] group under `key` (beside Core::Nx2PerfSettings::Keys, never
+/// A setting of the Anka tab's section of the second core's game: one the second core has and the
+/// main core does not. Kept in the [Anka] group under `key` (beside Core::Nx2PerfSettings::Keys, never
 /// one of them: no preset and no main core plan sees it), handed to the second core at each start.
 struct SecondCoreOption {
     std::string_view key;
@@ -263,11 +271,15 @@ struct SecondCoreOption {
 /// The second core's own settings. One row each: the tab (configure_nx2perf.cpp), the [Anka] keys
 /// (LoadSecondCoreOptions / SaveSecondCoreOptions), anka-cli (SecondCoreOptionsFromMenu), the
 /// variables and the settings file (SecondCoreOptionOutputs) all follow it.
-/// - Max resolution / Occlusion off: built-in patches of the second core (its
-///   file_sys/patch_manager.cpp, BUILTIN_PATCHES); a variable starting with '1' offers the patch,
-///   '0' hides it, anything else leaves its default.
-/// - Game's own DLSS: its [Renderer] game_dlss_network (common/settings.h, default false), which its
-///   game_settings.cpp turns off while left at the default: written here always.
+/// The variables are written "1" / "0" exactly (the second core reads their first character, or
+/// "0" alone). Every name is an EDEN_* one: the starting program's own never reach the second core
+/// (ClearedForSecondCore), so only these rows set them there.
+/// - Full-resolution 3D / Occlusion off: built-in patches of the second core (its
+///   file_sys/patch_manager.cpp, BUILTIN_PATCHES, BuiltinPatchOffered): '1' offers the patch, '0'
+///   hides it. Max Resolution: its 3D at full scale instead of the GPU-time controller's, down to
+///   480p (FZ-MAXRES0: off was a few percent faster). Occlusion Off: no speed change measured.
+/// - Haze and bloom tweak: its renderer_vulkan/vk_pipeline_cache.cpp OotVisualWorkaround, on
+///   unless EDEN_NX2_OOT_VISUAL_WORKAROUND is "0": thinner haze, lower exposure, shaders only.
 inline constexpr std::array SecondCoreOptions{
     SecondCoreOption{.key = "second_core_max_resolution",
                      .kind = OptionKind::Toggle,
@@ -276,6 +288,13 @@ inline constexpr std::array SecondCoreOptions{
                      .name = "EDEN_OOT_MAX_RESOLUTION",
                      .label = Text::MaxResolution,
                      .text = Text::MaxResolutionText},
+    SecondCoreOption{.key = "second_core_visual_tweak",
+                     .kind = OptionKind::Toggle,
+                     .default_value = 1,
+                     .target = OptionTarget::Env,
+                     .name = "EDEN_NX2_OOT_VISUAL_WORKAROUND",
+                     .label = Text::VisualTweak,
+                     .text = Text::VisualTweakText},
     SecondCoreOption{.key = "second_core_occlusion_off",
                      .kind = OptionKind::Toggle,
                      .default_value = 0,
@@ -283,14 +302,6 @@ inline constexpr std::array SecondCoreOptions{
                      .name = "EDEN_OOT_OCCLUSION_OFF",
                      .label = Text::OcclusionOff,
                      .text = Text::OcclusionOffText},
-    SecondCoreOption{.key = "second_core_game_dlss",
-                     .kind = OptionKind::Toggle,
-                     .default_value = 0,
-                     .target = OptionTarget::Ini,
-                     .name = "game_dlss_network",
-                     .section = "Renderer",
-                     .label = Text::GameDlss,
-                     .text = Text::GameDlssText},
 };
 
 /// The values of SecondCoreOptions, in its order.
@@ -341,7 +352,7 @@ inline std::string OptionValueText(const SecondCoreOption& option, int value) {
 
 /// One value handed to the second core.
 struct OptionOutput {
-    OptionTarget target;
+    OptionTarget target; ///< Env or Ini (an IniWrites item gives one Ini output per key)
     std::string section; ///< OptionTarget::Ini
     std::string name;
     std::string value;
@@ -358,6 +369,19 @@ inline std::vector<OptionOutput> SecondCoreOptionOutputs(
     for (std::size_t i = 0; i < table.size(); ++i) {
         const auto& option = table[i];
         const int value = i < values.size() ? values[i] : option.default_value;
+        if (option.target == OptionTarget::IniWrites) {
+            const int chosen = ValidOption(option, value);
+            for (const auto& choice : option.choices) {
+                if (choice.value != chosen) {
+                    continue;
+                }
+                for (const auto& write : choice.writes) {
+                    out.push_back({OptionTarget::Ini, std::string{write.section},
+                                   std::string{write.key}, std::string{write.value}});
+                }
+            }
+            continue;
+        }
         out.push_back({option.target,
                        option.target == OptionTarget::Ini ? std::string{option.section}
                                                           : std::string{},
@@ -550,12 +574,12 @@ struct IniState {
     bool docked{};
     /// [Data%20Storage] keys and the paths in use (nand_directory, sdmc_directory, ...).
     std::vector<std::pair<std::string, std::string>> data_storage;
-    /// The Anka tab's second core options (UISettings, or SecondCoreOptionsFromMenu)
-    SecondCoreValues options = SecondCoreDefaults();
+    /// The values of the Anka tab's second core options (UISettings, or SecondCoreOptionsFromMenu),
+    /// in the table's order; missing ones at their defaults
+    std::vector<int> options;
 };
 
-/// Settings only the second core has; the menu has no value for them and leaves its own. Those of
-/// SecondCoreOptions (game_dlss_network) are then written from the Anka tab's choice.
+/// Settings only the second core has; the menu has no value for them and leaves its own.
 constexpr std::string_view SecondCoreOnlyKeys[] = {"nvidia_dlss", "game_dlss_network", "mkw_30fps",
                                               "mkw_dynamic_fps", "mkw_smooth", "dk_30fps"};
 
@@ -879,12 +903,15 @@ inline SecondCoreValues SecondCoreOptionsFromMenu(std::string_view menu_ini) {
 /// - [DisabledAddOns] without the frame rate patch its game needs on;
 /// - [Renderer] use_reactive_flushing always off and barrier_feedback_loops always on (its default),
 ///   whatever the preset wrote: the second core was only ever tested so;
-/// - no setting only the second core has, but the Anka tab's choice for those of SecondCoreOptions
-///   (state.options), with `\default=false`: the menu's file never decides them.
+/// - no setting only the second core has;
+/// - the keys SecondCoreOptions write there (state.options, OptionTarget::Ini / IniWrites) with
+///   `\default=false`, in place of the menu's (its frame_gen_* included).
 /// anti_aliasing / scaling_filter / astc_recompression go over as they are: left at the
 /// default (`\default=true`) the second core keeps its own (FXAA, ScaleForce, BC3).
 /// TODO(contract): the full key list and any renamed keys come from anka-birlesim's contract.
-inline std::string MakeSecondCoreIni(std::string_view config_text, const IniState& state) {
+inline std::string MakeSecondCoreIni(std::string_view config_text, const IniState& state,
+                                     std::span<const SecondCoreOption> options =
+                                         SecondCoreOptions) {
     using namespace Detail;
     auto sections = Parse(config_text);
     const std::string newline = config_text.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
@@ -897,7 +924,7 @@ inline std::string MakeSecondCoreIni(std::string_view config_text, const IniStat
     SetKey(SectionNamed(sections, "System"), "use_docked_mode", state.docked ? "1" : "0");
     SetKey(SectionNamed(sections, "Renderer"), "use_reactive_flushing", "false");
     SetKey(SectionNamed(sections, "Renderer"), "barrier_feedback_loops", "true");
-    for (const auto& option : SecondCoreOptionOutputs(state.options)) {
+    for (const auto& option : SecondCoreOptionOutputs(state.options, options)) {
         if (option.target != OptionTarget::Ini) {
             continue;
         }

@@ -2856,7 +2856,8 @@ void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
         state.data_storage.emplace_back(
             "save_directory",
             save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
-        state.options = UISettings::values.second_core;
+        state.options.assign(UISettings::values.second_core.begin(),
+                             UISettings::values.second_core.end());
         const fs::path ini = SecondCoreIniPath(user);
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);

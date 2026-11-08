@@ -399,7 +399,7 @@ static std::optional<int> RunSecondCore(Core::System& system, const Core::Launch
         state.data_storage.emplace_back(
             "save_directory",
             save == Common::FS::GetEdenPathString(EdenPath::NANDDir) ? std::string{} : save);
-        state.options = options;
+        state.options.assign(options.begin(), options.end());
         const fs::path ini = SecondCoreIniPath(user);
         std::error_code ec;
         fs::create_directories(ini.parent_path(), ec);

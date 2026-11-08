@@ -173,14 +173,15 @@ TEST_CASE("Anka route: what the user reads names no game", "[yuzu][anka_route]")
     REQUIRE(std::string_view{Text::OptionsTitle} == "Anka's second core");
     REQUIRE(std::string_view{Text::OptionsNote}.starts_with(
         "Used only when a game starts on Anka's second core."));
-    REQUIRE(std::string_view{Text::MaxResolution} == "Max resolution patch");
-    REQUIRE(std::string_view{Text::OcclusionOff} == "Occlusion off patch");
-    REQUIRE(std::string_view{Text::GameDlss} == "Game's own DLSS");
-    // No frame rate is promised
+    REQUIRE(std::string_view{Text::MaxResolution} == "Full-resolution 3D");
+    REQUIRE(std::string_view{Text::VisualTweak} == "Haze and bloom tweak");
+    REQUIRE(std::string_view{Text::OcclusionOff} == "Occlusion off (experimental)");
+    // No speed figure is promised; the occlusion patch and the tweak promise none at all
     for (const auto& option : SecondCoreOptions) {
-        REQUIRE(std::string_view{option.text}.find("fps") == std::string_view::npos);
-        REQUIRE(std::string_view{option.text}.find("FPS") == std::string_view::npos);
+        REQUIRE(std::string_view{option.text}.find('%') == std::string_view::npos);
     }
+    REQUIRE(std::string_view{Text::OcclusionOffText}.ends_with("no measured speed change."));
+    REQUIRE(std::string_view{Text::VisualTweakText}.ends_with("No effect on speed."));
     REQUIRE(std::string_view{Text::Starting} == "Starting this game on Anka's second core");
     REQUIRE(std::string_view{Text::StillRunning}.starts_with(
         "Another game is still running on Anka's second core"));
@@ -636,15 +637,21 @@ TEST_CASE("Anka route: CRLF files stay CRLF and nothing else moves", "[yuzu][ank
 namespace {
 
 constexpr std::size_t MaxResolutionAt = 0;
-constexpr std::size_t OcclusionOffAt = 1;
-constexpr std::size_t GameDlssAt = 2;
+constexpr std::size_t VisualTweakAt = 1;
+constexpr std::size_t OcclusionOffAt = 2;
 
-SecondCoreValues Options(int max_resolution, int occlusion_off, int game_dlss) {
+SecondCoreValues Options(int max_resolution, int visual_tweak, int occlusion_off) {
     SecondCoreValues values{};
     values[MaxResolutionAt] = max_resolution;
+    values[VisualTweakAt] = visual_tweak;
     values[OcclusionOffAt] = occlusion_off;
-    values[GameDlssAt] = game_dlss;
     return values;
+}
+
+Env OptionEnv(int max_resolution, int visual_tweak, int occlusion_off) {
+    return Env{{"EDEN_OOT_MAX_RESOLUTION", max_resolution ? "1" : "0"},
+               {"EDEN_NX2_OOT_VISUAL_WORKAROUND", visual_tweak ? "1" : "0"},
+               {"EDEN_OOT_OCCLUSION_OFF", occlusion_off ? "1" : "0"}};
 }
 
 // A line pair as Config::WritePreparedSetting writes it: the default line, then the value
@@ -674,18 +681,37 @@ std::string MenuAnkaGroup(const SecondCoreValues& values) {
     return MenuAnkaGroup(values, SecondCoreOptions);
 }
 
+// Every variable the main core's plan can set, for any boxes, preset and game
+std::vector<std::string_view> MainCoreNames() {
+    std::vector<std::string_view> names{Perf::SafeOff.begin(), Perf::SafeOff.end()};
+    for (const bool bananza : {false, true}) {
+        for (const auto& switches : {Perf::Recommended(), Perf::AllOff()}) {
+            for (const auto& var : Perf::Wanted(switches, bananza)) {
+                names.push_back(var.name);
+            }
+        }
+    }
+    return names;
+}
+
 } // Anonymous namespace
 
 TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_route]") {
     REQUIRE(SecondCoreOptions.size() == 3);
     REQUIRE(SecondCoreOptions[MaxResolutionAt].key == "second_core_max_resolution");
+    REQUIRE(SecondCoreOptions[VisualTweakAt].key == "second_core_visual_tweak");
     REQUIRE(SecondCoreOptions[OcclusionOffAt].key == "second_core_occlusion_off");
-    REQUIRE(SecondCoreOptions[GameDlssAt].key == "second_core_game_dlss");
-    // The second core's own defaults: Max Resolution on, Occlusion Off off, the game's DLSS off
-    REQUIRE(SecondCoreDefaults() == Options(1, 0, 0));
+    REQUIRE(SecondCoreOptions[MaxResolutionAt].name == "EDEN_OOT_MAX_RESOLUTION");
+    REQUIRE(SecondCoreOptions[VisualTweakAt].name == "EDEN_NX2_OOT_VISUAL_WORKAROUND");
+    REQUIRE(SecondCoreOptions[OcclusionOffAt].name == "EDEN_OOT_OCCLUSION_OFF");
+    // The second core's own defaults: full-resolution 3D on, the haze and bloom tweak on,
+    // occlusion off off
+    REQUIRE(SecondCoreDefaults() == Options(1, 1, 0));
+    const auto main_core = MainCoreNames();
     for (std::size_t i = 0; i < SecondCoreOptions.size(); ++i) {
         const auto& option = SecondCoreOptions[i];
         REQUIRE(option.kind == OptionKind::Toggle);
+        REQUIRE(option.target == OptionTarget::Env);
         // Not a key of the main core's settings: no preset, plan or DKB variable sees it
         REQUIRE(std::none_of(Perf::Keys.begin(), Perf::Keys.end(),
                              [&](const Perf::Key& key) { return key.name == option.key; }));
@@ -697,131 +723,119 @@ TEST_CASE("Anka route: the second core's options are one table", "[yuzu][anka_ro
         }
         REQUIRE(option.label != nullptr);
         REQUIRE(option.text != nullptr);
-        if (option.target == OptionTarget::Env) {
-            REQUIRE(option.name.starts_with("EDEN_OOT_"));
-            // Never a name the presets or the tab's boxes set there
-            for (const auto& var : SecondCorePresetVars) {
-                REQUIRE(var.env != option.name);
-            }
-            for (const auto& setting : SecondCoreSettings) {
-                REQUIRE(setting.env != option.name);
+        // An EDEN_* name: the starting program's own value of it is never passed on
+        REQUIRE(option.name.starts_with("EDEN_"));
+        REQUIRE(ClearedForSecondCore(option.name));
+        // Never a name the presets or the tab's boxes set there, nor one of the main core's plan
+        for (const auto& var : SecondCorePresetVars) {
+            REQUIRE(var.env != option.name);
+        }
+        for (const auto& setting : SecondCoreSettings) {
+            REQUIRE(setting.env != option.name);
+        }
+        REQUIRE(std::find(main_core.begin(), main_core.end(), option.name) == main_core.end());
+    }
+}
+
+TEST_CASE("Anka route: the options' variables, always written as 1 or 0", "[yuzu][anka_route]") {
+    // The default: all written, at the second core's own default
+    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()) == OptionEnv(1, 1, 0));
+    for (const int a : {0, 1}) {
+        for (const int b : {0, 1}) {
+            for (const int c : {0, 1}) {
+                REQUIRE(SecondCoreOptionEnv(Options(a, b, c)) == OptionEnv(a, b, c));
             }
         }
     }
-    REQUIRE(SecondCoreOptions[MaxResolutionAt].name == "EDEN_OOT_MAX_RESOLUTION");
-    REQUIRE(SecondCoreOptions[OcclusionOffAt].name == "EDEN_OOT_OCCLUSION_OFF");
-    REQUIRE(SecondCoreOptions[GameDlssAt].target == OptionTarget::Ini);
-    REQUIRE(SecondCoreOptions[GameDlssAt].section == "Renderer");
-    REQUIRE(SecondCoreOptions[GameDlssAt].name == "game_dlss_network");
-    // The menu's file never decides it
-    REQUIRE(std::find(std::begin(SecondCoreOnlyKeys), std::end(SecondCoreOnlyKeys),
-                      "game_dlss_network") != std::end(SecondCoreOnlyKeys));
-}
-
-TEST_CASE("Anka route: the options' variables, always written", "[yuzu][anka_route]") {
-    // The default: both written, at the second core's own default
-    REQUIRE(SecondCoreOptionEnv(SecondCoreDefaults()) ==
-            Env{{"EDEN_OOT_MAX_RESOLUTION", "1"}, {"EDEN_OOT_OCCLUSION_OFF", "0"}});
-    REQUIRE(SecondCoreOptionEnv(Options(0, 0, 0)) ==
-            Env{{"EDEN_OOT_MAX_RESOLUTION", "0"}, {"EDEN_OOT_OCCLUSION_OFF", "0"}});
-    REQUIRE(SecondCoreOptionEnv(Options(1, 1, 0)) ==
-            Env{{"EDEN_OOT_MAX_RESOLUTION", "1"}, {"EDEN_OOT_OCCLUSION_OFF", "1"}});
-    // The game's DLSS is no variable, whatever its value
-    REQUIRE(SecondCoreOptionEnv(Options(0, 1, 1)) ==
-            Env{{"EDEN_OOT_MAX_RESOLUTION", "0"}, {"EDEN_OOT_OCCLUSION_OFF", "1"}});
     // A box's value is 0 or 1 whatever the file held
-    REQUIRE(SecondCoreOptionEnv(Options(7, -2, 0)) ==
-            Env{{"EDEN_OOT_MAX_RESOLUTION", "1"}, {"EDEN_OOT_OCCLUSION_OFF", "1"}});
+    REQUIRE(SecondCoreOptionEnv(Options(7, 0, -2)) == OptionEnv(1, 0, 1));
     // Fewer values than options: the defaults
-    REQUIRE(SecondCoreOptionEnv(std::span<const int>{}) ==
-            SecondCoreOptionEnv(SecondCoreDefaults()));
+    REQUIRE(SecondCoreOptionEnv(std::span<const int>{}) == OptionEnv(1, 1, 0));
+    // Exactly "1" / "0": the second core reads the first character, the tweak "0" alone
+    for (const auto& [name, value] : SecondCoreOptionEnv(Options(1, 0, 1))) {
+        REQUIRE((value == "1" || value == "0"));
+    }
+    // Nothing for the settings file
+    for (const auto& out : SecondCoreOptionOutputs(SecondCoreDefaults())) {
+        REQUIRE(out.target == OptionTarget::Env);
+    }
 }
 
 TEST_CASE("Anka route: the section's value wins over the starting program's",
           "[yuzu][anka_route]") {
+    // A launcher or the user set them for the menu: they never reach the second core
     const Env inherited{{"PATH", "C:/Windows"},
                         {"EDEN_OOT_MAX_RESOLUTION", "1"},
                         {"eden_oot_occlusion_off", "1"},
+                        {"EDEN_NX2_OOT_VISUAL_WORKAROUND", "1"},
+                        {"Eden_Nx2_Oot_Visual_Workaround", "0"},
                         {"EDEN_OOT_DYNAMIC_FPS", "0"}};
-    for (const int max_resolution : {0, 1}) {
-        for (const int occlusion_off : {0, 1}) {
-            Env own = EnvFor(Perf::Preset::Recommended);
-            const auto options = SecondCoreOptionEnv(Options(max_resolution, occlusion_off, 0));
-            own.insert(own.end(), options.begin(), options.end());
-            const auto launch = PlanSecondCore("D:/Anka/core2/x.exe", "D:/Anka/user", "g.nup",
-                                               false, false, own);
-            int max_seen = 0;
-            int occlusion_seen = 0;
-            for (const auto& [name, value] : SecondCoreEnvironment(inherited, launch)) {
-                if (name == "EDEN_OOT_MAX_RESOLUTION") {
-                    ++max_seen;
-                    REQUIRE(value == (max_resolution ? "1" : "0"));
+    for (const int a : {0, 1}) {
+        for (const int b : {0, 1}) {
+            for (const int c : {0, 1}) {
+                Env own = EnvFor(Perf::Preset::Recommended);
+                const auto options = SecondCoreOptionEnv(Options(a, b, c));
+                own.insert(own.end(), options.begin(), options.end());
+                const auto launch = PlanSecondCore("D:/Anka/core2/x.exe", "D:/Anka/user", "g.nup",
+                                                   false, false, own);
+                const auto env = SecondCoreEnvironment(inherited, launch);
+                for (const auto& [name, value] : OptionEnv(a, b, c)) {
+                    REQUIRE(std::count_if(env.begin(), env.end(), [&](const auto& var) {
+                                return Detail::SameText(var.first, name);
+                            }) == 1);
+                    REQUIRE(std::count(env.begin(), env.end(),
+                                       std::pair<std::string, std::string>{name, value}) == 1);
                 }
-                if (name == "EDEN_OOT_OCCLUSION_OFF") {
-                    ++occlusion_seen;
-                    REQUIRE(value == (occlusion_off ? "1" : "0"));
+                for (const auto& [name, value] : env) {
+                    REQUIRE(name != "EDEN_OOT_DYNAMIC_FPS");
                 }
-                // The starting program's EDEN_OOT_ switches never reach it, in any case
-                REQUIRE(name != "EDEN_OOT_DYNAMIC_FPS");
-                REQUIRE(name != "eden_oot_occlusion_off");
             }
-            REQUIRE(max_seen == 1);
-            REQUIRE(occlusion_seen == 1);
         }
     }
 }
 
-TEST_CASE("Anka route: the game's DLSS goes to its settings file", "[yuzu][anka_route]") {
-    const auto dlss_lines = [](const std::string& ini) {
-        std::size_t n = 0;
-        for (auto at = ini.find("game_dlss_network"); at != std::string::npos;
-             at = ini.find("game_dlss_network", at + 1)) {
-            ++n;
-        }
-        return n;
-    };
-    const std::string renderer = "[Renderer]\n";
-    for (const int on : {0, 1}) {
-        IniState state = State(true);
-        state.options = Options(1, 0, on);
-        // The menu's file holding the key on or off, at its default, or not at all
-        for (const std::string lines :
-             {"game_dlss_network\\default=false\ngame_dlss_network=true\n",
-              "game_dlss_network\\default=false\ngame_dlss_network=false\n",
-              "game_dlss_network\\default=true\ngame_dlss_network=true\n", ""}) {
-            std::string config = QtConfig;
-            config.insert(config.find(renderer) + renderer.size(), lines);
-            const auto ini = MakeSecondCoreIni(config, state);
-            REQUIRE(Has(ini, "game_dlss_network\\default=false"));
-            REQUIRE(Has(ini, on ? "game_dlss_network=true" : "game_dlss_network=false"));
-            REQUIRE(dlss_lines(ini) == 2);
-            // In [Renderer], where its Category::Renderer setting reads it
-            const auto section = ini.find(renderer);
-            const auto key = ini.find("game_dlss_network=");
-            REQUIRE(key > section);
-            REQUIRE(ini.find("\n[", section + 1) > key);
+TEST_CASE("Anka route: the main core never gets the tweak's variable", "[yuzu][anka_route]") {
+    // Its plan (Nx2PerfSession sets it in the menu's own environment) has no such name, whatever
+    // the boxes, preset or game
+    for (const bool bananza : {false, true}) {
+        for (const auto preset : {Perf::Preset::Recommended, Perf::Preset::Reactive,
+                                  Perf::Preset::Safe, Perf::Preset::Custom}) {
+            for (const auto& var :
+                 Perf::Wanted(Perf::FromPreset(preset, Perf::Recommended()), bananza)) {
+                REQUIRE_FALSE(var.name.starts_with("EDEN_OOT_"));
+                REQUIRE(var.name != "EDEN_NX2_OOT_VISUAL_WORKAROUND");
+            }
         }
     }
-    // The default is written too, and a file without [Renderer] gets one
-    const auto ini = MakeSecondCoreIni("[System]\nuse_docked_mode=1\n", State(true));
-    REQUIRE(Has(ini, "game_dlss_network\\default=false"));
-    REQUIRE(Has(ini, "game_dlss_network=false"));
-    REQUIRE(ini.find("game_dlss_network") > ini.find("[Renderer]"));
-    // Under another section of the menu's file: dropped there, written in [Renderer]
-    IniState state = State(true);
-    state.options = Options(1, 0, 1);
-    const auto moved =
-        MakeSecondCoreIni("[UI]\ngame_dlss_network=false\n[Renderer]\nanti_aliasing=0\n", state);
-    REQUIRE(dlss_lines(moved) == 2);
-    REQUIRE(moved.find("game_dlss_network") > moved.find("[Renderer]"));
-    REQUIRE(Has(moved, "game_dlss_network=true"));
-    // The variables are not written into the file
-    REQUIRE(moved.find("EDEN_OOT") == std::string::npos);
+    REQUIRE(std::find(Perf::SafeOff.begin(), Perf::SafeOff.end(),
+                      "EDEN_NX2_OOT_VISUAL_WORKAROUND") == Perf::SafeOff.end());
+    // The second core's tab settings and presets do not set it either: only the section
+    for (int preset = 0; preset <= 3; ++preset) {
+        for (const auto& [name, value] : SecondCoreEnv(AllOn, preset)) {
+            REQUIRE(name != "EDEN_NX2_OOT_VISUAL_WORKAROUND");
+        }
+    }
+}
+
+TEST_CASE("Anka route: the game's DLSS setting never goes over", "[yuzu][anka_route]") {
+    // No effect in the second core's game: the menu's value is dropped, nothing is written
+    const std::string renderer = "[Renderer]\n";
+    std::string config = QtConfig;
+    config.insert(config.find(renderer) + renderer.size(),
+                  "game_dlss_network\\default=false\ngame_dlss_network=true\n");
+    for (const auto& values : {Options(1, 1, 0), Options(0, 0, 1)}) {
+        IniState state = State(true);
+        state.options.assign(values.begin(), values.end());
+        const auto ini = MakeSecondCoreIni(config, state);
+        REQUIRE(ini.find("game_dlss_network") == std::string::npos);
+        // The variables are not written into the file
+        REQUIRE(ini.find("EDEN_") == std::string::npos);
+    }
 }
 
 TEST_CASE("Anka route: presets leave the second core's options alone", "[yuzu][anka_route]") {
     // The options are none of the preset's boxes: every preset keeps them as chosen
-    const SecondCoreValues chosen = Options(0, 1, 1);
+    const SecondCoreValues chosen = Options(0, 0, 1);
     for (const auto preset : {Perf::Preset::Recommended, Perf::Preset::Reactive,
                               Perf::Preset::Safe, Perf::Preset::Custom}) {
         const Perf::Switches switches = Perf::FromPreset(preset, Perf::Recommended());
@@ -837,24 +851,14 @@ TEST_CASE("Anka route: presets leave the second core's options alone", "[yuzu][a
             });
         group += MenuAnkaGroup(chosen);
         REQUIRE(SecondCoreOptionsFromMenu(group) == chosen);
-        // The second core's environment carries them beside the preset's
+        // The second core's environment carries them beside the preset's, once each
         Env own = EnvFor(switches);
         const auto options = SecondCoreOptionEnv(chosen);
         own.insert(own.end(), options.begin(), options.end());
-        using Var = std::pair<std::string, std::string>;
-        REQUIRE(std::count(own.begin(), own.end(), Var{"EDEN_OOT_MAX_RESOLUTION", "0"}) == 1);
-        REQUIRE(std::count(own.begin(), own.end(), Var{"EDEN_OOT_OCCLUSION_OFF", "1"}) == 1);
-    }
-    // The main core's plan sets no EDEN_OOT_ variable
-    for (const bool bananza : {false, true}) {
-        for (const auto& switches : {Perf::Recommended(), Perf::AllOff()}) {
-            for (const auto& var : Perf::Wanted(switches, bananza)) {
-                REQUIRE_FALSE(var.name.starts_with("EDEN_OOT_"));
-            }
+        for (const auto& var : OptionEnv(0, 0, 1)) {
+            REQUIRE(std::count(own.begin(), own.end(), var) == 1);
         }
     }
-    REQUIRE(std::string_view{Text::PresetOnSecondCore}.ends_with(
-        "No preset changes the settings under Anka's second core."));
 }
 
 TEST_CASE("Anka route: anka-cli reads the options the menu saved", "[yuzu][anka_route]") {
@@ -878,13 +882,13 @@ TEST_CASE("Anka route: anka-cli reads the options the menu saved", "[yuzu][anka_
                                       "second_core_max_resolution=false\n") ==
             SecondCoreDefaults());
     REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_max_resolution=false\n") ==
-            Options(0, 0, 0));
-    // As SimpleIni reads it: CRLF, spaces, any case, 1 / on / yes, the last line of a key
+            Options(0, 1, 0));
+    // As SimpleIni reads it: CRLF, spaces, any case, 1 / on / yes / off, the last line of a key
     REQUIRE(SecondCoreOptionsFromMenu("[anka]\r\n"
                                       "Second_Core_Occlusion_Off = 1\r\n"
-                                      "second_core_game_dlss=on\r\n"
-                                      "second_core_game_dlss=off\r\n"
-                                      "second_core_game_dlss=yes\r\n") == Options(1, 1, 1));
+                                      "second_core_visual_tweak=on\r\n"
+                                      "second_core_visual_tweak=yes\r\n"
+                                      "second_core_visual_tweak=off\r\n") == Options(1, 0, 1));
     // Not a boolean: the default
     REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_occlusion_off=maybe\n") ==
             SecondCoreDefaults());
@@ -894,17 +898,27 @@ TEST_CASE("Anka route: anka-cli reads the options the menu saved", "[yuzu][anka_
 }
 
 TEST_CASE("Anka route: options of other kinds follow the same table", "[yuzu][anka_route]") {
-    // A choice and a number, as a later row may be: the same functions, no other code
-    static constexpr std::array<OptionChoice, 2> rates{{{10, "10 FPS"}, {20, "20 FPS"}}};
+    // As later rows may be: the dynamic frame rate floor (a choice of a variable's value), a
+    // number in the settings file, and frame generation (a choice writing two keys there)
+    static constexpr std::array<OptionChoice, 2> floors{{{10, "10 FPS"}, {20, "20 FPS"}}};
+    static constexpr std::array<IniWrite, 2> times_two{{
+        {"Renderer", "frame_gen_target_rate", "0"},
+        {"Renderer", "frame_gen_multiplier", "2"},
+    }};
+    static constexpr std::array<IniWrite, 1> dynamic{{{"Renderer", "frame_gen_target_rate", "120"}}};
+    static constexpr std::array<OptionChoice, 2> frame_gen{{
+        {0, "2x (recommended)", times_two},
+        {1, "Dynamic", dynamic},
+    }};
     constexpr std::array table{
-        SecondCoreOption{.key = "second_core_floor",
+        SecondCoreOption{.key = "second_core_dynfps_floor",
                          .kind = OptionKind::Choice,
                          .default_value = 10,
                          .target = OptionTarget::Env,
-                         .name = "EDEN_OOT_FLOOR",
+                         .name = "EDEN_OOT_DYNFPS_MIN_FPS",
                          .label = "Floor",
                          .text = "x",
-                         .choices = rates},
+                         .choices = floors},
         SecondCoreOption{.key = "second_core_count",
                          .kind = OptionKind::Number,
                          .default_value = 2,
@@ -915,34 +929,69 @@ TEST_CASE("Anka route: options of other kinds follow the same table", "[yuzu][an
                          .text = "x",
                          .min = 1,
                          .max = 4},
-        SecondCoreOption{.key = "second_core_box",
-                         .kind = OptionKind::Toggle,
-                         .default_value = 1,
-                         .target = OptionTarget::Ini,
-                         .name = "box",
-                         .section = "Renderer",
-                         .label = "Box",
-                         .text = "x"},
+        SecondCoreOption{.key = "second_core_frame_gen",
+                         .kind = OptionKind::Choice,
+                         .default_value = 0,
+                         .target = OptionTarget::IniWrites,
+                         .label = "Frame generation",
+                         .text = "x",
+                         .choices = frame_gen},
     };
     using Values = std::array<int, 3>;
-    REQUIRE(OptionDefaults(table) == Values{10, 2, 1});
+    REQUIRE(OptionDefaults(table) == Values{10, 2, 0});
     REQUIRE(ValidOption(table[0], 20) == 20);
     REQUIRE(ValidOption(table[0], 15) == 10);
     REQUIRE(ValidOption(table[1], 9) == 4);
     REQUIRE(ValidOption(table[1], -1) == 1);
+    REQUIRE(ValidOption(table[2], 5) == 0);
     REQUIRE(SecondCoreOptionOutputs(Values{20, 3, 0}, table) ==
-            std::vector<OptionOutput>{{OptionTarget::Env, "", "EDEN_OOT_FLOOR", "20"},
-                                      {OptionTarget::Ini, "Renderer", "count", "3"},
-                                      {OptionTarget::Ini, "Renderer", "box", "false"}});
-    REQUIRE(SecondCoreOptionEnv(Values{15, 9, 1}, table) == Env{{"EDEN_OOT_FLOOR", "10"}});
+            std::vector<OptionOutput>{
+                {OptionTarget::Env, "", "EDEN_OOT_DYNFPS_MIN_FPS", "20"},
+                {OptionTarget::Ini, "Renderer", "count", "3"},
+                {OptionTarget::Ini, "Renderer", "frame_gen_target_rate", "0"},
+                {OptionTarget::Ini, "Renderer", "frame_gen_multiplier", "2"}});
+    REQUIRE(SecondCoreOptionEnv(Values{15, 9, 1}, table) ==
+            Env{{"EDEN_OOT_DYNFPS_MIN_FPS", "10"}});
     // Saved and read back; a number without `\default=false` is its default (ReadIntegerSetting)
-    REQUIRE(SecondCoreOptionsFromMenu(MenuAnkaGroup(Values{20, 3, 0}, table), table) ==
-            Values{20, 3, 0});
-    REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_count=3\n", table) == Values{10, 2, 1});
+    REQUIRE(SecondCoreOptionsFromMenu(MenuAnkaGroup(Values{20, 3, 1}, table), table) ==
+            Values{20, 3, 1});
+    REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_count=3\n", table) == Values{10, 2, 0});
     REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_count\\default=false\n"
                                       "second_core_count=x\n",
-                                      table) == Values{10, 2, 1});
-    REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_floor\\default=false\n"
-                                      "second_core_floor=15\n",
-                                      table) == Values{10, 2, 1});
+                                      table) == Values{10, 2, 0});
+    REQUIRE(SecondCoreOptionsFromMenu("[Anka]\nsecond_core_dynfps_floor\\default=false\n"
+                                      "second_core_dynfps_floor=15\n",
+                                      table) == Values{10, 2, 0});
+    // The frame generation choice wins over the menu's frame_gen_* (QtConfig has 2x at 120), with
+    // `\default=false`, in [Renderer], each key once; frame_gen itself stays the menu's
+    const auto count_of = [](const std::string& ini, std::string_view key) {
+        std::size_t n = 0;
+        for (auto at = ini.find(key); at != std::string::npos; at = ini.find(key, at + 1)) {
+            ++n;
+        }
+        return n;
+    };
+    IniState state = State(true);
+    state.options = {10, 2, 0};
+    auto ini = MakeSecondCoreIni(QtConfig, state, table);
+    REQUIRE(Has(ini, "frame_gen_target_rate\\default=false"));
+    REQUIRE(Has(ini, "frame_gen_target_rate=0"));
+    REQUIRE(Has(ini, "frame_gen_multiplier\\default=false"));
+    REQUIRE(Has(ini, "frame_gen_multiplier=2"));
+    REQUIRE(count_of(ini, "frame_gen_target_rate") == 2);
+    REQUIRE(count_of(ini, "frame_gen_multiplier") == 2);
+    REQUIRE_FALSE(Has(ini, "frame_gen_target_rate=120"));
+    REQUIRE(Has(ini, "frame_gen=true"));
+    REQUIRE(Has(ini, "count=2"));
+    const auto section = ini.find("[Renderer]");
+    REQUIRE(ini.find("frame_gen_target_rate=0") > section);
+    REQUIRE(ini.find("\n[", section + 1) > ini.find("frame_gen_target_rate=0"));
+    REQUIRE(ini.find("EDEN_OOT") == std::string::npos);
+    // Dynamic writes only its own key: the multiplier stays the menu's
+    state.options = {10, 2, 1};
+    ini = MakeSecondCoreIni(QtConfig, state, table);
+    REQUIRE(Has(ini, "frame_gen_target_rate=120"));
+    REQUIRE(Has(ini, "frame_gen_target_rate\\default=false"));
+    REQUIRE(Has(ini, "frame_gen_multiplier=2"));
+    REQUIRE(count_of(ini, "frame_gen_target_rate") == 2);
 }
