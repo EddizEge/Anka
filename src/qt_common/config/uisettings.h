@@ -20,6 +20,7 @@
 #include "common/settings_enums.h"
 #include "core/nx2_perf_settings.h"
 #include "qt_common/config/qt_config.h"
+#include "yuzu_cmd/anka_core_route.h"
 
 using Settings::Category;
 using Settings::ConfirmStop;
@@ -234,6 +235,8 @@ struct Values {
 
     // Anka: the [Anka] group (core/nx2_perf_settings.h), global only.
     Core::Nx2PerfSettings::Switches nx2perf{};
+    // The tab's "Anka's second core" section, in the same group (AnkaCoreRoute::SecondCoreOptions)
+    AnkaCoreRoute::SecondCoreValues second_core = AnkaCoreRoute::SecondCoreDefaults();
 
     bool configuration_applied;
     bool reset_to_defaults;

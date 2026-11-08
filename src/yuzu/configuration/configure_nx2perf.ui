@@ -352,6 +352,22 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="second_core">
+     <layout class="QVBoxLayout" name="second_core_layout">
+      <item>
+       <widget class="QLabel" name="second_core_text">
+        <property name="textFormat">
+         <enum>Qt::TextFormat::RichText</enum>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <widget class="QLabel" name="status">
      <property name="text">
       <string/>

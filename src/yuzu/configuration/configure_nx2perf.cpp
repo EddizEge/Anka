@@ -9,9 +9,11 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPalette>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStandardItemModel>
 #include <QStringList>
 
@@ -47,6 +49,8 @@ ConfigureNx2Perf::ConfigureNx2Perf(QWidget* parent)
          &S::dk_pacing,
          {"EDEN_NX2_PRESENT_INTERVAL_WORD", "EDEN_NX2_MODE_PACE", "EDEN_NX2_PACE_SPIN_US"}},
     };
+    BuildSecondCoreOptions();
+    RetranslateSecondCoreOptions();
 
     SetConfiguration();
     MarkSetOutside();
@@ -93,6 +97,7 @@ void ConfigureNx2Perf::RetranslateUI() {
     // The notes go under the texts as they are now, the conflict's line included
     ShowDkDynConflict();
     ShowSecondCoreNotes();
+    RetranslateSecondCoreOptions();
 }
 
 void ConfigureNx2Perf::ShowDkDynConflict() {
@@ -109,6 +114,7 @@ void ConfigureNx2Perf::ShowDkDynConflict() {
 
 void ConfigureNx2Perf::SetConfiguration() {
     Show(UISettings::values.nx2perf);
+    ShowSecondCoreOptions(UISettings::values.second_core);
     ShowDkDynConflict();
     // A choice waiting for the game to stop (Later) is shown, not the running game's setting
     const auto waiting = Nx2PerfSession::Pending().frame_gen;
@@ -260,6 +266,7 @@ void ConfigureNx2Perf::ShowPending() {
 
 void ConfigureNx2Perf::ApplyConfiguration() {
     UISettings::values.nx2perf = Current();
+    UISettings::values.second_core = CurrentSecondCoreOptions();
     if (game_running) {
         Nx2PerfSession::AddPendingGraphics({.reactive_flushing = pending_reactive,
                                             .barrier_feedback_loops = pending_barrier,
@@ -324,4 +331,120 @@ std::string_view ConfigureNx2Perf::KeyName(bool Perf::Switches::*field) {
         }
     }
     return {};
+}
+
+void ConfigureNx2Perf::BuildSecondCoreOptions() {
+    // The rows of the sections above, from the table: a box with its text under it (indented as
+    // theirs), or a label and a number / choice on one line with the text under it (as Preset)
+    using AnkaCoreRoute::OptionKind;
+    for (const auto& option : AnkaCoreRoute::SecondCoreOptions) {
+        OptionRow row{};
+        switch (option.kind) {
+        case OptionKind::Toggle:
+            row.input = new QCheckBox(ui->second_core);
+            ui->second_core_layout->addWidget(row.input);
+            break;
+        case OptionKind::Number: {
+            auto* spin = new QSpinBox(ui->second_core);
+            spin->setRange(option.min, option.max);
+            row.input = spin;
+            break;
+        }
+        case OptionKind::Choice: {
+            auto* choice = new QComboBox(ui->second_core);
+            for (const auto& item : option.choices) {
+                choice->addItem(QString{}, item.value);
+            }
+            row.input = choice;
+            break;
+        }
+        }
+        if (option.kind != OptionKind::Toggle) {
+            row.label = new QLabel(ui->second_core);
+            row.label->setBuddy(row.input);
+            auto* line = new QHBoxLayout;
+            line->addWidget(row.label);
+            line->addWidget(row.input);
+            line->addStretch();
+            ui->second_core_layout->addLayout(line);
+        }
+        row.text = new QLabel(ui->second_core);
+        row.text->setWordWrap(true);
+        row.text->setBuddy(row.input);
+        if (option.kind == OptionKind::Toggle) {
+            row.text->setIndent(22);
+        }
+        ui->second_core_layout->addWidget(row.text);
+        option_rows.push_back(row);
+    }
+}
+
+void ConfigureNx2Perf::RetranslateSecondCoreOptions() {
+    namespace Text = AnkaCoreRoute::Text;
+    ui->second_core->setTitle(tr(Text::OptionsTitle));
+    // In the placeholder colour, as the "no effect" lines: where these apply, not a warning
+    ui->second_core_text->setText(
+        QStringLiteral("<span style=\"color:%1\">%2</span>")
+            .arg(palette().color(QPalette::PlaceholderText).name(),
+                 tr(Text::OptionsNote).toHtmlEscaped()));
+    for (std::size_t i = 0; i < option_rows.size(); ++i) {
+        const auto& option = AnkaCoreRoute::SecondCoreOptions[i];
+        const OptionRow& row = option_rows[i];
+        if (row.label) {
+            row.label->setText(tr(option.label));
+        } else {
+            static_cast<QCheckBox*>(row.input)->setText(tr(option.label));
+        }
+        if (option.kind == AnkaCoreRoute::OptionKind::Choice) {
+            auto* choice = static_cast<QComboBox*>(row.input);
+            for (std::size_t j = 0; j < option.choices.size(); ++j) {
+                choice->setItemText(static_cast<int>(j), tr(option.choices[j].label));
+            }
+        }
+        row.text->setText(tr(option.text));
+    }
+}
+
+void ConfigureNx2Perf::ShowSecondCoreOptions(const AnkaCoreRoute::SecondCoreValues& values) {
+    using AnkaCoreRoute::OptionKind;
+    for (std::size_t i = 0; i < option_rows.size(); ++i) {
+        const auto& option = AnkaCoreRoute::SecondCoreOptions[i];
+        const int value = AnkaCoreRoute::ValidOption(option, values[i]);
+        QWidget* input = option_rows[i].input;
+        switch (option.kind) {
+        case OptionKind::Toggle:
+            static_cast<QCheckBox*>(input)->setChecked(value != 0);
+            break;
+        case OptionKind::Number:
+            static_cast<QSpinBox*>(input)->setValue(value);
+            break;
+        case OptionKind::Choice: {
+            auto* choice = static_cast<QComboBox*>(input);
+            choice->setCurrentIndex(choice->findData(value));
+            break;
+        }
+        }
+    }
+}
+
+AnkaCoreRoute::SecondCoreValues ConfigureNx2Perf::CurrentSecondCoreOptions() const {
+    using AnkaCoreRoute::OptionKind;
+    AnkaCoreRoute::SecondCoreValues values = AnkaCoreRoute::SecondCoreDefaults();
+    for (std::size_t i = 0; i < option_rows.size(); ++i) {
+        const auto& option = AnkaCoreRoute::SecondCoreOptions[i];
+        const QWidget* input = option_rows[i].input;
+        switch (option.kind) {
+        case OptionKind::Toggle:
+            values[i] = static_cast<const QCheckBox*>(input)->isChecked() ? 1 : 0;
+            break;
+        case OptionKind::Number:
+            values[i] = static_cast<const QSpinBox*>(input)->value();
+            break;
+        case OptionKind::Choice:
+            values[i] = static_cast<const QComboBox*>(input)->currentData().toInt();
+            break;
+        }
+        values[i] = AnkaCoreRoute::ValidOption(option, values[i]);
+    }
+    return values;
 }

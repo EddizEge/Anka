@@ -353,13 +353,23 @@ void QtConfig::ReadMultiplayerValues() {
     EndGroup();
 }
 
-// Anka's settings (core/nx2_perf_settings.h): their own [Anka] group, which the 2.0.0 program
-// sharing this file leaves as it is.
+// Anka's settings (core/nx2_perf_settings.h) and the second core's own options
+// (yuzu_cmd/anka_core_route.h; anka-cli reads them from this file): their own [Anka] group, which
+// the 2.0.0 program sharing this file leaves as it is.
 void QtConfig::ReadNx2PerfValues() {
     BeginGroup("Anka");
     // No [Anka] preset yet: Anka's first start on this file.
     const bool first_start = ReadStringSetting("preset\\default").empty();
     UISettings::values.nx2perf = Core::Nx2PerfSettings::Load(
+        [this](std::string_view key, bool def) {
+            return ReadBooleanSetting(std::string{key}, std::make_optional(def));
+        },
+        [this](std::string_view key, int def) {
+            return static_cast<int>(
+                ReadIntegerSetting(std::string{key}, std::make_optional(static_cast<s64>(def))));
+        });
+    UISettings::values.second_core = AnkaCoreRoute::LoadSecondCoreOptions(
+        AnkaCoreRoute::SecondCoreOptions,
         [this](std::string_view key, bool def) {
             return ReadBooleanSetting(std::string{key}, std::make_optional(def));
         },
@@ -381,6 +391,14 @@ void QtConfig::SaveNx2PerfValues() {
     BeginGroup("Anka");
     Core::Nx2PerfSettings::Save(
         UISettings::values.nx2perf,
+        [this](std::string_view key, bool value, bool def) {
+            WriteBooleanSetting(std::string{key}, value, std::make_optional(def));
+        },
+        [this](std::string_view key, int value, int def) {
+            WriteIntegerSetting(std::string{key}, value, std::make_optional(def));
+        });
+    AnkaCoreRoute::SaveSecondCoreOptions(
+        AnkaCoreRoute::SecondCoreOptions, UISettings::values.second_core,
         [this](std::string_view key, bool value, bool def) {
             WriteBooleanSetting(std::string{key}, value, std::make_optional(def));
         },
