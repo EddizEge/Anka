@@ -150,14 +150,25 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 void UserDataMigrator::ShowMigrationCancelledMessage(QMainWindow* main_window) {
     // Deleting only the config folder brings the prompt back, but this first start has already
     // written to the data folder (log/eden_log.txt): the migration then refuses to replace a data
-    // folder that holds data (MigrationPlan::MayReplace), portable or not
-    QMessageBox::information(
-        main_window, QObject::tr("Migration"),
-        QObject::tr("You can bring this prompt back by moving everything in the data folder "
-                    "somewhere else:\n%1")
-            .arg(QString::fromStdString(
-                Common::FS::GetEdenPathString(Common::FS::EdenPath::EdenDir))),
-        QMessageBox::Ok);
+    // folder that holds data (MigrationPlan::MayReplace), portable or not. Both after closing Anka:
+    // its exit writes qt-config.ini again, and eden_log.txt can't move while it is open. With the
+    // config folder outside the data folder (Linux / macOS, not portable) it has to go as well.
+    using Common::FS::EdenPath;
+    const auto data = Common::FS::GetEdenPath(EdenPath::EdenDir);
+    const auto config = Common::FS::GetEdenPath(EdenPath::ConfigDir);
+    const QString data_text =
+        QString::fromStdString(Common::FS::GetEdenPathString(EdenPath::EdenDir));
+    const QString text =
+        MigrationPlan::IsInside(config, data)
+            ? QObject::tr("After closing Anka, you can bring this prompt back by moving "
+                          "everything in the data folder somewhere else:\n%1")
+                  .arg(data_text)
+            : QObject::tr("After closing Anka, you can bring this prompt back by deleting the "
+                          "config folder:\n%1\nand moving everything in the data folder somewhere "
+                          "else:\n%2")
+                  .arg(QString::fromStdString(Common::FS::GetEdenPathString(EdenPath::ConfigDir)),
+                       data_text);
+    QMessageBox::information(main_window, QObject::tr("Migration"), text, QMessageBox::Ok);
 }
 
 void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clear_shader_cache,

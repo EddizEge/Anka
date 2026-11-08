@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <system_error>
+#include <vector>
 
 // The data migration's decisions without Qt (yuzu/user_data_migration.cpp, migration_worker.cpp;
 // src/tests/yuzu/migration_plan.cpp).
@@ -99,6 +101,26 @@ inline Target Classify(const std::filesystem::path& dir) {
 /// Whether the migration may remove the data folder before it fills it.
 constexpr bool MayReplace(Target target) {
     return target == Target::Missing || target == Target::Empty || target == Target::FirstRunOnly;
+}
+
+/// Whether `inner` is `outer` or inside it, by their names (trailing separators and "." / ".."
+/// resolved, nothing on the disk). The config folder is inside the data folder on Windows; on
+/// Linux and macOS out of portable mode it is beside it (~/.config/eden, ~/.local/share/eden), and
+/// emptying the data folder leaves it: the prompt then needs both done.
+inline bool IsInside(const std::filesystem::path& inner, const std::filesystem::path& outer) {
+    const auto parts = [](const std::filesystem::path& path) {
+        std::vector<std::filesystem::path> out;
+        for (const auto& part : path.lexically_normal()) {
+            if (!part.empty()) {
+                out.push_back(part);
+            }
+        }
+        return out;
+    };
+    const auto in = parts(inner);
+    const auto out = parts(outer);
+    return !out.empty() && out.size() <= in.size() &&
+           std::equal(out.begin(), out.end(), in.begin());
 }
 
 } // namespace MigrationPlan

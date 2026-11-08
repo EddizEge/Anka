@@ -38,6 +38,23 @@ constexpr const char* ProfilesDat = "nand/system/save/8000000000000010/su/avator
 
 } // Anonymous namespace
 
+TEST_CASE("Migration: the config folder inside or beside the data folder", "[yuzu][migration]") {
+    // Windows, portable or not: config is a folder of the data folder
+    REQUIRE(IsInside(fs::path{"D:/Anka/user/config"}, fs::path{"D:/Anka/user"}));
+    REQUIRE(IsInside(fs::path{"D:/Anka/user/config/"}, fs::path{"D:/Anka/user/"}));
+    REQUIRE(IsInside(fs::path{"D:/Anka/user/./config"}, fs::path{"D:/Anka/x/../user"}));
+    REQUIRE(IsInside(fs::path{"D:/Anka/user"}, fs::path{"D:/Anka/user"}));
+    // Linux / macOS out of portable mode: beside it
+    REQUIRE_FALSE(
+        IsInside(fs::path{"/home/u/.config/eden"}, fs::path{"/home/u/.local/share/eden"}));
+    REQUIRE_FALSE(IsInside(fs::path{"/home/u/Library/Application Support/eden-config"},
+                           fs::path{"/home/u/Library/Application Support/eden"}));
+    // A longer name is not a folder of it, nor is the parent
+    REQUIRE_FALSE(IsInside(fs::path{"D:/Anka/user2/config"}, fs::path{"D:/Anka/user"}));
+    REQUIRE_FALSE(IsInside(fs::path{"D:/Anka"}, fs::path{"D:/Anka/user"}));
+    REQUIRE_FALSE(IsInside(fs::path{"D:/Anka/user/config"}, fs::path{}));
+}
+
 TEST_CASE("Migration: the radio buttons map to the strategies they name", "[yuzu][migration]") {
     // Anka #6: ids 1, 2, 3 made "Keep Old Data" a move and "Clear Old Data" a link
     REQUIRE(FromButton(0, false) == Strategy::Copy);
