@@ -241,6 +241,10 @@ void WriterDeleter::operator()(Writer* writer) const {
 
 WriterPtr StartFromEnvironment(std::function<s64()> system_time_us) {
     if (!Osd::Enabled(std::getenv("EDEN_NX2_OSD"))) {
+        // A process with the OSD on that was ended from outside (Task Manager, a watchdog) left
+        // its last text in our slot, and RTSS keeps showing it: numbers frozen over a game that
+        // runs without the OSD. Empty the slot (no RTSS or no slot of ours: nothing to do).
+        ClearSlot();
         return nullptr;
     }
     // The ends that skip SDL_AppQuit: exit() (e.g. a network error) and the console closing.

@@ -249,6 +249,33 @@ TEST_CASE("Nx2RtssOsd: release with the lock held: waits, or clears without it",
     REQUIRE(a.Slot(1).owner[0] == '\0');
 }
 
+TEST_CASE("Nx2RtssOsd: a slot left by a process ended from outside: emptied by a start without "
+          "the OSD",
+          "[common]") {
+    // The killed process wrote its text and never released it; RTSS's memory outlives it.
+    Memory m{0x00020015};
+    m.Own(1, "other");
+    std::strcpy(m.Slot(1).text, "theirs");
+    REQUIRE(Update(m.Bytes(), "Game 30 FPS | Display 60 FPS | Speed 100%") == Status::Written);
+    REQUIRE(Str(m.Slot(2).owner, 256) == "EdenNX2");
+    const u32 frame = m.Head().osd_frame;
+    // The next process starts with EDEN_NX2_OSD off: the switch says so, and it releases ours.
+    REQUIRE_FALSE(Enabled(nullptr));
+    REQUIRE_FALSE(Enabled("0"));
+    REQUIRE(Release(m.Bytes(), false) == Status::Released);
+    REQUIRE(AllZero(reinterpret_cast<const u8*>(&m.Slot(2)), FullEntry));
+    REQUIRE(m.Head().osd_frame == frame + 1);
+    REQUIRE(m.Head().busy == 0);
+    REQUIRE(Str(m.Slot(1).owner, 256) == "other");
+    REQUIRE(Str(m.Slot(1).text, 256) == "theirs");
+    // Nothing of ours (the usual start without the OSD): RTSS's memory is left as it was.
+    Memory clean{0x00020015};
+    clean.Own(1, "other");
+    const auto before = clean.words;
+    REQUIRE(Release(clean.Bytes(), false) == Status::Released);
+    REQUIRE(clean.words == before);
+}
+
 TEST_CASE("Nx2RtssOsd: RTSS restarted (memory laid out again): the slot taken again",
           "[common]") {
     Memory m{0x00020015};
