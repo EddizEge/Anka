@@ -4026,6 +4026,11 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     Settings::SetConfiguringGlobal(false);
     ConfigurePerGame dialog(this, title_id, file_name, vk_device_records, *QtCommon::system,
                             addons_only);
+    if (addons_only && SecondCoreRunning()) {
+        // Its game reads its add-on files: deleting or replacing one now could stop half-way
+        dialog.SetAddOnFilesInUse(tr(AnkaCoreRoute::Text::AddOnFilesInUse)
+                                      .arg(QString::fromUtf8(AnkaCoreRoute::Text::GameName)));
+    }
     dialog.LoadFromFile(v_file);
 
     const auto result = dialog.exec();

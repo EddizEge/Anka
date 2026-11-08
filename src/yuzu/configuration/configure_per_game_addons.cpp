@@ -140,6 +140,17 @@ void ConfigurePerGameAddons::SetTitleId(u64 id) {
     this->title_id = id;
 }
 
+void ConfigurePerGameAddons::SetFilesInUse(const QString& reason) {
+    // The game reads its mods' files while it runs, and Windows refuses to delete or replace a
+    // file it holds open: a removal there stopped half-way, leaving the mod in pieces
+    files_in_use = reason;
+    for (QAbstractButton* button : {static_cast<QAbstractButton*>(ui->folder),
+                                    static_cast<QAbstractButton*>(ui->zip)}) {
+        button->setEnabled(false);
+        button->setToolTip(reason);
+    }
+}
+
 void ConfigurePerGameAddons::InstallMods(const QStringList& mods) {
     QStringList failed;
     for (const auto& mod : mods) {
@@ -204,6 +215,9 @@ void ConfigurePerGameAddons::InstallModZip() {
 }
 
 void ConfigurePerGameAddons::AddonDeleteRequested(QList<QModelIndex> selected) {
+    if (!files_in_use.isEmpty()) {
+        return;
+    }
     QList<QModelIndex> filtered;
     for (const QModelIndex& index : selected) {
         if (!index.data(PATCH_LOCATION).toString().isEmpty())
@@ -284,6 +298,11 @@ void ConfigurePerGameAddons::showContextMenu(const QPoint& pos) {
     QAction* remove = menu.addAction(tr("&Delete"));
     connect(remove, &QAction::triggered, this,
             [this, selected]() { AddonDeleteRequested(selected); });
+    if (!files_in_use.isEmpty()) {
+        remove->setEnabled(false);
+        remove->setToolTip(files_in_use);
+        menu.setToolTipsVisible(true);
+    }
 
     if (selected.length() == 1) {
         auto loc = selected.at(0).data(PATCH_LOCATION).toString();

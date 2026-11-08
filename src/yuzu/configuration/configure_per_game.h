@@ -67,6 +67,10 @@ public:
 
     void LoadFromFile(FileSys::VirtualFile file_);
 
+    /// The game runs on Anka's second core: its add-on files can't be installed or deleted now
+    /// (ConfigurePerGameAddons::SetFilesInUse).
+    void SetAddOnFilesInUse(const QString& reason);
+
 private:
     void changeEvent(QEvent* event) override;
     void RetranslateUI();

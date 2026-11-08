@@ -121,6 +121,10 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
 
 ConfigurePerGame::~ConfigurePerGame() = default;
 
+void ConfigurePerGame::SetAddOnFilesInUse(const QString& reason) {
+    addons_tab->SetFilesInUse(reason);
+}
+
 void ConfigurePerGame::ApplyConfiguration() {
     if (addons_only) {
         addons_tab->ApplyConfiguration();

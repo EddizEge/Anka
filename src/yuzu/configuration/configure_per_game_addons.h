@@ -44,6 +44,10 @@ public:
 
     void SetTitleId(u64 id);
 
+    /// The game's add-on files are in use (it runs on Anka's second core): installing and deleting
+    /// are off, `reason` says why; the check boxes stay.
+    void SetFilesInUse(const QString& reason);
+
 public slots:
     void InstallMods(const QStringList& mods);
     void InstallModPath(const QString& path, const QString& fallbackName = {});
@@ -73,6 +77,8 @@ private:
 
     std::vector<QList<QStandardItem*>> list_items;
     std::vector<QStandardItem*> update_items;
+
+    QString files_in_use; ///< why the files can't change now; empty: they can
 
     Core::System& system;
 };

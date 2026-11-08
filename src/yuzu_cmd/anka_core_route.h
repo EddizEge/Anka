@@ -56,6 +56,9 @@ constexpr const char* StopRunningFirst = "Stop the running game before starting 
 /// choices reach the second core at its next start (MakeSecondCoreIni), not while it runs
 constexpr const char* PropertiesNote = "For this game only the add-on choices are used. Changes "
                                        "apply the next time the game starts.";
+/// The Properties window of its game while it runs: why installing and deleting add-ons are off
+constexpr const char* AddOnFilesInUse =
+    "%1 is running: its add-on files can't be changed until it closes.";
 /// %2: the second core's program, so the user sees which file of the package is missing
 constexpr const char* Missing =
     "%1 cannot start: %2 was not found. Extract the whole Anka package.";
