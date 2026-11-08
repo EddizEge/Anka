@@ -5,9 +5,9 @@ Anka 1.1.0 has two programs from this tree, built on Windows with Visual Studio 
 `yuzu-cmd`, SDL; the build names it `eden-cli.exe`) and the menu program (target `yuzu`, Qt; the
 build names it `eglantine.exe`). The release package names them `anka-cli.exe` and `anka.exe`.
 The package's second core, `core2\anka-core2-cli.exe`, is the program without menus of another
-tree (its own commit; `Anka-1.1.0-core2-source.zip`, whose `BUILDING_ANKA.md` and `cpmfile.json`
-apply to it), built the same way without LTO and without the PGO link (`-O2`), target `yuzu-cmd`
-only.
+tree (zortos293's Lichii nx2 branch with Anka's changes, its own commit;
+`Anka-1.1.0-core2-source.zip`, whose build files apply to it), target `yuzu-cmd` only; the
+compiler and options it was built with are in that zip.
 The general build
 documentation of Eden is in `docs/`; this file lists what the Anka release used.
 

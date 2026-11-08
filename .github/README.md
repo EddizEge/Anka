@@ -56,14 +56,12 @@ does this). The game starts in full screen: **quit with Alt+F4**.
 
 ### Anka's second core
 
-Since 1.1.0 the package has a second emulator core, `core2\anka-core2-cli.exe`, built from a
-second source tree. It is used for one game, The Legend of Zelda: Ocarina of Time (title id
+Since 1.1.0 the package has a second emulator core, `core2\anka-core2-cli.exe`, built from
+zortos293's Lichii (its nx2 branch, GPL-3.0) with Anka's changes. It is used for one game, The Legend of Zelda: Ocarina of Time (title id
 `0400486024DEC000`): `anka.exe` and `anka-cli.exe` recognize that game and start the second core
 for it, with the same `user` folder. The first time a game starts on Anka's second core after
-its shaders were cached, Anka rebuilds them for your graphics driver. The window title shows
-"preparing shaders 812/1938" meanwhile; this can take about a minute (also after a driver
-update), later starts take a few seconds. The window stays responsive, and closing it cancels
-the start. Its in-game frame rate is low. Details: "Anka's second core" in
+its shaders were cached, they are prepared again for your graphics driver; this can take a
+while (also after a driver update), and later starts are faster. Details: "Anka's second core" in
 [`README_ANKA.md`](../README_ANKA.md).
 
 ## Settings

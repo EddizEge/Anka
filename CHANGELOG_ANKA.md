@@ -11,8 +11,8 @@ and `=0` brings back the 2.0.0 code path.
 ### Anka's second core (new)
 
 - The package has a second emulator core: `core2\anka-core2-cli.exe`, a separate program built
-  from a second source tree (Anka's changes together with newer upstream Eglantine work, on the
-  same 2.0.0 base; its source is `Anka-1.1.0-core2-source.zip`). It is used for one game, The
+  from its own source tree (zortos293's Lichii (its nx2 branch, GPL-3.0) with Anka's changes; its source is
+  `Anka-1.1.0-core2-source.zip`). It is used for one game, The
   Legend of Zelda: Ocarina of Time (title id `0400486024DEC000`); every other game stays on the
   first core, as before.
 - `anka.exe` and `anka-cli.exe` recognize that game by its title id and start the second core
@@ -27,12 +27,8 @@ and `=0` brings back the 2.0.0 code path.
   thread split. It takes the OSD, timed frame generation and the add-on choices of the game's
   Properties; barrier feedback loops stay on under every preset.
 - Shaders on the first start: the first time a game starts on Anka's second core after its
-  shaders were cached, Anka rebuilds them for your graphics driver. The window title shows
-  "preparing shaders 812/1938" meanwhile; this can take about a minute (also after a driver
-  update), later starts take a few seconds. The window stays responsive, and closing it cancels
-  the start.
-- The second core was not measured the way the first core was (see "Known issues" in the README):
-  its in-game frame rate is low.
+  shaders were cached, they are prepared again for your graphics driver; this can take a while
+  (also after a driver update), and later starts are faster.
 
 ### The Anka tab and the menu for that game
 

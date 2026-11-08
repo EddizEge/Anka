@@ -124,8 +124,7 @@ Graphics > Advanced > GPU Mode to Accurate for that game (its Properties) or glo
 ### Anka's second core
 
 The package has a second emulator core in its `core2\` folder: `core2\anka-core2-cli.exe`, a
-separate program built from a second source tree (Anka's changes together with newer upstream
-Eglantine work, on the same 2.0.0 base). Anka 1.1.0 uses it for one game, The Legend of Zelda:
+separate program built from its own source tree: zortos293's Lichii (its nx2 branch, GPL-3.0) with Anka's changes. Anka 1.1.0 uses it for one game, The Legend of Zelda:
 Ocarina of Time (title id `0400486024DEC000`); every other game stays on the first core.
 
 You do not start it yourself: when you start that game, `anka.exe` (and `anka-cli.exe`, also
@@ -136,15 +135,14 @@ firmware, saves) and keeps its own settings file (`user\config\sdl2-config-core2
 time. Keep the `core2\` folder next to `anka.exe`: without it Anka says the game cannot start
 and names the missing program. Anka's messages name the game, not "the second core".
 
-The first time a game starts on Anka's second core after its shaders were cached, Anka rebuilds
-them for your graphics driver. The window title shows "preparing shaders 812/1938" meanwhile;
-this can take about a minute (also after a driver update), later starts take a few seconds. The
-window stays responsive, and closing it cancels the start.
+The first time a game starts on Anka's second core after its shaders were cached, they are
+prepared again for your graphics driver; this can take a while (also after a driver update), and
+later starts are faster.
 
 The Anka tab applies to the second core only in part: a setting it does not take says "No
 effect in The Legend of Zelda: Ocarina of Time". On the second core Reactive Flushing stays
 off, so both Recommended presets are the same there; Safe also turns off its GPU shortcuts and
-its GPU thread split. Its in-game frame rate is low (see "Known issues"). The game's own
+its GPU thread split. The game's own
 settings are in the Anka tab (below); its Properties window has only the Add-Ons tab, and
 those choices apply at its next start. While the game runs, the menu does not change its files
 (removing or installing its contents or add-ons, its cache storage, linking its save to
@@ -487,8 +485,8 @@ session, not a benchmark.
   `start-reactive-experimental.bat`) does not fully remove it.
 - **DLC:** add-on content inside a `.nup` is mounted; a `dlc` folder in an unpacked dump is not
   supported.
-- **The second core's in-game frame rate is low.** It was not measured like the first core; the
-  numbers in this README are all from the first core in Donkey Kong Bananza.
+- **The numbers in this README are all from the first core** in Donkey Kong Bananza; the second
+  core was measured separately (see the release notes).
 - **The menu program was not measured.** `anka.exe` runs the same emulator code with the same
   switches and the same PGO profile as `anka-cli.exe`, but every number here comes from the
   program without menus (then called `eden-cli`).
@@ -544,7 +542,8 @@ v3.0 or later** (`LICENSE.txt`). It is a modified version of PokeDinner-Eglantin
 was changed and when is in `NOTICE_ANKA.txt` (in the release zips) and `CHANGELOG_ANKA.md`. The
 source code of the program (the release commit) is at https://github.com/EddizEge/Anka and in
 `Anka-1.1.0-source.zip` (`SOURCE_ANKA.txt` in that zip names the repository); the second core
-(`core2\anka-core2-cli.exe`) is built from its own commit, whose complete source is
+(`core2\anka-core2-cli.exe`, a modified version of zortos293's Lichii, its nx2 branch) is built
+from its own commit, whose complete source is
 `Anka-1.1.0-core2-source.zip`. Its third-party notices are `core2\THIRD_PARTY_NOTICES_ANKA_CORE2.txt`;
 the sources of the libraries it builds from source in versions the first core does not use are in
 the `core2/` folder of `Anka-1.1.0-deps-source.zip`. Both come with
