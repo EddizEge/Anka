@@ -366,6 +366,9 @@ private slots:
     void StartSecondCore(const QString& game, bool restart_handoff);
     void OnSecondCoreExited(const QString& game);
     [[nodiscard]] bool SecondCoreRunning() const;
+    /// While the second core runs, an action on its game's files is refused with a message (true:
+    /// refused). Other games: false.
+    bool RefuseWhileSecondCoreRuns(u64 title_id);
     void OnLinkToRyujinx(const u64& program_id);
     void OnMenuLoadFile();
     void OnMenuLoadFolder();

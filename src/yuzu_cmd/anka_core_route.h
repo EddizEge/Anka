@@ -59,6 +59,10 @@ constexpr const char* PropertiesNote = "For this game only the add-on choices ar
 /// The Properties window of its game while it runs: why installing and deleting add-ons are off
 constexpr const char* AddOnFilesInUse =
     "%1 is running: its add-on files can't be changed until it closes.";
+/// The game list's removals for its game (installed contents, cache storage, the save link) and
+/// installing its contents to the NAND, refused while it runs: it holds those files open
+constexpr const char* GameFilesInUse =
+    "%1 is running: its files can't be changed until it closes.";
 /// That window's frame rate patch (SecondCoreKeptAddOns), which the second core keeps on
 constexpr const char* AlwaysOnAddOn = "Always on for this game";
 /// %2: the second core's program, so the user sees which file of the package is missing
@@ -105,6 +109,11 @@ constexpr std::uint64_t SecondCoreTitleId = SecondCoreProgramId;
 
 constexpr bool RunsOnSecondCore(std::uint64_t program_id) {
     return (program_id & ~std::uint64_t{0xFFF}) == SecondCoreProgramId;
+}
+
+/// Content of the second core's game: the game, its update or a DLC (base | 0x1000 + index).
+constexpr bool SecondCoreContent(std::uint64_t title_id) {
+    return (title_id & ~std::uint64_t{0x1FFF}) == SecondCoreProgramId;
 }
 
 /// The second core in the package: Names::QtProgram when the menu starts it and it is there, else

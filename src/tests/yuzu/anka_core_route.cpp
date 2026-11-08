@@ -134,6 +134,16 @@ TEST_CASE("Anka route: only its game goes to the second core", "[yuzu][anka_rout
     REQUIRE_FALSE(RunsOnSecondCore(0));
     REQUIRE_FALSE(RunsOnSecondCore(0x0400486024DED000ULL));
     REQUIRE(SecondCoreProgramId == 0x0400486024DEC000ULL);
+    // Its contents: the game, its update, its DLC; not another game's, nor a neighbour's DLC
+    REQUIRE(SecondCoreContent(0x0400486024DEC000ULL));
+    REQUIRE(SecondCoreContent(0x0400486024DEC800ULL));
+    REQUIRE(SecondCoreContent(0x0400486024DED001ULL));
+    REQUIRE(SecondCoreContent(0x0400486024DED0FFULL));
+    REQUIRE_FALSE(SecondCoreContent(Bananza));
+    REQUIRE_FALSE(SecondCoreContent(Bananza | 0x1001));
+    REQUIRE_FALSE(SecondCoreContent(0x0400486024DEE001ULL));
+    REQUIRE_FALSE(SecondCoreContent(0x0400486024DEA000ULL));
+    REQUIRE_FALSE(SecondCoreContent(0));
 }
 
 TEST_CASE("Anka route: the second core's names are the contract's", "[yuzu][anka_route]") {
@@ -197,7 +207,7 @@ TEST_CASE("Anka route: what the user reads names the game", "[yuzu][anka_route]"
         Named{Text::Crashed, 3},            Named{Text::NoEffectOnSecondCore, 1},
         Named{Text::PresetOnSecondCore, 1}, Named{Text::OptionsTitle, 1},
         Named{Text::PropertiesNote, 0},     Named{Text::AddOnFilesInUse, 1},
-        Named{Text::AlwaysOnAddOn, 0},
+        Named{Text::AlwaysOnAddOn, 0},      Named{Text::GameFilesInUse, 1},
     };
     std::vector<std::string_view> all;
     for (const auto& [text, args] : named) {

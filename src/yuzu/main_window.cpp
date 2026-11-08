@@ -2500,6 +2500,9 @@ static bool RomFSRawCopy(size_t total_size, size_t& read_size, QProgressDialog& 
 // translations_common? strings_common? qt_strings? who knows
 void MainWindow::OnGameListRemoveInstalledEntry(u64 program_id,
                                                 QtCommon::Game::InstalledEntryType type) {
+    if (RefuseWhileSecondCoreRuns(program_id)) {
+        return;
+    }
     const QString entry_question = [type] {
         switch (type) {
         case QtCommon::Game::InstalledEntryType::Game:
@@ -2540,6 +2543,12 @@ void MainWindow::OnGameListRemoveInstalledEntry(u64 program_id,
 
 void MainWindow::OnGameListRemoveFile(u64 program_id, QtCommon::Game::GameListRemoveTarget target,
                                       const std::string& game_path) {
+    // Its cache storage is in the NAND the second core shares; the shader caches and the custom
+    // configuration are the menu's own
+    if (target == QtCommon::Game::GameListRemoveTarget::CacheStorage &&
+        RefuseWhileSecondCoreRuns(program_id)) {
+        return;
+    }
     const QString question = [target] {
         switch (target) {
         case QtCommon::Game::GameListRemoveTarget::GlShaderCache:
@@ -2806,7 +2815,30 @@ void MainWindow::OnGameListOpenPerGameProperties(const std::string& file) {
 }
 
 bool MainWindow::SecondCoreRunning() const {
-    return second_core_process != nullptr;
+    if (second_core_process != nullptr) {
+        return true;
+    }
+#ifdef _WIN32
+    // Started by anka-cli or a shortcut: its single instance lock (AnkaCoreRoute::Names::Lock, a
+    // mutex) is there while it runs
+    const auto lock = AnkaCoreRoute::Names::Lock;
+    const std::wstring name = Common::UTF8ToUTF16W(std::string{lock});
+    if (HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str())) {
+        CloseHandle(mutex);
+        return true;
+    }
+#endif
+    return false;
+}
+
+bool MainWindow::RefuseWhileSecondCoreRuns(u64 title_id) {
+    if (!AnkaCoreRoute::SecondCoreContent(title_id) || !SecondCoreRunning()) {
+        return false;
+    }
+    QMessageBox::information(this, tr("Anka"),
+                             tr(AnkaCoreRoute::Text::GameFilesInUse)
+                                 .arg(QString::fromUtf8(AnkaCoreRoute::Text::GameName)));
+    return true;
 }
 
 void MainWindow::StartSecondCore(const QString& game, bool restart_handoff) {
@@ -3001,6 +3033,9 @@ void MainWindow::OnSecondCoreExited(const QString& game) {
 
 void MainWindow::OnLinkToRyujinx(const u64& program_id) {
     namespace fs = std::filesystem;
+    if (RefuseWhileSecondCoreRuns(program_id)) {
+        return;
+    }
 
     fs::path ryu_dir;
 
@@ -3114,6 +3149,22 @@ void MainWindow::OnMenuInstallToNAND() {
 
     if (files.isEmpty()) {
         return;
+    }
+
+    // Not the second core's game's contents while it runs (it reads them from the NAND); a file
+    // whose title can't be read counts as one of them then
+    if (SecondCoreRunning()) {
+        for (const QString& file : files) {
+            u64 title_id = AnkaCoreRoute::SecondCoreProgramId;
+            const auto loader = Loader::GetLoader(
+                *QtCommon::system, Core::GetGameFileFromPath(QtCommon::vfs, file.toStdString()));
+            if (loader != nullptr) {
+                loader->ReadProgramId(title_id);
+            }
+            if (RefuseWhileSecondCoreRuns(title_id)) {
+                return;
+            }
+        }
     }
 
     // Save folder location of the first selected file
