@@ -15,7 +15,7 @@ this tree is the upstream project's own.
 
 ## Downloads and setup
 
-Download **`Anka-1.1.0-win64.zip`** from the
+Download **`Anka-1.1.1-win64.zip`** from the
 [Releases page](https://github.com/EddizEge/Anka/releases) (`SHA256SUMS.txt` there lets you
 check it).
 
@@ -23,7 +23,7 @@ Anka runs on its own. You need Windows 10 or 11 (64-bit) and a GPU with a curren
 driver; the zip carries everything else the programs need (the Qt 6.8.3 DLLs and plugins, the
 Visual C++ runtime DLLs).
 
-1. Unzip `Anka-1.1.0-win64.zip` into a new folder (all of it, the `core2` folder too). Anka
+1. Unzip `Anka-1.1.1-win64.zip` into a new folder (all of it, the `core2` folder too). Anka
    also reads `.nup` game files (see the README).
 2. Run **`anka.exe`**.
 3. Install your own keys and firmware as with other Eden-based emulators (Anka provides none;
@@ -166,10 +166,10 @@ See [`BUILDING_ANKA.md`](../BUILDING_ANKA.md).
 
 Anka is licensed under the **GNU General Public License v3.0 or later**
 ([`LICENSE.txt`](../LICENSE.txt)), like Eden and Eglantine. Each release has the complete
-corresponding source next to the program: `Anka-1.1.0-source.zip` (this repository at the
-release commit, tag `anka-v1.1.0`), `Anka-1.1.0-core2-source.zip` (the second core, built from its
-own commit), `Anka-1.1.0-deps-source.zip` (the third-party libraries built from source) and
-`Anka-1.1.0-prebuilt-source.zip` (the sources and build scripts of the four
+corresponding source next to the program: `Anka-1.1.1-source.zip` (this repository at the
+release commit, tag `anka-v1.1.1`), `Anka-1.1.1-core2-source.zip` (the second core, built from its
+own commit), `Anka-1.1.1-deps-source.zip` (the third-party libraries built from source) and
+`Anka-1.1.1-prebuilt-source.zip` (the sources and build scripts of the four
 prebuilt libraries: FFmpeg, OpenSSL, SDL3, sirit). `anka.exe` links Qt 6.8.3 dynamically
 (LGPL-3.0; Qt Charts GPL-3.0); the program zip carries the Qt DLLs, which you may replace with
 your own build of Qt 6.8.3. Third-party notices
@@ -197,10 +197,10 @@ policy asks.
 
 ## Known issues
 
-- **Crash on NVIDIA drivers 617 and newer** when something breaks or explodes in the game
-  (`VK_ERROR_DEVICE_LOST`; issues #3, #7, #8, #10). 1.1.0 includes a likely fix; it is not yet
-  confirmed on newer drivers. Workaround: NVIDIA driver 610.88. If it still crashes, please
-  attach the log (below): 1.1.0 writes extra lines about the crash to it.
+- **Fixed in 1.1.1: crash on NVIDIA drivers 617 and newer** when something breaks or explodes
+  in the game (`VK_ERROR_DEVICE_LOST`; issues #3, #7, #8, #10, #12). The driver 610.88
+  workaround is no longer needed. If it still crashes, please attach the log (below) and name
+  your driver version.
 - **Grass and plants missing** (#1): the Recommended preset turns Reactive Flushing off; the
   Recommended + Reactive Flushing preset shows them, but is slower in some places.
 - **White / black bands on the island** (#4): open; Reactive Flushing does not fully remove them.

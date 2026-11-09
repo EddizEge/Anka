@@ -6,6 +6,19 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
+## Anka 1.1.1 (`anka-v1.1.1`)
+
+A fix release on top of 1.1.0. Anka's second core is unchanged from 1.1.0 (same commit).
+
+### Fixed
+
+- GPU crash (device lost) in Donkey Kong Bananza on NVIDIA when breaking terrain or objects
+  (lava with the golden explosive, mud, purple masks; GitHub issues #3, #7, #8, #10 and #12).
+  NVIDIA's shader compiler mishandles a max(x, -x) pattern the game's vertex shaders use; Anka
+  now folds it before the driver sees it. Fix from zortos293/Lichii (38230873a4 by vibecodekun,
+  da17ced530 by Meow; here 31016cdd91 and 69b43b9f03); Mvii7/Dozer pointed us to it. The
+  NVIDIA driver 610.88 workaround of 1.1.0 is no longer needed.
+
 ## Anka 1.1.0 (`anka-v1.1.0`)
 
 ### Anka's second core (new)
@@ -84,8 +97,8 @@ and `=0` brings back the 2.0.0 code path.
 - Shaders: the BRA.U / .DIV / .CONV branch modes are captured and lowered (98c230ca9b, based on
   work by vibecodekun and Zortos, Lichii #55); a draw skipped in the logs of GitHub #1 and #3.
 - Vulkan: the colour <-> depth-stencil copies in ReinterpretImage (the path NVIDIA GPUs take)
-  no longer make invalid copy commands (31a7923e3f, by cr1ckt). This is the likely cause of the
-  crash on newer NVIDIA drivers; it is not yet confirmed there (see "Known issues" in the README).
+  no longer make invalid copy commands (31a7923e3f, by cr1ckt). 1.1.0 named this the likely
+  cause of the crash on newer NVIDIA drivers; the cause was a shader pattern, fixed in 1.1.1.
 - Windows: when reserving the 14 GiB of memory a Switch 2 game needs fails because the system's
   free commit is only just enough, Anka grows the page file and tries again, up to five times,
   instead of closing with "Failed to allocate ... backing memory" (8397ceea4d, by Frysix
