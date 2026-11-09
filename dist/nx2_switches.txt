@@ -26,6 +26,9 @@
 #EDEN_NX2_INLINE_DEFER=0
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
+# JIT_AVX512=0: the CPU JIT leaves out its AVX-512 paths (AVX2 code instead); try it on a
+# CPU with AVX-512 (Zen 4/5, some Intel) that crashes or misbehaves in game code.
+#EDEN_NX2_JIT_AVX512=0
 
 # --- GPU thread shortcuts (on by default; =0 as before; added by Anka) ---
 # =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,

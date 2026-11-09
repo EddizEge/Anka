@@ -22,6 +22,7 @@
 #endif
 
 #include <array>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/assert.h"
@@ -76,7 +77,7 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
 }
 #endif
 
-static const HostFeature features = []() {
+static HostFeature DetectHostFeatures() {
     HostFeature f{};
 #ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
     using Cpu = Xbyak::util::Cpu;
@@ -86,13 +87,19 @@ static const HostFeature features = []() {
     if (cpu_info.has(Cpu::tSSE42)) f |= HostFeature::SSE42;
     if (cpu_info.has(Cpu::tAVX)) f |= HostFeature::AVX;
     if (cpu_info.has(Cpu::tAVX2)) f |= HostFeature::AVX2;
-    if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
-    if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
-    if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
-    if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
-    if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
-    if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
-    if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
+    // EDEN_NX2_JIT_AVX512=0 leaves the AVX-512 paths out and the JIT emits the AVX2 code instead
+    // (Selevet turned them off after Zen 4 crashes; one of them, VectorCountLeadingZeros16, was
+    // wrong). Read when the first JIT starts, after nx2_switches.txt.
+    const char* const avx512 = std::getenv("EDEN_NX2_JIT_AVX512");
+    if (avx512 == nullptr || avx512[0] != '0') {
+        if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
+        if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
+        if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
+        if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
+        if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
+        if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
+        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
+    }
     if (cpu_info.has(Cpu::tPCLMULQDQ)) f |= HostFeature::PCLMULQDQ;
     if (cpu_info.has(Cpu::tF16C)) f |= HostFeature::F16C;
     if (cpu_info.has(Cpu::tFMA)) f |= HostFeature::FMA;
@@ -122,8 +129,9 @@ static const HostFeature features = []() {
     }
     return f;
 #endif
-}();
+}
 HostFeature GetHostFeatures() {
+    static const HostFeature features = DetectHostFeatures();
     return features;
 }
 
