@@ -89,6 +89,13 @@ inline int Nx2SsboFast() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
 }
+/// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
+/// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
+/// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full).
+inline int Nx2SsboCapDiag() {
+    static std::atomic<s8> mode{-1};
+    return ReadNx2Mode(mode, "EDEN_NX2_SSBO_CAP_DIAG");
+}
 /// EDEN_NX2_GPU_WRITTEN_FILTER: the GPU-written ranges and the download range sets answer queries
 /// far from their ranges from a summary instead of their trees (SummarizedRangeSet: hull, and for
 /// gpu_modified_ranges a 4 KiB page bitmap). =0 as before; =2 also asks the trees and counts any

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -3107,6 +3108,36 @@ Binding BufferCache<P>::MemoStorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_in
     return binding;
 }
 
+/// EDEN_NX2_SSBO_CAP_DIAG: one storage binding sized from its memory layout (`layout` bytes).
+inline void Nx2NoteSsboCap(u64 layout) {
+    static std::atomic<u64> bindings{}, cut{}, largest{}, total_cut{};
+    static std::atomic<s64> last_ns{0};
+    bindings.fetch_add(1, std::memory_order_relaxed);
+    if (layout > 8_MiB) {
+        cut.fetch_add(1, std::memory_order_relaxed);
+        u64 seen = largest.load(std::memory_order_relaxed);
+        while (layout > seen && !largest.compare_exchange_weak(seen, layout)) {
+        }
+    }
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    s64 last = last_ns.load(std::memory_order_relaxed);
+    if (last == 0) {
+        last_ns.compare_exchange_strong(last, now);
+        return;
+    }
+    if (now - last < 10'000'000'000LL || !last_ns.compare_exchange_strong(last, now)) {
+        return;
+    }
+    const u64 n = bindings.exchange(0), c = cut.exchange(0), big = largest.exchange(0);
+    const u64 all = total_cut.fetch_add(c) + c;
+    LOG_INFO(HW_GPU,
+             "nx2 SSBO cap [10s]: {} bindings sized from the layout, {} cut to 8 MiB (largest "
+             "layout {:#x} = {} MiB), {} cut in all",
+             n, c, big, big >> 20, all);
+}
+
 template <class P>
 Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword, u32 cbuf_index,
                                                bool is_written) const {
@@ -3147,6 +3178,9 @@ Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword
                                         packed_size <= memory_layout_size;
         if (next_qword_is_size) {
             return packed_size;
+        }
+        if (Nx2SsboCapDiag() != 0) [[unlikely]] {
+            Nx2NoteSsboCap(layout_size());
         }
         return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
     }();

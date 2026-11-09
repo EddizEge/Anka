@@ -36,6 +36,9 @@
 # lowering's high registers are rejected (logged with their own reason) instead of reading the
 # uniform mirror there. Diagnosis for white halos (NaN + bloom); off by default.
 #EDEN_NX2_SHADOW_DATA_REGS=1
+# SSBO_CAP_DIAG=1: every 10 s, how many storage buffer bindings were cut to 8 MiB and the largest
+# memory layout asked for (diagnosis only).
+#EDEN_NX2_SSBO_CAP_DIAG=1
 
 # --- GPU thread shortcuts (on by default; =0 as before; added by Anka) ---
 # =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,
