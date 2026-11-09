@@ -3171,7 +3171,8 @@ Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword
         return looked_up;
     };
     const auto size = [&]() {
-        const u32 memory_layout_size = static_cast<u32>(layout_size());
+        const u64 layout_bytes = layout_size();
+        const u32 memory_layout_size = static_cast<u32>(layout_bytes);
         const u32 packed_size = static_cast<u32>(next_qword);
         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
                                         packed_size != 0 &&
@@ -3179,8 +3180,8 @@ Binding BufferCache<P>::StorageBufferBindingAt(GPUVAddr gpu_addr, u64 next_qword
         if (next_qword_is_size) {
             return packed_size;
         }
-        if (Nx2SsboCapDiag() != 0) [[unlikely]] {
-            Nx2NoteSsboCap(layout_size());
+        if (Nx2SsboCapDiag()) [[unlikely]] {
+            Nx2NoteSsboCap(layout_bytes);
         }
         return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
     }();

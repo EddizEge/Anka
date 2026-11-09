@@ -92,9 +92,13 @@ inline int Nx2SsboFast() {
 /// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
 /// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
 /// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full).
-inline int Nx2SsboCapDiag() {
-    static std::atomic<s8> mode{-1};
-    return ReadNx2Mode(mode, "EDEN_NX2_SSBO_CAP_DIAG");
+inline bool Nx2SsboCapDiag() {
+    // Off unless set to 1 (ReadNx2Mode reads an unset switch as on).
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_SSBO_CAP_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
 }
 /// EDEN_NX2_GPU_WRITTEN_FILTER: the GPU-written ranges and the download range sets answer queries
 /// far from their ranges from a summary instead of their trees (SummarizedRangeSet: hull, and for
