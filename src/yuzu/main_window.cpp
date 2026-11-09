@@ -494,6 +494,18 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
     }
     update_input_timer.setInterval(input_update_timeout);
+    input_update_ms = input_update_timeout;
+    // EDEN_NX2_QT_GAME_INPUT_MS=<1-16>: the pump's interval only while a game runs (4: yuzu_cmd's
+    // 240 Hz). Anka 1.1.1's menu program woke its GUI thread ~1300 times a second for the 1 ms pump,
+    // and Qt's multimedia timer thread ~1150 more (anka-cli: ~100); the menus keep the 1 ms.
+    if (const char* text = std::getenv("EDEN_NX2_QT_GAME_INPUT_MS")) {
+        const int ms = std::atoi(text);
+        if (ms >= 1 && ms <= 16) {
+            game_input_update_ms = ms;
+            LOG_INFO(Frontend, "Input pumped every {} ms while a game runs (EDEN_NX2_QT_GAME_INPUT_MS)",
+                     ms);
+        }
+    }
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
     update_input_timer.start();
 
@@ -2081,6 +2093,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         game_list_placeholder->hide();
     }
     status_bar_update_timer.start(500);
+    if (game_input_update_ms != 0) {
+        update_input_timer.setInterval(game_input_update_ms);
+    }
     renderer_status_button->setDisabled(true);
     refresh_button->setDisabled(true);
     SetFPSSuffix();
@@ -2271,6 +2286,7 @@ void MainWindow::OnEmulationStopped() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
+    update_input_timer.setInterval(input_update_ms);
     shader_building_label->setVisible(false);
     res_scale_label->setVisible(false);
     emu_speed_label->setVisible(false);
