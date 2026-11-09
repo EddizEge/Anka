@@ -285,7 +285,8 @@ without a launcher; the menu program sets the recommended ones from its Anka tab
 | `PRESENT_INTERVAL_WORD=12:16:4` | off | presents follow the game's own frame interval (Bananza) |
 | `MODE_PACE=2`, `PACE_SPIN_US=1500` | off | steers Bananza's 60/30/20 fps mode by frame timing |
 | `DK_DYN=1` | off | Bananza dynamic frame rate patch, in memory (below) |
-| `DK_DYN_MIN_FPS=<n>` | 40 | the patch's lower limit (30 measured worse) |
+| `DK_DYN_MIN_FPS=<40-60>` | 40 | the patch's lower limit; below 40 refused (warning in the log), `DK_DYN_MIN_FPS_LOW=1` for tests (30 measured worse) |
+| `DK_DYN_MOD_GUARD=<auto/all/name/0>` | auto | which exefs mods / cheats turn the patch off (below) |
 | `FG_TIMED=1` | off | FSR3 generated frames blended for the time they are shown |
 | `OSD=1` | off | game FPS, display FPS (with frame generation's multiplier) and speed in RTSS |
 | `LIGHT_DRAW`, `LIGHT_UNIFORM`, `UBO_*`, `SYNC_*`, `VERTEX_*`, `RESET_*`, ... (about 60) | **on** | per-draw shortcuts on the GPU thread; `=0` is the 2.0.0 code path, many accept `=2` to check themselves and log |
@@ -303,8 +304,23 @@ may run at any rate from 40 to 60 fps instead of dropping to 30, with its clock 
 real frame time (the game's speed stays right down to 24 fps). It is a port of the
 `dk_dynamic_fps` patch of the ZendNevs fork (v2.0.5). Nothing is written to disk, no game file is
 changed, and with the switch unset no module is touched. It only applies to Bananza (title
-040074A01BF12000) and only if the expected instructions are found. `DK_DYN_MIN_FPS=<1-60>`
-moves the 40 fps limit.
+040074A01BF12000) and only if the expected instructions are found. `DK_DYN_MIN_FPS=<40-60>`
+raises the 40 fps limit; a value below 40 is refused (warning in the log): the game's free rates
+stop at 40, so it only held the game longer in slow frames. `DK_DYN_MIN_FPS_LOW=1` lets 1-39 in,
+for tests.
+
+**Mods and cheats.** A "60 FPS" mod or cheat together with the patch runs the game too fast
+(twice as fast above 30 fps in a user's report). So, unset (`DK_DYN_MOD_GUARD=auto`), the patch
+stays off for that boot when an enabled exefs mod (IPS / pchtxt) changes the frame rate code it
+patches, when a mod's folder or file name reads like a frame rate mod (the words fps, vsync, hz,
+framerate / frame rate, frame pacing, or 60 alone: "60 FPS", "Unlock 60fps", "60.pchtxt"; not
+"2160p" or "Framebuffer"), or when an enabled cheat is named like one. Other mods (resolution,
+FXAA, camera) keep it; the log names them. When it stays off, the log says why, the Anka tab names
+the mod or cheat and, with `OSD=1`, the OSD shows a line for 30 s: turn that mod off in Add-Ons
+(Properties) to get dynamic FPS back. A frame rate mod with a neutral folder name and a build id
+file name is not caught: turn it off yourself. `DK_DYN_MOD_GUARD=all`: any exefs mod changing
+the game's code turns it off; `name`: the names only; `0`: Anka 1.1.1's rule (the frame rate code
+only). Only names are read, never what a mod changes.
 
 It is off by default in anka-cli; `start-recommended.bat` turns it on (`DK_DYN=1` at its top),
 and so does the menu program's Anka tab (Dynamic frame rate, on in the Recommended presets,

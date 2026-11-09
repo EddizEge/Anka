@@ -69,6 +69,20 @@ struct NsoModChange {
                                                                    std::span<const u8> after,
                                                                    size_t skip);
 
+/// The exefs patch files (.ips named by the build id, .pchtxt with it in its @nsobid) for
+/// `build_id` (hex, trailing zeros cut) in the mod folders `patch_dirs`, skipping the folders in
+/// `disabled`, in the folders' order (PatchManager::CollectPatches).
+[[nodiscard]] std::vector<VirtualFile> CollectNsoPatches(const std::vector<VirtualDir>& patch_dirs,
+                                                         const std::string& build_id,
+                                                         const std::vector<std::string>& disabled);
+
+/// `nso` (its header included) with `patches` applied in order; with `mod_changes`, what each
+/// one changed past the header, its mod being the patch file's folder's parent
+/// (<mod>/exefs/<file>). PatchManager::PatchNSO's loop.
+[[nodiscard]] std::vector<u8> ApplyNsoPatches(const std::vector<u8>& nso,
+                                              const std::vector<VirtualFile>& patches,
+                                              std::vector<NsoModChange>* mod_changes);
+
 // A centralized class to manage patches to games.
 class PatchManager {
 public:

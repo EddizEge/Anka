@@ -18,6 +18,7 @@
 #include "common/logging.h"
 #include "common/nx2_rtss_osd.h"
 #include "common/thread.h"
+#include "core/core.h"
 #include "core/hle/service/nx2_osd_speed.h"
 #include "core/perf_stats.h"
 
@@ -42,6 +43,7 @@ using namespace std::chrono_literals;
 constexpr auto Period = 500ms; // a new text every ~0.5 s
 constexpr auto Retry = 2s;     // RTSS missing or its memory unusable
 constexpr size_t Window = 3;   // samples kept: the rates span the last ~1 s
+constexpr auto ConflictShown = 30s; // the DK_DYN conflict line
 
 struct Access {
     Osd::Status status;
@@ -162,6 +164,7 @@ private:
         bool connected = false;
         bool missing_logged = false;
         std::optional<Osd::Status> problem; // the last one logged
+        std::optional<Clock::time_point> conflict_since; // DK_DYN conflict first seen
         while (!stop.stop_requested()) {
             {
                 std::unique_lock lock{mutex};
@@ -179,7 +182,19 @@ private:
             if (count < 2 || now < next_try) {
                 continue;
             }
-            const std::string text = Osd::Format(Osd::Compute(samples[0], samples[count - 1]));
+            std::string text = Osd::Format(Osd::Compute(samples[0], samples[count - 1]));
+            // EDEN_NX2_DK_DYN turned off by a mod or cheat (nso.cpp): a second line for its first
+            // 30 s, so a player without the log sees why the frame rate stays at 30.
+            if (std::string mod = Core::Nx2DkDynConflict(); !mod.empty()) {
+                if (!conflict_since) {
+                    conflict_since = now;
+                }
+                if (now - *conflict_since < ConflictShown) {
+                    text += "\nDynamic FPS off: " + mod.substr(0, 48) + " (Add-Ons)";
+                }
+            } else {
+                conflict_since.reset();
+            }
             std::optional<Access> access;
             {
                 std::scoped_lock lock{g_slot_mutex};

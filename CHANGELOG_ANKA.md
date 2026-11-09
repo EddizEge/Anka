@@ -6,6 +6,16 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
+## Anka 1.1.2 (not released yet)
+
+- Dynamic frame rate (DK-DYN): `DK_DYN_MIN_FPS` below 40 is refused with a warning (the game's
+  free rates stop at 40; 30 measured 4-5% slower); `DK_DYN_MIN_FPS_LOW=1` lets 1-39 in for tests.
+  The range is now `<40-60>`.
+- DK-DYN and mods: `DK_DYN_MOD_GUARD` (unset = `auto`). Besides a mod in the frame rate code
+  (Anka 1.1.1), a mod named like a frame rate mod and an enabled cheat named like one turn the
+  patch off for that boot; resolution and graphics mods keep it. The log, the Anka tab and the
+  OSD (30 s) say so. `all`, `name` and `0` (1.1.1's rule) for other choices.
+
 ## Anka 1.0.1 (`anka-v1.0.1`)
 
 - Reads **`.nup`** files (NUP, the "Unencrypted (Archival) Package" of the Eglantine nx2 project):
@@ -192,7 +202,8 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   main module loads, its frame rate controller is patched in memory to run anywhere from 40 to
   60 fps with the clock stepped by the real frame time. vi2 then reports VRR support and paces
   presents to every vblank (`PACE_ONE`). The check words are read inside the text segment only.
-- `DK_DYN_MIN_FPS=<1-60>` moves the controller's 40 fps limit.
+- `DK_DYN_MIN_FPS=<1-60>` moves the controller's 40 fps limit (since 1.1.2 `<40-60>`, below 40
+  only with `DK_DYN_MIN_FPS_LOW=1`).
 
 ### Frame generation
 

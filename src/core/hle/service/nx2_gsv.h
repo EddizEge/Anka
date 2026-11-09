@@ -1832,8 +1832,11 @@ private:
                 interval_words += fmt::format(" other:{}", d.interval_word_other);
             }
             if (m_dk_dyn_applied) {
-                interval_words += fmt::format(", free target min {} (below 40: {})",
-                                              d.free_target_min, d.free_below_40);
+                // "-": no free target this second (only whole intervals)
+                interval_words += fmt::format(
+                    ", free target min {} (below 40: {})",
+                    d.free_target_min == 0 ? std::string{"-"} : std::to_string(d.free_target_min),
+                    d.free_below_40);
             }
             d.free_target_min = 0;
             d.free_below_40 = 0;

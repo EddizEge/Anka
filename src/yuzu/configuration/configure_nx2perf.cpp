@@ -114,10 +114,21 @@ void ConfigureNx2Perf::ShowDkDynConflict() {
     if (mod.empty()) {
         return;
     }
+    // nso.cpp: a mod's folder, or `cheat "<name>"` for a cheat
+    constexpr std::string_view CheatPrefix = "cheat \"";
+    if (mod.starts_with(CheatPrefix) && mod.size() > CheatPrefix.size()) {
+        ui->dk_dyn_text->setText(
+            ui->dk_dyn_text->text() + QStringLiteral("\n") +
+            tr("Off in the running game: the cheat \"%1\" reads like a frame rate cheat; both at "
+               "once run the game too fast. Turn the cheat off in Add-Ons (Properties) to use it.")
+                .arg(QString::fromStdString(
+                    mod.substr(CheatPrefix.size(), mod.size() - CheatPrefix.size() - 1))));
+        return;
+    }
     ui->dk_dyn_text->setText(
         ui->dk_dyn_text->text() + QStringLiteral("\n") +
-        tr("Off in the running game: the mod \"%1\" changes the game's code and may change its "
-           "frame rate too; both at once run the game too fast. Turn the mod off in Add-Ons "
+        tr("Off in the running game: the mod \"%1\" changes the frame rate code or is named like "
+           "a frame rate mod; both at once run the game too fast. Turn the mod off in Add-Ons "
            "(Properties) to use it.")
             .arg(QString::fromStdString(mod)));
 }

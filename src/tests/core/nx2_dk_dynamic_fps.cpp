@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <span>
+#include <string>
 #include <utility>
 #include <string_view>
 #include <vector>
@@ -11,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/nx2_dk_dynamic_fps.h"
 
 namespace {
@@ -562,41 +566,260 @@ TEST_CASE("PatchManager: ChangedRanges, the bytes a mod changed", "[core]") {
 }
 
 TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MOD_GUARD's value", "[core]") {
-    REQUIRE(ParseModGuard(nullptr) == ModGuard::All);
-    REQUIRE(ParseModGuard("") == ModGuard::All);
-    REQUIRE(ParseModGuard("1") == ModGuard::All);
-    REQUIRE(ParseModGuard("all") == ModGuard::All);
-    REQUIRE(ParseModGuard("0") == ModGuard::Zones);
-    REQUIRE(ParseModGuard("00") == ModGuard::All);
-    REQUIRE(ParseModGuard("name") == ModGuard::Names);
-    REQUIRE(ParseModGuard("names") == ModGuard::Names);
-    REQUIRE(ParseModGuard("Name") == ModGuard::All);
+    const auto is = [](const char* value, ModGuard guard, bool refused) {
+        const auto choice = ParseModGuard(value);
+        return choice.guard == guard && choice.refused == refused;
+    };
+    // Unset, empty, auto: Auto without a warning
+    REQUIRE(is(nullptr, ModGuard::Auto, false));
+    REQUIRE(is("", ModGuard::Auto, false));
+    REQUIRE(is("auto", ModGuard::Auto, false));
+    REQUIRE(is(" AUTO ", ModGuard::Auto, false));
+    REQUIRE(is("all", ModGuard::All, false));
+    REQUIRE(is("1", ModGuard::All, false));
+    REQUIRE(is("All", ModGuard::All, false));
+    REQUIRE(is("name", ModGuard::Names, false));
+    REQUIRE(is("Name", ModGuard::Names, false));
+    REQUIRE(is("names", ModGuard::Names, false));
+    REQUIRE(is("0", ModGuard::Zones, false));
+    REQUIRE(is("0 ", ModGuard::Zones, false));
+    // Anything else: Auto, with the warning
+    REQUIRE(is("off", ModGuard::Auto, true));
+    REQUIRE(is("00", ModGuard::Auto, true));
+    REQUIRE(is("2", ModGuard::Auto, true));
+    REQUIRE(ModGuardName(ModGuard::Auto) == "auto");
+    REQUIRE(ModGuardName(ModGuard::All) == "all");
+    REQUIRE(ModGuardName(ModGuard::Names) == "name");
+    REQUIRE(ModGuardName(ModGuard::Zones) == "0");
 }
 
 TEST_CASE("Nx2DkDynamicFps: names that read like a frame rate mod", "[core]") {
     REQUIRE(FpsLikeName("60 FPS"));
-    REQUIRE(FpsLikeName("Framerate Unlock"));
+    REQUIRE(FpsLikeName("Unlock 60fps"));
+    REQUIRE(FpsLikeName("60.pchtxt"));
     REQUIRE(FpsLikeName("dkb_60hz.pchtxt"));
+    REQUIRE(FpsLikeName("120Hz"));
+    REQUIRE(FpsLikeName("Framerate Unlock"));
+    REQUIRE(FpsLikeName("Frame Rate Unlock"));
+    REQUIRE(FpsLikeName("frame-rate"));
+    REQUIRE(FpsLikeName("FrameRateUnlock"));
+    REQUIRE(FpsLikeName("Frame Pacing Fix"));
     REQUIRE(FpsLikeName("No VSync"));
+    REQUIRE(FpsLikeName("v-sync off"));
     REQUIRE(FpsLikeName("DynamicFPS"));
+    REQUIRE(FpsLikeName("FPSUnlock"));
+    REQUIRE(FpsLikeName("fps_unlock.pchtxt"));
+    // Resolution and graphics mods
+    REQUIRE_FALSE(FpsLikeName("Bananza 4K (2160p)"));
+    REQUIRE_FALSE(FpsLikeName("1600p"));
+    REQUIRE_FALSE(FpsLikeName("960p"));
+    REQUIRE_FALSE(FpsLikeName("1360x768"));
+    REQUIRE_FALSE(FpsLikeName("Framebuffer Fix"));
+    REQUIRE_FALSE(FpsLikeName("Smooth Gameplay"));
     REQUIRE_FALSE(FpsLikeName("4K Resolution"));
-    REQUIRE_FALSE(FpsLikeName("0123456789ABCDEF.ips"));
+    REQUIRE_FALSE(FpsLikeName("Hzone"));
     REQUIRE_FALSE(FpsLikeName(""));
+    REQUIRE(NameWords("Bananza 4K (2160p)") ==
+            std::vector<std::string>{"bananza", "4", "k", "2160", "p"});
+    REQUIRE(NameWords("FPSUnlock") == std::vector<std::string>{"fps", "unlock"});
 }
 
-TEST_CASE("Nx2DkDynamicFps: a mod outside the frame rate code, per guard", "[core]") {
-    // Anka 1.1.1's rule: only the zones count
-    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Zones, "60 FPS", "main.pchtxt"));
-    // The default: any mod changing main
-    REQUIRE(BlocksOutsideZones(ModGuard::All, "4K Resolution", "0123.ips"));
-    // name: the folder or the file
-    REQUIRE(BlocksOutsideZones(ModGuard::Names, "60 FPS", "0123.ips"));
-    REQUIRE(BlocksOutsideZones(ModGuard::Names, "Bananza tweaks", "fps_unlock.pchtxt"));
-    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Names, "4K Resolution", "0123.ips"));
-    // A build id file name is not read: "60" turns up in hex
-    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Names, "4K Resolution", "A1B60C.pchtxt"));
-    REQUIRE(BuildIdName("A1B60C.pchtxt"));
-    REQUIRE_FALSE(BuildIdName("fps60.pchtxt"));
+TEST_CASE("Nx2DkDynamicFps: build id file names", "[core]") {
+    REQUIRE(BuildIdName("0123456789ABCDEF.ips"));
+    REQUIRE(BuildIdName("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.ips"));
+    // Too short or too long: a name
+    REQUIRE_FALSE(BuildIdName("60.pchtxt"));
+    REQUIRE_FALSE(BuildIdName("fade.ips"));
+    REQUIRE_FALSE(BuildIdName("A1B60C.pchtxt"));
+    REQUIRE_FALSE(BuildIdName(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0.ips"));
+    REQUIRE_FALSE(BuildIdName("fps60fps60fps60f.pchtxt"));
+    // "60" in a build id is not read; a short hex-looking name is
+    REQUIRE_FALSE(FpsLikeMod("Smooth Gameplay", "0123456789AB60EF.ips"));
+    REQUIRE(FpsLikeMod("Smooth Gameplay", "60.pchtxt"));
+    REQUIRE(FpsLikeMod("60 FPS", "0123456789AB60EF.ips"));
+}
+
+namespace {
+// Zones of a text with the controller, the sleep and the step (Text::PutAll), at module offset
+// TextLocation: a mod at the controller is "in the zones", one at word 0x40 outside them.
+struct DecideFixture {
+    static constexpr size_t TextLocation = 0x100;
+    std::vector<Zone> zones;
+    using Ranges = std::vector<std::pair<size_t, size_t>>;
+    Ranges in_zone{{TextLocation + (Controller + LowTargetOffset) * 4,
+                    TextLocation + (Controller + LowTargetOffset) * 4 + 4}};
+    Ranges outside{{TextLocation + 0x40 * 4, TextLocation + 0x40 * 4 + 4}};
+
+    DecideFixture() {
+        Text text;
+        text.PutAll();
+        zones = FpsZones(text.Bytes(), TextSize);
+    }
+
+    Decision Run(ModGuard guard, std::vector<ModChange> mods,
+                 std::vector<std::string_view> cheats = {}) const {
+        return Decide(guard, zones, TextLocation, mods, cheats);
+    }
+};
+
+using Why = Blocker::Why;
+} // Anonymous namespace
+
+TEST_CASE("Nx2DkDynamicFps: Decide, a mod per guard", "[core]") {
+    const DecideFixture f;
+    const ModChange resolution{"Bananza 4K (2160p)", "IPSwitch", "res.pchtxt", f.outside};
+    const ModChange fps_named{"Unlock 60fps", "IPS", "0123456789ABCDEF.ips", f.outside};
+    const ModChange fps_file{"Bananza tweaks", "IPSwitch", "60fps.pchtxt", f.outside};
+    const ModChange neutral_in_zone{"Smooth Gameplay", "IPS", "0123456789ABCDEF.ips", f.in_zone};
+
+    // auto (the default): zones and names; a resolution mod keeps the patch, named in the log
+    {
+        const auto d = f.Run(ModGuard::Auto, {resolution});
+        REQUIRE_FALSE(d.Blocked());
+        REQUIRE(d.elsewhere == std::vector<std::string>{"\"Bananza 4K (2160p)\" (IPSwitch)"});
+    }
+    REQUIRE(f.Run(ModGuard::Auto, {fps_named}).blockers.at(0).why == Why::Name);
+    REQUIRE(f.Run(ModGuard::Auto, {fps_file}).blockers.at(0).why == Why::Name);
+    {
+        const auto d = f.Run(ModGuard::Auto, {neutral_in_zone});
+        REQUIRE(d.blockers.size() == 1);
+        REQUIRE(d.blockers[0].why == Why::Zone);
+        REQUIRE(d.blockers[0].what == "frame rate controller");
+        REQUIRE(d.blockers[0].offset == f.in_zone[0].first);
+    }
+    // all: any mod changing main
+    {
+        const auto d = f.Run(ModGuard::All, {resolution});
+        REQUIRE(d.blockers.size() == 1);
+        REQUIRE(d.blockers[0].why == Why::AnyMod);
+        REQUIRE(d.blockers[0].mod == "Bananza 4K (2160p)");
+        REQUIRE(d.blockers[0].file == "res.pchtxt");
+        REQUIRE(d.blockers[0].offset == f.outside[0].first);
+        REQUIRE(d.elsewhere.empty());
+    }
+    REQUIRE(f.Run(ModGuard::All, {neutral_in_zone}).blockers.at(0).why == Why::Zone);
+    // name: the names only, the zones not looked at
+    REQUIRE(f.Run(ModGuard::Names, {fps_named}).blockers.at(0).why == Why::Name);
+    REQUIRE_FALSE(f.Run(ModGuard::Names, {neutral_in_zone}).Blocked());
+    REQUIRE_FALSE(f.Run(ModGuard::Names, {resolution}).Blocked());
+    // 0 (Anka 1.1.1): the zones only
+    REQUIRE(f.Run(ModGuard::Zones, {neutral_in_zone}).blockers.at(0).why == Why::Zone);
+    REQUIRE_FALSE(f.Run(ModGuard::Zones, {fps_named}).Blocked());
+    REQUIRE(f.Run(ModGuard::Zones, {fps_named}).elsewhere.size() == 1);
+    // No mods, no cheats: nothing
+    REQUIRE_FALSE(f.Run(ModGuard::All, {}).Blocked());
+}
+
+TEST_CASE("Nx2DkDynamicFps: Decide, several mods and cheats", "[core]") {
+    const DecideFixture f;
+    const ModChange resolution{"4K Resolution", "IPS", "0123456789ABCDEF.ips", f.outside};
+    const ModChange fps_named{"60 FPS", "IPSwitch", "main.pchtxt", f.outside};
+    const ModChange neutral_in_zone{"Smooth Gameplay", "IPS", "0123456789ABCDEF.ips", f.in_zone};
+    // The order is kept; the first blocker is the one the Anka tab names
+    {
+        const auto d = f.Run(ModGuard::Auto, {resolution, neutral_in_zone, fps_named});
+        REQUIRE(d.blockers.size() == 2);
+        REQUIRE(d.blockers[0].mod == "Smooth Gameplay");
+        REQUIRE(d.blockers[1].mod == "60 FPS");
+        REQUIRE(d.elsewhere == std::vector<std::string>{"\"4K Resolution\" (IPS)"});
+    }
+    // Cheats: by name, in auto / all / name; not in 0
+    const std::vector<std::string_view> cheats{"Infinite Health", "60 FPS"};
+    for (const ModGuard guard : {ModGuard::Auto, ModGuard::All, ModGuard::Names}) {
+        const auto d = f.Run(guard, {}, cheats);
+        REQUIRE(d.blockers.size() == 1);
+        REQUIRE(d.blockers[0].why == Why::Cheat);
+        REQUIRE(d.blockers[0].mod == "60 FPS");
+        REQUIRE(d.blockers[0].kind == "cheat");
+    }
+    REQUIRE_FALSE(f.Run(ModGuard::Zones, {}, cheats).Blocked());
+    REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {"Infinite Health", "Moon Jump"}).Blocked());
+    // A mod before a cheat
+    REQUIRE(f.Run(ModGuard::Auto, {fps_named}, cheats).blockers.front().why == Why::Name);
+}
+
+namespace {
+using FileSys::VectorVfsDirectory;
+using FileSys::VectorVfsFile;
+
+constexpr size_t HeaderSize = 0x100; // sizeof(Loader::NSOHeader)
+
+// An IPS file writing `bytes` at `offset` of the NSO (its header included).
+std::vector<u8> Ips(u32 offset, std::vector<u8> bytes) {
+    std::vector<u8> out{'P', 'A', 'T', 'C', 'H'};
+    out.push_back(static_cast<u8>(offset >> 16));
+    out.push_back(static_cast<u8>(offset >> 8));
+    out.push_back(static_cast<u8>(offset));
+    out.push_back(static_cast<u8>(bytes.size() >> 8));
+    out.push_back(static_cast<u8>(bytes.size()));
+    out.insert(out.end(), bytes.begin(), bytes.end());
+    out.insert(out.end(), {'E', 'O', 'F'});
+    return out;
+}
+
+// load/<mod>/exefs/<file>: the folders know their parents, as PatchNSO reads the mod's name.
+std::shared_ptr<VectorVfsDirectory> AddMod(const std::shared_ptr<VectorVfsDirectory>& load,
+                                           const std::string& mod, const std::string& file,
+                                           std::vector<u8> data) {
+    auto mod_dir = std::make_shared<VectorVfsDirectory>(std::vector<FileSys::VirtualFile>{},
+                                                        std::vector<FileSys::VirtualDir>{}, mod,
+                                                        load);
+    auto exefs = std::make_shared<VectorVfsDirectory>(std::vector<FileSys::VirtualFile>{},
+                                                      std::vector<FileSys::VirtualDir>{}, "exefs",
+                                                      mod_dir);
+    exefs->AddFile(std::make_shared<VectorVfsFile>(std::move(data), file, exefs));
+    mod_dir->AddDirectory(exefs);
+    load->AddDirectory(mod_dir);
+    return mod_dir;
+}
+} // Anonymous namespace
+
+TEST_CASE("PatchManager: the mods PatchNSO reports, from a load folder", "[core]") {
+    // Made-up bytes, no game file: a header and 0x100 bytes of code
+    std::vector<u8> nso(HeaderSize + 0x100, 0x11);
+    const std::string build_id = "0123456789ABCDEF"; // as PatchNSO cuts it
+    auto load = std::make_shared<VectorVfsDirectory>(std::vector<FileSys::VirtualFile>{},
+                                                     std::vector<FileSys::VirtualDir>{}, "load");
+    AddMod(load, "A Mod", build_id + ".ips", Ips(HeaderSize + 8, {1, 2, 3, 4}));
+    AddMod(load, "B Off", build_id + ".ips", Ips(HeaderSize + 0x20, {5, 6}));
+    AddMod(load, "C Other Game", "FEDCBA9876543210.ips", Ips(HeaderSize + 0x30, {7}));
+    // Same bytes as before: no change, not reported
+    AddMod(load, "D Same", build_id + ".ips", Ips(HeaderSize + 0x40, {0x11, 0x11}));
+
+    auto dirs = load->GetSubdirectories();
+    std::sort(dirs.begin(), dirs.end(),
+              [](const auto& l, const auto& r) { return l->GetName() < r->GetName(); });
+    const auto patches = FileSys::CollectNsoPatches(dirs, build_id, {"B Off"});
+    // The disabled mod and the other build id's are left out
+    REQUIRE(patches.size() == 2);
+
+    std::vector<FileSys::NsoModChange> changes;
+    const auto out = FileSys::ApplyNsoPatches(nso, patches, &changes);
+    REQUIRE(out.size() == nso.size());
+    REQUIRE(out[HeaderSize + 8] == 1);
+    REQUIRE(out[HeaderSize + 0x20] == 0x11);
+    REQUIRE(changes.size() == 1);
+    REQUIRE(changes[0].mod == "A Mod");
+    REQUIRE(changes[0].file == build_id + ".ips");
+    REQUIRE(changes[0].kind == "IPS");
+    REQUIRE(changes[0].ranges == std::vector<std::pair<size_t, size_t>>{{8, 12}});
+
+    // Through Decide, as the loader passes them: a neutral name outside the zones keeps the patch
+    const DecideFixture f;
+    std::vector<ModChange> mods;
+    for (const auto& change : changes) {
+        mods.push_back({change.mod, change.kind, change.file, change.ranges});
+    }
+    REQUIRE_FALSE(Decide(ModGuard::Auto, f.zones, 0, mods).Blocked());
+    REQUIRE(Decide(ModGuard::All, f.zones, 0, mods).Blocked());
+
+    // Enabled, the second mod is reported after the first
+    std::vector<FileSys::NsoModChange> both;
+    (void)FileSys::ApplyNsoPatches(nso, FileSys::CollectNsoPatches(dirs, build_id, {}), &both);
+    REQUIRE(both.size() == 2);
+    REQUIRE(both[1].mod == "B Off");
+    REQUIRE(both[1].ranges == std::vector<std::pair<size_t, size_t>>{{0x20, 0x22}});
 }
 
 TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS below 40 is held out", "[core]") {

@@ -187,8 +187,9 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     // EDEN_NX2_DK_DYN=1 (off by default): Donkey Kong Bananza's dynamic frame rate
     // (nx2_dk_dynamic_fps.h). Off, no module is touched.
     static const char* const dk_dyn_switch = std::getenv("EDEN_NX2_DK_DYN");
-    // EDEN_NX2_DK_DYN_MIN_FPS=<1-60> (unset: the game's 40): below it the whole interval.
-    static const Nx2DkDynamicFps::MinFps dk_dyn_min_fps = [] {
+    // EDEN_NX2_DK_DYN_MIN_FPS=<40-60> (unset: the game's 40; 1-39 only with
+    // EDEN_NX2_DK_DYN_MIN_FPS_LOW=1): below it the whole interval.
+    static const Nx2DkDynamicFps::MinFpsChoice dk_dyn_min_fps = [] {
         const char* value = std::getenv("EDEN_NX2_DK_DYN_MIN_FPS");
         const auto parsed = Nx2DkDynamicFps::ParseMinFps(value);
         if (parsed.refused) {
@@ -196,76 +197,118 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                 "game's 40 kept",
                         value);
         }
-        // Below 40 only with EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 (nx2_dk_dynamic_fps.h, ChooseMinFps)
-        const auto chosen = Nx2DkDynamicFps::ChooseMinFps(
-            parsed, std::getenv("EDEN_NX2_DK_DYN_MIN_FPS_LOW"));
+        // Below 40 only with EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 (nx2_dk_dynamic_fps.h, ChooseMinFps);
+        // the warning is written where the patch goes in (Bananza, DK_DYN on), below.
+        auto chosen = Nx2DkDynamicFps::ChooseMinFps(parsed,
+                                                    std::getenv("EDEN_NX2_DK_DYN_MIN_FPS_LOW"));
         if (chosen.held_low) {
-            LOG_WARNING(Loader,
-                        "EDEN_NX2_DK_DYN_MIN_FPS={}: the game's 40 kept. Its free frame rates "
-                        "stop at 40, so below 40 it only held the game longer in slow frames "
-                        "(EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 puts it in anyway)",
-                        parsed.fps);
+            chosen.fps = parsed.fps; // only for the warning; 0 goes to Apply
         }
-        return Nx2DkDynamicFps::MinFps{.fps = chosen.fps};
+        return chosen;
     }();
-    // EDEN_NX2_DK_DYN_MOD_GUARD (unset: any exefs mod changing main turns the patch off; "name":
-    // only one named like a frame rate mod; "0": only one in the frame rate code, Anka 1.1.1)
-    static const Nx2DkDynamicFps::ModGuard dk_dyn_guard =
-        Nx2DkDynamicFps::ParseModGuard(std::getenv("EDEN_NX2_DK_DYN_MOD_GUARD"));
+    // EDEN_NX2_DK_DYN_MOD_GUARD (unset / "auto": a mod in the frame rate code or one named like a
+    // frame rate mod, or a cheat named like one, turns the patch off; "all": any exefs mod
+    // changing main; "name": the names only; "0": Anka 1.1.1's rule; nx2_dk_dynamic_fps.h)
+    static const char* const dk_dyn_guard_value = std::getenv("EDEN_NX2_DK_DYN_MOD_GUARD");
+    static const Nx2DkDynamicFps::ModGuardChoice dk_dyn_guard = [] {
+        const auto choice = Nx2DkDynamicFps::ParseModGuard(dk_dyn_guard_value);
+        if (choice.refused) {
+            LOG_WARNING(Loader,
+                        "EDEN_NX2_DK_DYN_MOD_GUARD=\"{}\": not auto / all / name / 0, auto used",
+                        dk_dyn_guard_value);
+        }
+        return choice;
+    }();
+    static const std::string dk_dyn_guard_label =
+        dk_dyn_guard_value == nullptr
+            ? std::string{"EDEN_NX2_DK_DYN_MOD_GUARD unset: auto"}
+            : fmt::format("EDEN_NX2_DK_DYN_MOD_GUARD={}",
+                          Nx2DkDynamicFps::ModGuardName(dk_dyn_guard.guard));
+    // The cheats of Bananza's main, read before the patch is decided: a "60 FPS" cheat with it
+    // runs the game too fast (reused below, where they are registered).
+    std::optional<std::vector<Core::Memory::CheatEntry>> early_cheats;
+    const bool dk_dyn_target = Nx2DkDynamicFps::Enabled(dk_dyn_switch) && name == "main" &&
+                               process.GetProgramId() == Nx2DkDynamicFps::ProgramId;
+    if (pm && dk_dyn_target) {
+        early_cheats = pm->CreateCheatList(nso_header.build_id);
+    }
     {
         const auto& text = nso_header.segments[0];
         const size_t text_start = module_start + text.location;
         const std::span<u8> image{codeset.memory};
         const std::span<u8> text_image =
             text_start <= image.size() ? image.subspan(text_start) : std::span<u8>{};
-        // Another exefs mod in the frame rate code: the patch stays out of this boot
-        // (nx2_dk_dynamic_fps.h, FpsZones)
+        // Another exefs mod or a cheat that may change the frame rate: the patch stays out of
+        // this boot (nx2_dk_dynamic_fps.h, Decide)
         bool dk_dyn_blocked = false;
-        if (Nx2DkDynamicFps::Enabled(dk_dyn_switch) && name == "main" &&
-            process.GetProgramId() == Nx2DkDynamicFps::ProgramId && !mod_changes.empty()) {
+        std::vector<std::string> cheat_names;
+        if (early_cheats) {
+            for (const auto& cheat : *early_cheats) {
+                if (cheat.enabled) {
+                    const auto& n = cheat.definition.readable_name;
+                    const std::string_view full{n.data(), n.size()};
+                    cheat_names.emplace_back(full.substr(0, full.find('\0')));
+                }
+            }
+        }
+        if (dk_dyn_target && (!mod_changes.empty() || !cheat_names.empty())) {
             const auto zones = Nx2DkDynamicFps::FpsZones(text_image, text.size);
-            std::vector<std::string> elsewhere;
+            std::vector<Nx2DkDynamicFps::ModChange> mods;
+            mods.reserve(mod_changes.size());
             for (const auto& change : mod_changes) {
-                const auto conflict =
-                    Nx2DkDynamicFps::FirstConflict(zones, text.location, change.ranges);
-                if (!conflict && Nx2DkDynamicFps::BlocksOutsideZones(dk_dyn_guard, change.mod,
-                                                                     change.file)) {
+                mods.push_back({change.mod, change.kind, change.file, change.ranges});
+            }
+            const std::vector<std::string_view> cheat_views(cheat_names.begin(),
+                                                            cheat_names.end());
+            const auto decision = Nx2DkDynamicFps::Decide(dk_dyn_guard.guard, zones,
+                                                          text.location, mods, cheat_views);
+            using Why = Nx2DkDynamicFps::Blocker::Why;
+            for (const auto& blocker : decision.blockers) {
+                switch (blocker.why) {
+                case Why::Zone:
                     LOG_WARNING(Loader,
                                 "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
-                                "boot: the {} mod \"{}\" ({}) changes main (first at main+{:#x}); "
-                                "if it changes the frame rate, both would run the game too fast "
-                                "above 30 fps. Turn the mod off in Add-Ons to use dynamic FPS "
-                                "(EDEN_NX2_DK_DYN_MOD_GUARD={})",
-                                change.kind, change.mod, change.file,
-                                change.ranges.empty() ? 0 : change.ranges.front().first,
-                                dk_dyn_guard == Nx2DkDynamicFps::ModGuard::Names ? "name"
-                                                                                 : "unset");
-                    if (!dk_dyn_blocked) {
-                        Core::SetNx2DkDynConflict(change.mod);
-                    }
-                    dk_dyn_blocked = true;
-                    continue;
+                                "boot: the {} mod \"{}\" changes its {} (main+{:#x}); both would "
+                                "run the game too fast. Turn the mod off in Add-Ons to use it ({})",
+                                blocker.kind, blocker.mod, blocker.what, blocker.offset,
+                                dk_dyn_guard_label);
+                    break;
+                case Why::Name:
+                case Why::AnyMod:
+                    LOG_WARNING(Loader,
+                                "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
+                                "boot: the {} mod \"{}\" ({}) changes main (first at main+{:#x}){}; "
+                                "with a frame rate change both would run the game too fast above "
+                                "30 fps. Turn the mod off in Add-Ons to use dynamic FPS ({})",
+                                blocker.kind, blocker.mod, blocker.file, blocker.offset,
+                                blocker.why == Why::Name
+                                    ? " and its name reads like a frame rate mod"
+                                    : "",
+                                dk_dyn_guard_label);
+                    break;
+                case Why::Cheat:
+                    LOG_WARNING(Loader,
+                                "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
+                                "boot: the cheat \"{}\" reads like a frame rate cheat; both would "
+                                "run the game too fast above 30 fps. Turn the cheat off to use "
+                                "dynamic FPS ({})",
+                                blocker.mod, dk_dyn_guard_label);
+                    break;
                 }
-                if (!conflict) {
-                    elsewhere.push_back(fmt::format("\"{}\" ({})", change.mod, change.kind));
-                    continue;
-                }
-                LOG_WARNING(Loader,
-                            "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
-                            "boot: the {} mod \"{}\" changes its {} (main+{:#x}); both would "
-                            "run the game too fast. Turn the mod off in Add-Ons to use it",
-                            change.kind, change.mod, conflict->what, conflict->offset);
-                if (!dk_dyn_blocked) {
-                    Core::SetNx2DkDynConflict(change.mod);
-                }
+            }
+            if (decision.Blocked()) {
+                const auto& first = decision.blockers.front();
+                Core::SetNx2DkDynConflict(first.why == Why::Cheat ? "cheat \"" + first.mod + "\""
+                                                                  : first.mod);
                 dk_dyn_blocked = true;
             }
-            if (!elsewhere.empty()) {
+            if (!decision.elsewhere.empty()) {
                 LOG_WARNING(Loader,
                             "Donkey Kong Bananza: exefs mod(s) {} change main with EDEN_NX2_DK_DYN "
-                            "on, outside the frame rate code it patches; if the game runs too "
-                            "fast above 30 fps, one of them changes the frame rate too",
-                            fmt::join(elsewhere, ", "));
+                            "on, outside the frame rate code it patches and not named like a "
+                            "frame rate mod; if the game runs too fast above 30 fps, one of them "
+                            "changes the frame rate too ({})",
+                            fmt::join(decision.elsewhere, ", "), dk_dyn_guard_label);
             }
         }
         if (dk_dyn_blocked) {
@@ -275,7 +318,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                 ? std::optional<Nx2DkDynamicFps::Result>{}
                                 : Nx2DkDynamicFps::ApplyIfEnabled(
                                       dk_dyn_switch, process.GetProgramId(), name, text_image,
-                                      text.size, PageAlignSize(text.size), dk_dyn_min_fps.fps);
+                                      text.size, PageAlignSize(text.size),
+                                      dk_dyn_min_fps.held_low ? 0 : dk_dyn_min_fps.fps);
         if (dk_dyn) {
             Core::g_nx2_dk_dyn_applied.store(dk_dyn->applied, std::memory_order_relaxed);
             if (dk_dyn->applied) {
@@ -285,6 +329,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                          text.location + dk_dyn->controller * sizeof(u32),
                          text.location + dk_dyn->sleep * sizeof(u32),
                          text.location + dk_dyn->step * sizeof(u32));
+                if (dk_dyn_min_fps.held_low) {
+                    LOG_WARNING(Loader,
+                                "EDEN_NX2_DK_DYN_MIN_FPS={}: the game's 40 kept. Its free frame "
+                                "rates stop at 40, so below 40 it only held the game longer in "
+                                "slow frames (EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 puts it in anyway)",
+                                dk_dyn_min_fps.fps);
+                }
                 if (dk_dyn->min_fps != 0) {
                     LOG_INFO(Loader,
                              "Donkey Kong Bananza: the whole interval below {} fps instead of 40 "
@@ -371,7 +422,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         if (name == "main")
             system.SetApplicationProcessBuildID(nso_header.build_id);
 
-        const auto cheats = pm->CreateCheatList(nso_header.build_id);
+        const auto cheats =
+            early_cheats ? std::move(*early_cheats) : pm->CreateCheatList(nso_header.build_id);
         if (!cheats.empty() && name == "main" && Nx2DkDynamicFps::Enabled(dk_dyn_switch) &&
             process.GetProgramId() == Nx2DkDynamicFps::ProgramId &&
             Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed)) {

@@ -237,12 +237,18 @@
 # frames (30 measured 4-5% slower). DK_DYN_MIN_FPS_LOW=1 lets 1-39 in anyway, for tests.
 #EDEN_NX2_DK_DYN_MIN_FPS=40
 #EDEN_NX2_DK_DYN_MIN_FPS_LOW=1
-# DK_DYN_MOD_GUARD: with DK_DYN, what an exefs mod (IPS / pchtxt) changing Bananza's main does.
-# Unset: any such mod turns DK_DYN off for that boot (a "60 FPS" mod plus DK_DYN ran the game
-# twice as fast above 30 fps), the log and the Anka tab name it. name: only a mod whose folder
-# or file name has fps / frame / vsync / hz / 60 in it. 0: only a mod in the frame rate code
-# DK_DYN patches (Anka 1.1.1). Only the names are read.
-#EDEN_NX2_DK_DYN_MOD_GUARD=name
+# DK_DYN_MOD_GUARD: with DK_DYN, what an exefs mod (IPS / pchtxt) changing Bananza's main, or
+# an enabled cheat, does. Unset / auto: DK_DYN is off for that boot only for a mod in the frame
+# rate code it patches (Anka 1.1.1's rule), a mod whose folder or file name reads like a frame
+# rate mod (the words fps, vsync, hz, framerate / frame rate, frame pacing, or 60 alone: "60 FPS",
+# "Unlock 60fps", "60.pchtxt"; not "2160p" or "Framebuffer"; a build id file name is not read),
+# or a cheat named like one. Other mods (resolution, FXAA, camera) keep DK_DYN and are named in
+# the log. A "60 FPS" mod plus DK_DYN ran the game twice as fast above 30 fps: a frame rate mod
+# with a neutral name in a build id file is not caught; turn it off in Add-Ons yourself.
+# all (or 1): any such mod. name: the names only (mods and cheats), not the code. 0: the frame
+# rate code only (Anka 1.1.1), cheats only named in the log. Other values: auto, with a warning.
+# When it turns DK_DYN off: the log, the Anka tab, and with OSD=1 a line for 30 s.
+#EDEN_NX2_DK_DYN_MOD_GUARD=all
 
 # --- menu program (anka.exe) only ---
 # QT_INPUT_MS=<1-16>: the GUI thread pumps SDL and the input engines every N ms (default 1, as

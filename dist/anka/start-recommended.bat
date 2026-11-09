@@ -86,6 +86,11 @@ set EDEN_NX2_MODE_PACE=2
 set EDEN_NX2_PACE_SPIN_US=1500
 rem Donkey Kong Bananza dynamic frame rate (DK_DYN above; 0 = the game's own 60/30 rule).
 set EDEN_NX2_DK_DYN=%DK_DYN%
+rem What an exefs mod (IPS / pchtxt) or cheat does to DK_DYN (README). Unset = auto: only a mod
+rem in the frame rate code, or a mod / cheat named like a frame rate one ("60 FPS"), turns DK_DYN
+rem off for that boot; resolution and graphics mods keep it. all = any mod changing the game's
+rem code; name = the names only; 0 = Anka 1.1.1's rule (the frame rate code only).
+rem set EDEN_NX2_DK_DYN_MOD_GUARD=all
 rem FSR3 frame generation: generated frames blended for the time they are shown (only
 rem does something when frame generation is on in the config, README).
 set EDEN_NX2_FG_TIMED=1
