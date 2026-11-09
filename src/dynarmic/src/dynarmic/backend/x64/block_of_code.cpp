@@ -127,8 +127,8 @@ static HostFeature DetectHostFeatures() {
             f |= HostFeature::FastBMI2;
         }
     }
-    return f;
 #endif
+    return f;
 }
 HostFeature GetHostFeatures() {
     static const HostFeature features = DetectHostFeatures();
