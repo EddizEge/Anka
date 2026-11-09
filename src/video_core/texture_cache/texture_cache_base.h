@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <map>
@@ -54,6 +55,16 @@ struct ChannelState;
 } // namespace Tegra
 
 namespace VideoCommon {
+
+/// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the
+/// image after the download was queued (ImageBase::cpu_writes_since_download). Off: as before.
+inline bool Nx2TexFlushKeepCpu() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_TEX_FLUSH_KEEP_CPU");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
@@ -608,6 +619,8 @@ private:
     // TODO: This data structure is not optimal and it should be reworked
 
     std::vector<PendingDownload> uncommitted_downloads;
+    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: CPU write sequence (ImageBase::cpu_writes_since_download).
+    u64 cpu_write_seq = 0;
     std::deque<std::vector<PendingDownload>> committed_downloads;
     std::vector<AsyncBuffer> uncommitted_async_buffers;
     std::deque<std::vector<AsyncBuffer>> async_buffers;

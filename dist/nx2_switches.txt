@@ -42,6 +42,9 @@
 # DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range (their pop writes
 # nothing there), as rdenno's 15126fbdc1 did. By default those bytes are still written.
 #EDEN_NX2_DL_GPU_CANCEL=1
+# TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the image after
+# the download was queued (records up to 64 writes, else as before). Off by default.
+#EDEN_NX2_TEX_FLUSH_KEEP_CPU=1
 # FORCE_GS_LOWER=1: geometry passthrough programs are lowered as on GPUs without
 # VK_NV_geometry_shader_passthrough (AMD); to reproduce AMD-only shader paths on NVIDIA.
 #EDEN_NX2_FORCE_GS_LOWER=1

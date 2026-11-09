@@ -929,6 +929,21 @@ template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
         write_hits.fetch_add(1, std::memory_order_relaxed);
+        if (image.download_queued_seq != 0 && !image.cpu_writes_overflow) {
+            // A swizzled download is pending: its pop must not write older GPU bytes over these.
+            constexpr size_t max_records = 64;
+            if (image.cpu_writes_since_download.size() >= max_records) {
+                image.cpu_writes_overflow = true;
+                image.cpu_writes_since_download.clear();
+            } else {
+                const DAddr begin = (std::max<DAddr>)(cpu_addr, image.cpu_addr);
+                const DAddr end = (std::min<DAddr>)(cpu_addr + size,
+                                                    image.cpu_addr + image.guest_size_bytes);
+                if (begin < end) {
+                    image.cpu_writes_since_download.push_back({++cpu_write_seq, begin, end - begin});
+                }
+            }
+        }
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -1328,11 +1343,38 @@ void TextureCache<P>::PopAsyncFlushes() {
     if (committed_downloads.empty()) {
         return;
     }
-    // Written whole by the CPU since the download was taken: its bytes are older. With only some
-    // pages or layers dirty, the rest still needs the GPU's bytes.
-    const auto cpu_newer = [](const ImageBase& image) {
-        return True(image.flags & ImageFlagBits::CpuModified) && image.partial_dirty_pages.empty() &&
-               image.partial_remapped.empty() && image.dirty_layers.empty();
+    // Writes the GPU's bytes back to guest memory. EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: what the CPU
+    // wrote over the image since the download was queued is newer, so its bytes are kept (read
+    // before, written back after). Without a record (overflow, or the switch off) as before.
+    const auto swizzle = [this](ImageBase& image, u64 queued_seq,
+                                std::span<const BufferImageCopy> copies, std::span<u8> span) {
+        boost::container::small_vector<std::pair<const ImageBase::CpuWriteRecord*, std::vector<u8>>, 4>
+            kept;
+        const bool use_record = queued_seq != 0 && !image.cpu_writes_overflow;
+        if (use_record) {
+            for (const auto& write : image.cpu_writes_since_download) {
+                if (write.seq > queued_seq) {
+                    std::vector<u8> bytes(write.size);
+                    device_memory.ReadBlockUnsafe(write.addr, bytes.data(), bytes.size());
+                    kept.emplace_back(&write, std::move(bytes));
+                }
+            }
+        }
+        SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, span, swizzle_data_buffer);
+        for (const auto& [write, bytes] : kept) {
+            device_memory.WriteBlockUnsafe(write->addr, bytes.data(), bytes.size());
+        }
+        if (queued_seq == 0) {
+            return;
+        }
+        // Later downloads were queued after this one: older records are not needed any more.
+        std::erase_if(image.cpu_writes_since_download,
+                      [queued_seq](const auto& write) { return write.seq <= queued_seq; });
+        if (image.download_queued_seq <= queued_seq) {
+            image.download_queued_seq = 0;
+            image.cpu_writes_since_download.clear();
+            image.cpu_writes_overflow = false;
+        }
     };
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         const auto& download_ids = committed_downloads.front();
@@ -1346,15 +1388,12 @@ void TextureCache<P>::PopAsyncFlushes() {
             auto& download_info = download_ids[i - 1];
             auto& download_buffer = download_map[download_info.async_buffer_id];
             if (download_info.is_swizzle) {
-                const ImageBase& image = download_info.GetImage(slot_images);
+                ImageBase& image = download_info.GetImage(slot_images);
                 const auto copies = FullDownloadCopies(image.info);
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
-                if (!cpu_newer(image)) {
-                    SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span,
-                                 swizzle_data_buffer);
-                }
+                swizzle(image, download_info.queued_seq, copies, download_span);
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
@@ -1400,12 +1439,9 @@ void TextureCache<P>::PopAsyncFlushes() {
             if (!download_info.is_swizzle) {
                 continue;
             }
-            const ImageBase& image = download_info.GetImage(slot_images);
+            ImageBase& image = download_info.GetImage(slot_images);
             const auto copies = FullDownloadCopies(image.info);
-            if (!cpu_newer(image)) {
-                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span,
-                             swizzle_data_buffer);
-            }
+            swizzle(image, download_info.queued_seq, copies, download_span);
             download_map.offset += image.unswizzled_size_bytes;
             download_span = download_span.subspan(image.unswizzled_size_bytes);
         }
@@ -3898,7 +3934,11 @@ void TextureCache<P>::BindRenderTarget(ImageViewId* old_id, ImageViewId new_id) 
         const ImageViewBase& old_view = slot_image_views[new_id];
         if (True(old_view.flags & ImageViewFlagBits::PreemtiveDownload) &&
             False(slot_images[old_view.image_id].flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
-            const PendingDownload new_download{true, 0, old_view.image_id};
+            PendingDownload new_download{true, 0, old_view.image_id};
+            if (Nx2TexFlushKeepCpu()) {
+                new_download.queued_seq = ++cpu_write_seq;
+                slot_images[old_view.image_id].download_queued_seq = new_download.queued_seq;
+            }
             uncommitted_downloads.emplace_back(new_download);
             if (Common::Nx2Reactive::StatsEnabled()) [[unlikely]] {
                 NoteReactiveRtDownload(slot_images[old_view.image_id]);
