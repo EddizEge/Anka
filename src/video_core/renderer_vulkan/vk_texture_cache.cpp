@@ -1535,7 +1535,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         // actual layout (VUID-vkCmdCopyBufferToImage-dstImageLayout-00180).
         cmdbuf.CopyBufferToImage(copy_buffer, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  vk_out_copies);
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                        0, {}, {}, post_barriers);
     });
 }
@@ -1690,7 +1690,7 @@ void TextureCacheRuntime::BlitImage(Framebuffer* dst_framebuffer, ImageView& dst
                 src_image, VK_IMAGE_LAYOUT_GENERAL, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 MakeImageBlit(dst_region, src_region, dst_layers, src_layers), vk_filter);
         }
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                        0, write_barrier);
     });
 }
@@ -1943,13 +1943,10 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
             static_cast<u32>(copy.src_subresource.base_layer + copy.src_subresource.num_layers) <=
                 shadow->layers) {
             const VkImageAspectFlags aspect_mask = shadow->aspect_mask;
-            VkPipelineStageFlags attachment_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             VkAccessFlags attachment_write = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             VkAccessFlags attachment_read_write =
                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             if ((aspect_mask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) != 0) {
-                attachment_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
                 attachment_write = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 attachment_read_write = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
@@ -1974,8 +1971,7 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
                 .extent = {copy.extent.width, copy.extent.height, 1},
             };
             scheduler.RequestOutsideRenderPassOperationContext();
-            scheduler.Record([shadow_image, dst_image, region, aspect_mask, attachment_stage,
-                              attachment_write,
+            scheduler.Record([shadow_image, dst_image, region, aspect_mask, attachment_write,
                               attachment_read_write](vk::CommandBuffer cmdbuf) {
                 const std::array pre_barriers{
                     VkImageMemoryBarrier{
@@ -2035,7 +2031,7 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
                                           VK_REMAINING_ARRAY_LAYERS},
                     },
                 };
-                cmdbuf.PipelineBarrier(attachment_stage | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, nullptr,
                                        pre_barriers);
                 cmdbuf.CopyImage(shadow_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image,
