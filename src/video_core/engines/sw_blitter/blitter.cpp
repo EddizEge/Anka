@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
 
+#include "common/logging.h"
 #include "common/scratch_buffer.h"
 #include "video_core/engines/sw_blitter/blitter.h"
 #include "video_core/engines/sw_blitter/converter.h"
@@ -209,6 +212,27 @@ bool SoftwareBlitEngine::Blit(Fermi2D::Surface& src, Fermi2D::Surface& dst,
     };
 
     // Do actual Blit
+
+    // Whether Switch 2 titles reach this software path at all (the GPU path handles most blits):
+    // the first 4 blits and then the 8th, 16th, 32nd... are logged with their surfaces.
+    static std::atomic<u64> blits{};
+    const u64 blit = blits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (blit <= 4 || std::has_single_bit(blit)) {
+        const auto describe = [](const Fermi2D::Surface& surface) {
+            return fmt::format("{}x{}x{} format {:#x} {} block height {} depth {}", surface.width,
+                               surface.height, surface.depth, static_cast<u32>(surface.format),
+                               surface.linear == Fermi2D::MemoryLayout::BlockLinear ? "block linear"
+                                                                                    : "pitch",
+                               static_cast<u32>(surface.block_height),
+                               static_cast<u32>(surface.block_depth));
+        };
+        LOG_INFO(HW_GPU,
+                 "Software 2D blit {}: native tiling {} (EDEN_NX2_BLIT_NATIVE_TILING) | src {} "
+                 "rect {}x{} | dst {} rect {}x{} | filter {}",
+                 blit, UseNativeTiling() ? "on" : "off", describe(src), src_extent_x,
+                 src_extent_y, describe(dst), dst_extent_x, dst_extent_y,
+                 config.filter == Fermi2D::Filter::Bilinear ? "bilinear" : "point");
+    }
 
     impl->dst_buffer.resize_destructive(dst_copy_size);
     if (src.linear == Fermi2D::MemoryLayout::BlockLinear) {
