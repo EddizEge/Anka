@@ -449,12 +449,26 @@ Result ResourceManager::GetVibrationDeviceInfo(Core::HID::VibrationDeviceInfo& d
 Result ResourceManager::SendVibrationValue(u64 aruid,
                                            const Core::HID::VibrationDeviceHandle& handle,
                                            const Core::HID::VibrationValue& value) {
+    VibrationSendPath path{};
+    return SendVibrationValue(aruid, handle, value, path);
+}
+
+Result ResourceManager::SendVibrationValue(u64 aruid,
+                                           const Core::HID::VibrationDeviceHandle& handle,
+                                           const Core::HID::VibrationValue& value,
+                                           VibrationSendPath& path) {
     bool has_active_aruid{};
     NpadVibrationDevice* device{nullptr};
     Result result = IsVibrationAruidActive(aruid, has_active_aruid);
+    path = result.IsError()      ? VibrationSendPath::AruidError
+           : !has_active_aruid ? VibrationSendPath::AruidInactive
+                               : VibrationSendPath::NoDevice;
 
     if (result.IsSuccess() && has_active_aruid) {
         result = IsVibrationHandleValid(handle);
+        if (result.IsError()) {
+            path = VibrationSendPath::HandleInvalid;
+        }
     }
     if (result.IsSuccess() && has_active_aruid) {
         device = GetNSVibrationDevice(handle);
@@ -462,8 +476,11 @@ Result ResourceManager::SendVibrationValue(u64 aruid,
     if (device != nullptr) {
         // Prevent sending vibrations to an inactive vibration handle
         if (!device->IsActive()) {
+            path = VibrationSendPath::DeviceInactive;
             return ResultSuccess;
         }
+        path = device->IsVibrationMounted() ? VibrationSendPath::Sent
+                                            : VibrationSendPath::NotMounted;
         result = device->SendVibrationValue(value);
     }
     return result;

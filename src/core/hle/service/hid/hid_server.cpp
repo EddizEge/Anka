@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstring>
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -1080,12 +1082,69 @@ Result IHidServer::SendNx2VibrationValues(
     // Unlike 206 this never fails: rumble is best effort and the command is only known from
     // captures, so an unexpected handle or layout shouldn't return an error a game may treat as
     // fatal.
+    if (vibration_handles.size() != vibration_values.size()) {
+        static std::atomic<bool> warned{};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(Service_HID,
+                        "nx2 rumble 214: {} handles but {} values (the guessed layout may be "
+                        "wrong); the first {} pairs are sent",
+                        vibration_handles.size(), vibration_values.size(),
+                        (std::min)(vibration_handles.size(), vibration_values.size()));
+        }
+    }
     const auto count = (std::min)(vibration_handles.size(), vibration_values.size());
+    using SendPath = ResourceManager::VibrationSendPath;
+    SendPath first_path{SendPath::NoDevice};
+    Result first_result{ResultSuccess};
     for (std::size_t i = 0; i < count; i++) {
+        SendPath path{};
         const auto result = GetResourceManager()->SendVibrationValue(
-            aruid.pid, vibration_handles[i], vibration_values[i]);
+            aruid.pid, vibration_handles[i], vibration_values[i], path);
+        if (i == 0) {
+            first_path = path;
+            first_result = result;
+        }
         if (result.IsError()) {
             LOG_DEBUG(Service_HID, "failed to send vibration {}, result={:#x}", i, result.raw);
+        }
+    }
+
+    // Why a controller did or did not rumble, in the log: the first 8 calls, then a line each
+    // time the aruid, the first handle or where its value went changes (at most 64 such lines).
+    static std::atomic<u32> calls{};
+    static std::atomic<u32> change_lines{};
+    static std::atomic<u64> last_key{~u64{}};
+    const u32 call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    u32 handle_word{};
+    if (count != 0) {
+        std::memcpy(&handle_word, &vibration_handles[0], sizeof(handle_word));
+    }
+    const u64 key = (u64{handle_word} << 32) ^ (aruid.pid << 8) ^ static_cast<u64>(first_path) ^
+                    (u64{first_result.raw} << 16);
+    const bool changed = last_key.exchange(key, std::memory_order_relaxed) != key;
+    if (call <= 8 ||
+        (changed && change_lines.fetch_add(1, std::memory_order_relaxed) < 64)) {
+        static constexpr std::array<const char*, 7> path_names{
+            "aruid check failed", "aruid not active for vibration", "handle invalid",
+            "no device", "device not activated", "no controller mounted", "sent"};
+        const auto path_name = path_names[static_cast<size_t>(first_path)];
+        if (count == 0) {
+            LOG_INFO(Service_HID,
+                     "nx2 rumble 214 call {}: unknown={:#x} aruid={:#x} handles={} values={}: "
+                     "nothing to send",
+                     call, unknown, aruid.pid, vibration_handles.size(), vibration_values.size());
+        } else {
+            const auto& handle = vibration_handles[0];
+            const auto& value = vibration_values[0];
+            LOG_INFO(Service_HID,
+                     "nx2 rumble 214 call {}: unknown={:#x} aruid={:#x} handles={} values={} | "
+                     "first: npad_type={} npad_id={} device_index={} amplitude low {} high {} "
+                     "frequency low {} high {} -> {} (result {:#x}) | vibration_enabled={}",
+                     call, unknown, aruid.pid, vibration_handles.size(),
+                     vibration_values.size(), static_cast<u32>(handle.npad_type),
+                     handle.npad_id, static_cast<u32>(handle.device_index), value.low_amplitude,
+                     value.high_amplitude, value.low_frequency, value.high_frequency, path_name,
+                     first_result.raw, Settings::values.vibration_enabled.GetValue());
         }
     }
 
