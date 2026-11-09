@@ -92,6 +92,16 @@ inline int Nx2SsboFast() {
 /// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
 /// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
 /// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full).
+/// EDEN_NX2_DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range, as
+/// 15126fbdc1 did (their pop writes nothing there). By default the pop still writes those bytes
+/// and only keeps the range marked GPU-modified.
+inline bool Nx2DownloadGpuCancel() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_DL_GPU_CANCEL");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 inline bool Nx2SsboCapDiag() {
     // Off unless set to 1 (ReadNx2Mode reads an unset switch as on).
     static const bool enabled = [] {
@@ -931,6 +941,10 @@ private:
     /// fence pops. A write to a range after a download was taken removes it from that download
     /// (and every other pending one): its bytes are older than the write.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
+    /// For each entry of pending_downloads: the ranges the GPU wrote again after it was taken. Its
+    /// pop still writes their bytes (newer than guest memory, which a guest waiting on the fence
+    /// reads) but leaves them in gpu_modified_ranges: the next download brings the newer bytes.
+    std::deque<Common::RangeSet<DAddr>> pending_download_superseded;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

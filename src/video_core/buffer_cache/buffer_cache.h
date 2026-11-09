@@ -282,6 +282,9 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     for (auto& ranges : pending_download_ranges) {
         ranges.Subtract(device_addr, size);
     }
+    for (auto& superseded : pending_download_superseded) {
+        superseded.Subtract(device_addr, size);
+    }
     uncommitted_gpu_modified_ranges.Subtract(device_addr, size);
     for (auto& interval_set : committed_gpu_modified_ranges) {
         interval_set.Subtract(device_addr, size);
@@ -834,6 +837,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     runtime.PostCopyBarrier();
     pending_downloads.emplace_back(std::move(normalized_copies));
     pending_download_ranges.emplace_back(std::move(download_ranges));
+    pending_download_superseded.emplace_back();
     async_buffers.emplace_back(download_staging);
 }
 
@@ -858,6 +862,7 @@ void BufferCache<P>::PopAsyncBuffers() {
     }
     auto& downloads = pending_downloads.front();
     auto& ranges = pending_download_ranges.front();
+    auto& superseded = pending_download_superseded.front();
     auto& async_buffer = async_buffers.front();
     u8* base = async_buffer->mapped_span.data();
     const size_t base_offset = async_buffer->offset;
@@ -865,19 +870,24 @@ void BufferCache<P>::PopAsyncBuffers() {
         const DAddr device_addr = static_cast<DAddr>(copy.src_offset);
         const u64 dst_offset = copy.dst_offset - base_offset;
         const u8* read_mapped_memory = base + dst_offset;
-        // Only what no write replaced since the copy was taken: the rest is older than guest
-        // memory (CPU writes) or than the GPU's copy (GPU writes, still to be downloaded).
+        // Only what no CPU write replaced since the copy was taken (those bytes are older than
+        // guest memory). What the GPU wrote again is still written, newer than guest memory,
+        // but stays GPU-modified: the next download brings the newer bytes.
         ranges.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end) {
             Tegra::Nx2MarkUntrackedWrite(start, end - start);
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
             gpu_modified_ranges.Subtract(start, end - start);
+            superseded.ForEachInRange(start, end - start, [&](DAddr again, DAddr again_end) {
+                gpu_modified_ranges.Add(again, again_end - again);
+            });
         });
     }
     async_buffers_death_ring.emplace_back(*async_buffer);
     async_buffers.pop_front();
     pending_downloads.pop_front();
     pending_download_ranges.pop_front();
+    pending_download_superseded.pop_front();
 }
 
 template <class P>
@@ -2252,11 +2262,18 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
             buffer.setWriteTick(runtime.CurrentTick());
         }
     }
-    // The downloads already taken over this range hold older bytes: when their fences pop
-    // they must not write them over this write's result in guest memory, nor drop the range
-    // from gpu_modified_ranges (the next fence downloads it instead).
-    for (auto& ranges : pending_download_ranges) {
-        ranges.Subtract(device_addr, size);
+    // The downloads already taken over this range hold older bytes: when their fences pop they
+    // must not drop the range from gpu_modified_ranges (the next fence downloads it instead).
+    // Their bytes are still newer than guest memory and still written, unless
+    // EDEN_NX2_DL_GPU_CANCEL=1 cancels them as 15126fbdc1 did.
+    if (Nx2DownloadGpuCancel()) {
+        for (auto& ranges : pending_download_ranges) {
+            ranges.Subtract(device_addr, size);
+        }
+    } else {
+        for (auto& superseded : pending_download_superseded) {
+            superseded.Add(device_addr, size);
+        }
     }
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
     gpu_modified_ranges.Add(device_addr, size);
