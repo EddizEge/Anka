@@ -485,26 +485,40 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
     // EDEN_NX2_QT_INPUT_MS=<1-16>: another pump interval (4 is about yuzu_cmd's 240 Hz), opt-in
     // only, for A/B runs.
-    int input_update_timeout = default_input_update_timeout;
-    if (const char* text = std::getenv("EDEN_NX2_QT_INPUT_MS")) {
-        const int ms = std::atoi(text);
-        if (ms >= 1 && ms <= 16) {
-            input_update_timeout = ms;
-            LOG_INFO(Frontend, "Input pumped every {} ms (EDEN_NX2_QT_INPUT_MS)", ms);
+    // A whole number of [low, high] from an EDEN_NX2_QT_* switch; 0 (with a warning) otherwise.
+    const auto pump_ms = [](const char* name, int high) {
+        const char* const text = std::getenv(name);
+        if (text == nullptr) {
+            return 0;
         }
+        char* end = nullptr;
+        const long value = std::strtol(text, &end, 10);
+        if (end == text || *end != '\0' || value < 1 || value > high) {
+            LOG_WARNING(Frontend, "{}=\"{}\": not a whole number of 1-{}, ignored", name, text,
+                        high);
+            return 0;
+        }
+        return static_cast<int>(value);
+    };
+    int input_update_timeout = default_input_update_timeout;
+    if (const int ms = pump_ms("EDEN_NX2_QT_INPUT_MS", 16); ms != 0) {
+        input_update_timeout = ms;
+        LOG_INFO(Frontend, "Input pumped every {} ms (EDEN_NX2_QT_INPUT_MS)", ms);
     }
     update_input_timer.setInterval(input_update_timeout);
     input_update_ms = input_update_timeout;
-    // EDEN_NX2_QT_GAME_INPUT_MS=<1-16>: the pump's interval only while a game runs (4: yuzu_cmd's
-    // 240 Hz). Anka 1.1.1's menu program woke its GUI thread ~1300 times a second for the 1 ms pump,
-    // and Qt's multimedia timer thread ~1150 more (anka-cli: ~100); the menus keep the 1 ms.
-    if (const char* text = std::getenv("EDEN_NX2_QT_GAME_INPUT_MS")) {
-        const int ms = std::atoi(text);
-        if (ms >= 1 && ms <= 16) {
-            game_input_update_ms = ms;
-            LOG_INFO(Frontend, "Input pumped every {} ms while a game runs (EDEN_NX2_QT_GAME_INPUT_MS)",
-                     ms);
-        }
+    // EDEN_NX2_QT_GAME_INPUT_MS=<1-8>: the pump's interval from a game's boot to its stop (pause
+    // and the settings dialog included), outside a game QT_INPUT_MS; unset, the timer is never
+    // touched (as Anka 1.1.1). 4 is about yuzu_cmd's 240 Hz; it adds (N-1)/2 ms of input latency
+    // on average and does nothing for a game on the second core (its own process pumps). The
+    // menu program woke its GUI thread ~1300 times a second and Qt's multimedia timer thread
+    // ~1150 (anka-cli: ~100), measured with EDEN_NX2_AUTO_INPUT_FILE / AUTO_EXIT on: their 4 ms
+    // timer (nx2_auto_timer) adds about 250 a second to both, so the pump's own share in a real
+    // session is about 1000. No frame rate gain was measured (09.11, 35.90 against 35.07 fps).
+    if (const int ms = pump_ms("EDEN_NX2_QT_GAME_INPUT_MS", 8); ms != 0) {
+        game_input_update_ms = ms;
+        LOG_INFO(Frontend, "Input pumped every {} ms while a game runs (EDEN_NX2_QT_GAME_INPUT_MS)",
+                 ms);
     }
     connect(&update_input_timer, &QTimer::timeout, this, &MainWindow::UpdateInputDrivers);
     update_input_timer.start();
@@ -2095,6 +2109,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     status_bar_update_timer.start(500);
     if (game_input_update_ms != 0) {
         update_input_timer.setInterval(game_input_update_ms);
+        LOG_INFO(Frontend, "Input pump {} ms while the game runs (EDEN_NX2_QT_GAME_INPUT_MS)",
+                 game_input_update_ms);
     }
     renderer_status_button->setDisabled(true);
     refresh_button->setDisabled(true);
@@ -2286,7 +2302,11 @@ void MainWindow::OnEmulationStopped() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
-    update_input_timer.setInterval(input_update_ms);
+    // Unset EDEN_NX2_QT_GAME_INPUT_MS: the timer untouched, as Anka 1.1.1
+    if (game_input_update_ms != 0) {
+        update_input_timer.setInterval(input_update_ms);
+        LOG_INFO(Frontend, "Input pump back to {} ms (EDEN_NX2_QT_GAME_INPUT_MS)", input_update_ms);
+    }
     shader_building_label->setVisible(false);
     res_scale_label->setVisible(false);
     emu_speed_label->setVisible(false);

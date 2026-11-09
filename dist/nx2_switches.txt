@@ -252,9 +252,12 @@
 
 # --- menu program (anka.exe) only ---
 # QT_INPUT_MS=<1-16>: the GUI thread pumps SDL and the input engines every N ms (default 1, as
-# Anka 1.0.1). QT_GAME_INPUT_MS=<1-16>: the interval only while a game runs, the menus keep
-# QT_INPUT_MS (default: the same). 4 is about anka-cli's 240 Hz; with 1 the menu program woke
-# ~2500 times a second next to the game (its GUI thread and Qt's timer thread), anka-cli ~100.
+# Anka 1.0.1). QT_GAME_INPUT_MS=<1-8>: the interval from a game's boot to its stop, the pause
+# and the settings dialog included; outside a game QT_INPUT_MS (unset: the same, as Anka 1.1.1).
+# It adds (N-1)/2 ms of input latency on average (a controller read waits for the next pump);
+# no frame rate gain was measured (09.11: 35.90 fps with 1 ms, 35.07 with 4, within the noise).
+# It does nothing for a game on the second core (core2): that process pumps its own input.
+# A value that is not a whole number in range is ignored with a warning in the log.
 #EDEN_NX2_QT_GAME_INPUT_MS=4
 
 # --- reactive flushing (video_core/nx2_reactive_flush.h, common/nx2_reactive.h) ---

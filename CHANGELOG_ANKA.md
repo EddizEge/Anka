@@ -15,6 +15,8 @@ and `=0` brings back the 2.0.0 code path.
   (Anka 1.1.1), a mod named like a frame rate mod and an enabled cheat named like one turn the
   patch off for that boot; resolution and graphics mods keep it. The log, the Anka tab and the
   OSD (30 s) say so. `all`, `name` and `0` (1.1.1's rule) for other choices.
+- Menu program: `EDEN_NX2_QT_GAME_INPUT_MS=<1-8>`, the input pump's interval while a game runs
+  (off by default; no frame rate gain measured).
 
 ## Anka 1.0.1 (`anka-v1.0.1`)
 
