@@ -839,6 +839,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        // A record holds one environment per stage its key names (SerializePipeline). Thrown
+        // here, inside LoadPipelines, a mismatch drops this record and the ones after it.
+        if (static_cast<size_t>(std::ranges::count_if(key.unique_hashes, [](u64 hash) {
+                return hash != 0;
+            })) != envs.size()) {
+            throw std::ios_base::failure("Pipeline cache key and environments disagree");
+        }
 
         if ((key.state.extended_dynamic_state != 0) !=
                 dynamic_features.has_extended_dynamic_state ||
