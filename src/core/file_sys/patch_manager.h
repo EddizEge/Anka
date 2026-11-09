@@ -58,6 +58,7 @@ struct Patch {
 struct NsoModChange {
     std::string mod;  ///< the mod's folder name
     std::string kind; ///< "IPS" or "IPSwitch"
+    std::string file; ///< the patch file's name (EDEN_NX2_DK_DYN_MOD_GUARD=name reads it)
     /// [begin, end) offsets into the module's code (after the NSO header), merged and sorted.
     std::vector<std::pair<size_t, size_t>> ranges;
 };

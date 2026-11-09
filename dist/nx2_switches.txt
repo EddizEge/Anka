@@ -232,9 +232,24 @@
 # 60 or 30, with the game clock stepped by the real frame time. Off by default; off, no
 # module is touched. Nothing is written to disk.
 #EDEN_NX2_DK_DYN=1
-# DK_DYN_MIN_FPS=<1-60>: with DK_DYN, move the game's 40 fps floor (unset: 40; 30 measured
-# worse on our machine).
+# DK_DYN_MIN_FPS=<40-60>: with DK_DYN, move the game's 40 fps floor (unset: 40). Below 40 is
+# refused (40 kept): the game's free rates stop at 40, so it only held the game longer in slow
+# frames (30 measured 4-5% slower). DK_DYN_MIN_FPS_LOW=1 lets 1-39 in anyway, for tests.
 #EDEN_NX2_DK_DYN_MIN_FPS=40
+#EDEN_NX2_DK_DYN_MIN_FPS_LOW=1
+# DK_DYN_MOD_GUARD: with DK_DYN, what an exefs mod (IPS / pchtxt) changing Bananza's main does.
+# Unset: any such mod turns DK_DYN off for that boot (a "60 FPS" mod plus DK_DYN ran the game
+# twice as fast above 30 fps), the log and the Anka tab name it. name: only a mod whose folder
+# or file name has fps / frame / vsync / hz / 60 in it. 0: only a mod in the frame rate code
+# DK_DYN patches (Anka 1.1.1). Only the names are read.
+#EDEN_NX2_DK_DYN_MOD_GUARD=name
+
+# --- menu program (anka.exe) only ---
+# QT_INPUT_MS=<1-16>: the GUI thread pumps SDL and the input engines every N ms (default 1, as
+# Anka 1.0.1). QT_GAME_INPUT_MS=<1-16>: the interval only while a game runs, the menus keep
+# QT_INPUT_MS (default: the same). 4 is about anka-cli's 240 Hz; with 1 the menu program woke
+# ~2500 times a second next to the game (its GUI thread and Qt's timer thread), anka-cli ~100.
+#EDEN_NX2_QT_GAME_INPUT_MS=4
 
 # --- reactive flushing (video_core/nx2_reactive_flush.h, common/nx2_reactive.h) ---
 # All off by default. Most matter only with use_reactive_flushing=true in the config;

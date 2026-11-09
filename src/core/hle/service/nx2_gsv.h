@@ -1647,6 +1647,10 @@ private:
         std::array<std::pair<u32, u32>, 4> interval_words{}; // value, presents
         u32 interval_word_kinds{};
         u32 interval_word_other{};
+        // (b) with EDEN_NX2_DK_DYN applied: the lowest free target ((1 << 16) | n) this second,
+        // and the presents asking for a free target below 40 (EDEN_NX2_DK_DYN_MIN_FPS's band).
+        u32 free_target_min{};
+        u32 free_below_40{};
         // (e) every value words 6-21 took so far (at most 32 each).
         std::array<std::vector<u32>, 22> seen{};
         u32 unwatched{}; // bit i: word i took more than 32 values
@@ -1793,6 +1797,12 @@ private:
             } else {
                 ++d.interval_word_other;
             }
+            if (m_dk_dyn_applied && ((value >> 16) & 0xf) == 1) {
+                const u32 target = value & 0xffff;
+                d.free_target_min =
+                    d.free_target_min == 0 ? target : (std::min)(d.free_target_min, target);
+                d.free_below_40 += target < 40 ? 1 : 0;
+            }
         }
         d.fence_us += to_us(waited - entered);
         d.pace_us += to_us(paced - composited);
@@ -1821,6 +1831,12 @@ private:
             if (d.interval_word_other != 0) {
                 interval_words += fmt::format(" other:{}", d.interval_word_other);
             }
+            if (m_dk_dyn_applied) {
+                interval_words += fmt::format(", free target min {} (below 40: {})",
+                                              d.free_target_min, d.free_below_40);
+            }
+            d.free_target_min = 0;
+            d.free_below_40 = 0;
             LOG_INFO(Service,
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "

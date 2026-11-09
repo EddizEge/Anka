@@ -196,8 +196,22 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                 "game's 40 kept",
                         value);
         }
-        return parsed;
+        // Below 40 only with EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 (nx2_dk_dynamic_fps.h, ChooseMinFps)
+        const auto chosen = Nx2DkDynamicFps::ChooseMinFps(
+            parsed, std::getenv("EDEN_NX2_DK_DYN_MIN_FPS_LOW"));
+        if (chosen.held_low) {
+            LOG_WARNING(Loader,
+                        "EDEN_NX2_DK_DYN_MIN_FPS={}: the game's 40 kept. Its free frame rates "
+                        "stop at 40, so below 40 it only held the game longer in slow frames "
+                        "(EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 puts it in anyway)",
+                        parsed.fps);
+        }
+        return Nx2DkDynamicFps::MinFps{.fps = chosen.fps};
     }();
+    // EDEN_NX2_DK_DYN_MOD_GUARD (unset: any exefs mod changing main turns the patch off; "name":
+    // only one named like a frame rate mod; "0": only one in the frame rate code, Anka 1.1.1)
+    static const Nx2DkDynamicFps::ModGuard dk_dyn_guard =
+        Nx2DkDynamicFps::ParseModGuard(std::getenv("EDEN_NX2_DK_DYN_MOD_GUARD"));
     {
         const auto& text = nso_header.segments[0];
         const size_t text_start = module_start + text.location;
@@ -214,6 +228,24 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             for (const auto& change : mod_changes) {
                 const auto conflict =
                     Nx2DkDynamicFps::FirstConflict(zones, text.location, change.ranges);
+                if (!conflict && Nx2DkDynamicFps::BlocksOutsideZones(dk_dyn_guard, change.mod,
+                                                                     change.file)) {
+                    LOG_WARNING(Loader,
+                                "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
+                                "boot: the {} mod \"{}\" ({}) changes main (first at main+{:#x}); "
+                                "if it changes the frame rate, both would run the game too fast "
+                                "above 30 fps. Turn the mod off in Add-Ons to use dynamic FPS "
+                                "(EDEN_NX2_DK_DYN_MOD_GUARD={})",
+                                change.kind, change.mod, change.file,
+                                change.ranges.empty() ? 0 : change.ranges.front().first,
+                                dk_dyn_guard == Nx2DkDynamicFps::ModGuard::Names ? "name"
+                                                                                 : "unset");
+                    if (!dk_dyn_blocked) {
+                        Core::SetNx2DkDynConflict(change.mod);
+                    }
+                    dk_dyn_blocked = true;
+                    continue;
+                }
                 if (!conflict) {
                     elsewhere.push_back(fmt::format("\"{}\" ({})", change.mod, change.kind));
                     continue;

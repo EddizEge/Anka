@@ -116,8 +116,9 @@ void ConfigureNx2Perf::ShowDkDynConflict() {
     }
     ui->dk_dyn_text->setText(
         ui->dk_dyn_text->text() + QStringLiteral("\n") +
-        tr("Off in the running game: the mod \"%1\" changes the same frame rate code, and both "
-           "at once run the game too fast. Turn the mod off in Add-Ons (Properties) to use it.")
+        tr("Off in the running game: the mod \"%1\" changes the game's code and may change its "
+           "frame rate too; both at once run the game too fast. Turn the mod off in Add-Ons "
+           "(Properties) to use it.")
             .arg(QString::fromStdString(mod)));
 }
 

@@ -560,3 +560,58 @@ TEST_CASE("PatchManager: ChangedRanges, the bytes a mod changed", "[core]") {
     REQUIRE(FileSys::ChangedRanges(before, after, 0) == Ranges{{2, 4}, {7, 8}, {9, 12}});
     REQUIRE(FileSys::ChangedRanges(after, before, 0) == Ranges{{2, 4}, {7, 8}, {9, 12}});
 }
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MOD_GUARD's value", "[core]") {
+    REQUIRE(ParseModGuard(nullptr) == ModGuard::All);
+    REQUIRE(ParseModGuard("") == ModGuard::All);
+    REQUIRE(ParseModGuard("1") == ModGuard::All);
+    REQUIRE(ParseModGuard("all") == ModGuard::All);
+    REQUIRE(ParseModGuard("0") == ModGuard::Zones);
+    REQUIRE(ParseModGuard("00") == ModGuard::All);
+    REQUIRE(ParseModGuard("name") == ModGuard::Names);
+    REQUIRE(ParseModGuard("names") == ModGuard::Names);
+    REQUIRE(ParseModGuard("Name") == ModGuard::All);
+}
+
+TEST_CASE("Nx2DkDynamicFps: names that read like a frame rate mod", "[core]") {
+    REQUIRE(FpsLikeName("60 FPS"));
+    REQUIRE(FpsLikeName("Framerate Unlock"));
+    REQUIRE(FpsLikeName("dkb_60hz.pchtxt"));
+    REQUIRE(FpsLikeName("No VSync"));
+    REQUIRE(FpsLikeName("DynamicFPS"));
+    REQUIRE_FALSE(FpsLikeName("4K Resolution"));
+    REQUIRE_FALSE(FpsLikeName("0123456789ABCDEF.ips"));
+    REQUIRE_FALSE(FpsLikeName(""));
+}
+
+TEST_CASE("Nx2DkDynamicFps: a mod outside the frame rate code, per guard", "[core]") {
+    // Anka 1.1.1's rule: only the zones count
+    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Zones, "60 FPS", "main.pchtxt"));
+    // The default: any mod changing main
+    REQUIRE(BlocksOutsideZones(ModGuard::All, "4K Resolution", "0123.ips"));
+    // name: the folder or the file
+    REQUIRE(BlocksOutsideZones(ModGuard::Names, "60 FPS", "0123.ips"));
+    REQUIRE(BlocksOutsideZones(ModGuard::Names, "Bananza tweaks", "fps_unlock.pchtxt"));
+    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Names, "4K Resolution", "0123.ips"));
+    // A build id file name is not read: "60" turns up in hex
+    REQUIRE_FALSE(BlocksOutsideZones(ModGuard::Names, "4K Resolution", "A1B60C.pchtxt"));
+    REQUIRE(BuildIdName("A1B60C.pchtxt"));
+    REQUIRE_FALSE(BuildIdName("fps60.pchtxt"));
+}
+
+TEST_CASE("Nx2DkDynamicFps: EDEN_NX2_DK_DYN_MIN_FPS below 40 is held out", "[core]") {
+    using C = MinFpsChoice;
+    const auto same = [](C a, C b) { return a.fps == b.fps && a.held_low == b.held_low; };
+    // Unset or refused: the game's 40, nothing held
+    REQUIRE(same(ChooseMinFps(ParseMinFps(nullptr), nullptr), C{}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("x"), nullptr), C{}));
+    // 40-60 go in
+    REQUIRE(same(ChooseMinFps(ParseMinFps("40"), nullptr), C{.fps = 40}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("45"), nullptr), C{.fps = 45}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("60"), nullptr), C{.fps = 60}));
+    // Below 40: the game's 40 kept, unless EDEN_NX2_DK_DYN_MIN_FPS_LOW=1
+    REQUIRE(same(ChooseMinFps(ParseMinFps("30"), nullptr), C{.held_low = true}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("39"), "0"), C{.held_low = true}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("1"), ""), C{.held_low = true}));
+    REQUIRE(same(ChooseMinFps(ParseMinFps("30"), "1"), C{.fps = 30}));
+}

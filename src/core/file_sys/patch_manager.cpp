@@ -490,7 +490,10 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             auto ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader));
             if (!ranges.empty()) {
                 mod_changes->push_back(
-                    {.mod = mod, .kind = std::string{kind}, .ranges = std::move(ranges)});
+                    {.mod = mod,
+                     .kind = std::string{kind},
+                     .file = patch_file->GetName(),
+                     .ranges = std::move(ranges)});
             }
         }
         out = std::move(bytes);

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -288,6 +289,96 @@ inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
         }
     }
     return zones;
+}
+
+// A "60 FPS" mod need not touch the zones above: one changing the frame rate somewhere else ran
+// the game twice as fast above 30 fps all the same, and only the log said so. What
+// EDEN_NX2_DK_DYN_MOD_GUARD does with an exefs mod changing main outside the zones (only the
+// mod's folder and file names are looked at, never what it changes):
+//   unset / anything else: All, any such mod turns the patch off for that boot;
+//   "name":  Names, only a mod whose folder or file name reads like a frame rate mod (FpsLikeName);
+//   "0":     Zones, Anka 1.1.1's rule: only a mod in the zones, the others named in the log.
+enum class ModGuard { All, Names, Zones };
+
+constexpr ModGuard ParseModGuard(const char* value) {
+    if (value == nullptr) {
+        return ModGuard::All;
+    }
+    const std::string_view text{value};
+    if (text == "0") {
+        return ModGuard::Zones;
+    }
+    if (text == "name" || text == "names") {
+        return ModGuard::Names;
+    }
+    return ModGuard::All;
+}
+
+/// A mod folder / patch file name that reads like a frame rate mod: "fps", "frame", "vsync",
+/// "hz" or "60", any case ("60 FPS", "Framerate unlock", "dkb_60hz.pchtxt").
+inline bool FpsLikeName(std::string_view name) {
+    std::string lower(name);
+    for (char& c : lower) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    for (const std::string_view word : {"fps", "frame", "vsync", "hz", "60"}) {
+        if (lower.find(word) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// A patch file named by the module's build id ("<hex>.ips" / "<hex>.pchtxt"): its name says
+/// nothing (and "60" can turn up in any hex).
+constexpr bool BuildIdName(std::string_view file) {
+    const auto dot = file.rfind('.');
+    const std::string_view stem = file.substr(0, dot);
+    if (stem.empty()) {
+        return false;
+    }
+    for (const char c : stem) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether a mod changing main outside the zones turns the patch off under `guard`.
+inline bool BlocksOutsideZones(ModGuard guard, std::string_view mod, std::string_view file) {
+    switch (guard) {
+    case ModGuard::All:
+        return true;
+    case ModGuard::Names:
+        return FpsLikeName(mod) || (!BuildIdName(file) && FpsLikeName(file));
+    case ModGuard::Zones:
+        break;
+    }
+    return false;
+}
+
+// EDEN_NX2_DK_DYN_MIN_FPS below 40 (Anka 1.1.2): the game's free targets stop at 40. In the
+// 05.11 runs with 30 (four runs, ~44k presents, EDEN_NX2_PRESENT_DIAG) word 12 never went below
+// 0x10028 (interval 1, 40 fps) yet the whole interval (0x2003c) came 2-5 times as often, and the
+// game ran 4-5% slower (and 32.1 against 37.0 fps in a user's scene, 08.11): the 30-40 band it
+// was meant to open does not exist, the frames there only got longer. So a value below 40 keeps
+// the game's 40 unless EDEN_NX2_DK_DYN_MIN_FPS_LOW=1 (the old behaviour, for tests); 40-60 go in.
+constexpr u32 MinFpsFree = 40;
+
+struct MinFpsChoice {
+    u32 fps{};          // what goes to Apply (0: the game's 40)
+    bool held_low{};    // a value below 40 kept out
+};
+
+constexpr MinFpsChoice ChooseMinFps(MinFps parsed, const char* low_switch) {
+    if (parsed.fps != 0 && parsed.fps < MinFpsFree &&
+        !(low_switch != nullptr && low_switch[0] == '1')) {
+        return {.fps = 0, .held_low = true};
+    }
+    return {.fps = parsed.fps};
 }
 
 struct Conflict {
