@@ -123,7 +123,6 @@ public:
             }
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
-            uncommitted_operations.reserve(64);
         }
         pending_flushes.push_back(committed_flushes);
         const s64 submit_ns = stats ? Common::Nx2Reactive::NowNs() : 0;
@@ -484,9 +483,10 @@ private:
     }
 
     std::queue<TFence> fences;
-    // LOCAL TEST (Zelda): vectors, not deques. MSVC's deque of std::function holds one element per
-    // block, so every queued operation (one per query report, ~1000 objects a frame in Ocarina's
-    // Kokiri Forest) allocated a block.
+    // Vectors, not deques (Lichii 140f2b71aa): MSVC's deque of std::function holds one element per
+    // block, so every queued operation (one per query report; ~1000 a frame in one title's busy
+    // scenes) allocated a block. The moved-from list grows again from its first operation: no
+    // capacity is reserved under uncommitted_guard for fences that queue none.
     using OperationList = std::vector<std::function<void()>>;
     OperationList uncommitted_operations;
     std::deque<OperationList> pending_operations;
