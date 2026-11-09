@@ -240,7 +240,9 @@ public:
     FileEnvironment& operator=(const FileEnvironment&) = delete;
     FileEnvironment(const FileEnvironment&) = delete;
 
-    void Deserialize(std::ifstream& file);
+    /// Reads one environment of a record. What it claims must fit before `end`, the end of the
+    /// file; a record that does not is damaged and throws std::ios_base::failure.
+    void Deserialize(std::ifstream& file, std::streampos end);
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

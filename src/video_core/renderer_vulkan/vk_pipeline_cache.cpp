@@ -871,7 +871,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
             ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }
