@@ -59,6 +59,7 @@ add_executable(tests
     video_core/nx2_upscale_pick.cpp
     video_core/native_macro_fifo.cpp
     video_core/nx2_write_history.cpp
+    video_core/usage_tracker.cpp
     input_common/calibration_configuration_job.cpp
     yuzu_cmd/nx2_auto_script.cpp
     ../yuzu_cmd/nx2_auto_script.cpp
