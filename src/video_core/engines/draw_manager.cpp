@@ -336,15 +336,19 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
     // than 4 vertices has no host vertices (MakeDrawParams). With transform feedback on the draw
     // still goes through, as in Lichii cebd921fa0. The counts used to be taken before the
     // topology was known and missed the quads.
-    // A plain add, not a locked one: this runs for every draw (draws come from one thread).
-    g_empty_draws.draws.store(g_empty_draws.draws.load(std::memory_order_relaxed) + 1,
-                              std::memory_order_relaxed);
+    // Counted and logged only with the switch or the GPU profile on: off, a draw does what it did
+    // before. A plain add, not a locked one: this runs for every draw (from one thread).
+    const bool counting = SkipEmptyDraws() || VideoCommon::Nx2Profile::Enabled();
+    if (counting) {
+        g_empty_draws.draws.store(g_empty_draws.draws.load(std::memory_order_relaxed) + 1,
+                                  std::memory_order_relaxed);
+    }
     const u32 count = draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
     const bool quad_topology = draw_state.topology == Maxwell3D::Regs::PrimitiveTopology::Quads ||
                                draw_state.topology == Maxwell3D::Regs::PrimitiveTopology::QuadStrip;
     const bool no_vertices = count == 0;
     const bool short_quads = !no_vertices && quad_topology && count < 4;
-    if (no_vertices || short_quads || instance_count == 0) [[unlikely]] {
+    if (counting && (no_vertices || short_quads || instance_count == 0)) [[unlikely]] {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::EmptyDraws, 1);
         auto& counts = g_empty_draws;
         (no_vertices ? counts.no_vertices : short_quads ? counts.quads : counts.no_instances)
