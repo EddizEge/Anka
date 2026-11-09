@@ -32,6 +32,10 @@
 # UNDEF_ZERO=0: shader registers read before any write are OpUndef again instead of zero
 # (zero is what NVIDIA gives; AMD showed garbage, e.g. green patches near glowing objects).
 #EDEN_NX2_UNDEF_ZERO=0
+# SHADOW_DATA_REGS=1: native programs whose RED / ATOMG / global store data register sits in the
+# lowering's high registers are rejected (logged with their own reason) instead of reading the
+# uniform mirror there. Diagnosis for white halos (NaN + bloom); off by default.
+#EDEN_NX2_SHADOW_DATA_REGS=1
 
 # --- GPU thread shortcuts (on by default; =0 as before; added by Anka) ---
 # =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,
