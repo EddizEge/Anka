@@ -25,6 +25,8 @@ else()
 endif()
 
 add_executable(yuzu-cmd
+    anka_profile.cpp
+    anka_profile.h
     emu_window/emu_window_sdl3.cpp
     emu_window/emu_window_sdl3.h
     emu_window/emu_window_sdl3_null.cpp

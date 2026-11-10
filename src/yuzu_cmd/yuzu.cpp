@@ -66,6 +66,7 @@
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
 #include "yuzu_cmd/anka_core_route.h"
+#include "yuzu_cmd/anka_profile.h"
 #include "yuzu_cmd/nx2_auto_script.h"
 #include "frontend_common/nx2_osd.h"
 #include "yuzu_cmd/nx2_sampler.h"
@@ -492,6 +493,36 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(WriteCrashDump);
 #endif
+    // Anka 1.1.2: --profile recommended|safe|reactive does what the start-*.bat launchers did
+    // (anka_profile.h). Its EDEN_NX2_* variables are already set: anka_profile.cpp sets them before
+    // the program's static initializers, some of which read switches. Without --profile nothing
+    // here changes anything.
+    const AnkaProfile::TakenArgs profile = AnkaProfile::TakeArgs(argc, argv);
+    const std::vector<AnkaProfile::Var> profile_vars = AnkaProfile::Variables(profile.options);
+    if (!profile.taken.empty() || !profile.error.empty()) {
+        AnkaProfile::CaptureStandardOutput();
+    }
+    if (profile.error.empty() && profile.options.profile &&
+        !AnkaProfile::AppliedBeforeInitializers()) {
+        AnkaProfile::ApplyEnvironment(profile_vars);
+    }
+    // The profile's settings file step, before anything else of the program runs: with no
+    // settings at all (or a bad option) the start stops here, exit 1, and nothing is made, as the
+    // launchers did. Its lines are said once the console is attached.
+    std::optional<AnkaProfile::ConfigResult> profile_config;
+    if (profile.error.empty() && profile.options.profile && !profile.options.config_given) {
+        profile_config =
+            AnkaProfile::PrepareConfig(*profile.options.profile, AnkaProfile::UserConfigDir());
+    }
+    if (!profile.error.empty() || (profile_config && !profile_config->go)) {
+        AnkaProfile::AttachToConsole();
+        if (!profile.error.empty()) {
+            AnkaProfile::Say(profile.error);
+        } else {
+            AnkaProfile::SayAll(profile_config->said);
+        }
+        return SDL_APP_FAILURE;
+    }
     Nx2Sampler::StartFromEnvironment();
     // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
     // input; 240 Hz is plenty for input and the key script.
@@ -509,6 +540,10 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     _setmaxstdio(8192);
 #endif
 
+    if (profile_config) {
+        AnkaProfile::SayAll(profile_config->said);
+    }
+
     Common::Log::Initialize();
     Common::Log::SetColorConsoleBackendEnabled(true);
     Common::Log::Start();
@@ -525,10 +560,55 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #else
     wchar_t **argv_w = nullptr;
 #endif
-    Core::LaunchParams lp = Core::ParseLaunchParams(state->system, argc, argv, argv_w);
+    // The profile's options taken out (at the same places of the wide arguments).
+    int parse_argc = argc;
+    char** parse_argv = argv;
+    wchar_t** parse_argv_w = argv_w;
+    std::vector<char*> kept_argv;
+    std::vector<wchar_t*> kept_argv_w;
+    if (!profile.taken.empty()) {
+        const auto taken = [&profile](int i) {
+            return std::binary_search(profile.taken.begin(), profile.taken.end(), i);
+        };
+        for (int i = 0; i < argc; ++i) {
+            if (!taken(i)) {
+                kept_argv.push_back(argv[i]);
+#ifdef _WIN32
+                if (argc_w == argc) {
+                    kept_argv_w.push_back(argv_w[i]);
+                }
+#endif
+            }
+        }
+        parse_argc = static_cast<int>(kept_argv.size());
+        kept_argv.push_back(nullptr);
+        parse_argv = kept_argv.data();
+        kept_argv_w.push_back(nullptr);
+        parse_argv_w = kept_argv_w.size() == kept_argv.size() ? kept_argv_w.data() : nullptr;
+    }
+    Core::LaunchParams lp =
+        Core::ParseLaunchParams(state->system, parse_argc, parse_argv, parse_argv_w);
 #ifdef _WIN32
     LocalFree(argv_w);
 #endif
+    if (profile.options.profile) {
+        LOG_INFO(Frontend, "Anka settings for --profile {}: {}; set {}",
+                 AnkaProfile::Name(*profile.options.profile), AnkaProfile::Describe(profile_vars),
+                 AnkaProfile::AppliedBeforeInitializers() ? "before the static initializers"
+                                                         : "in SDL_AppInit");
+        if (!profile_config) {
+            LOG_INFO(Frontend, "Anka: -c was given, the profile leaves the settings files alone");
+        } else {
+            for (const std::string& line : profile_config->said) {
+                if (!line.empty()) {
+                    LOG_INFO(Frontend, "Anka: {}", line);
+                }
+            }
+            if (profile_config->config) {
+                lp.config_path = Common::FS::PathToUTF8String(*profile_config->config);
+            }
+        }
+    }
     SdlConfig config{lp.config_path};
 
     Core::ApplyLaunchParams(lp);
