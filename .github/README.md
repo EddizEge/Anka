@@ -50,8 +50,8 @@ onto a launcher) and double-click a launcher:
 | `start-safe.bat` | **For troubleshooting and for games other than Bananza.** The GPU shortcuts Anka keeps on by default turned off (`EDEN_NX2_LIGHT_DRAW=0` and the rest of its list) and the optional settings that change play cleared. Anka's fixes and its changes without a switch stay in. |
 
 On the first start a launcher makes anka-cli's settings file (`user\config\sdl2-config.ini`) as
-a copy of `anka.exe`'s `qt-config.ini`, so your controller setup comes along; it never changes
-a settings file that already exists (since 1.1.2 anka-cli does this itself, started with
+a copy of `anka.exe`'s `qt-config.ini`, so your controller setup comes along; this step never
+edits a settings file that already exists (since 1.1.2 anka-cli does this itself, started with
 `--profile`; no script is involved). The game starts in full screen: **quit with Alt+F4**.
 
 ### Anka's second core

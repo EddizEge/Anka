@@ -248,8 +248,10 @@ as `anka.exe` (the one next to the programs): the same keys, firmware and saves.
 settings in `user\config\sdl2-config.ini`, apart from the menu program's `qt-config.ini`. When
 `sdl2-config.ini` does not exist yet, anka-cli makes it as a copy of `qt-config.ini`, so the
 controller and settings you set up in `anka.exe` come along, and turns reactive flushing off in
-the copy (the measured setup, see "Reactive flushing"). It never changes an existing
-`sdl2-config.ini`, nor `qt-config.ini`. If neither file exists, anka-cli stops with a message
+the copy (the measured setup, see "Reactive flushing"). This first-start step never edits an
+existing `sdl2-config.ini`, nor `qt-config.ini` (as it runs, anka-cli saves its own
+`sdl2-config.ini` again with the values it read, as `anka.exe` does with `qt-config.ini`). If
+neither file exists, anka-cli stops with a message
 and the launcher keeps its window open: start `anka.exe` once and set up your controller there,
 then start the launcher again. With more than one game
 in `Games`, the launcher lists them and asks for a number. The launchers' messages start with
