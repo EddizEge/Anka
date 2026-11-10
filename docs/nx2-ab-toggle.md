@@ -185,10 +185,20 @@ differences per launch.
 | `TICK_SKIP=ab` | −3.72 ± 2.77 | −2.20 ± 1.33 | **−2.99 ± 1.52** | B faster: the default (on) gains ~3 % |
 | `BATCH_DIRECT=ab` | −0.56 ± 1.13 | +0.21 ± 2.33 | **−0.17 ± 1.23** | no difference seen (within ±1.4 %) |
 | `DIRTY_THUNK_SKIP=ab` | — | (not reached) | — | the path never ran in this scene: no binding line in 690 s |
-| `FAST_PRIORITY_SCAN=ab` | — | — | — | not run yet |
+| `FAST_PRIORITY_SCAN=ab` | −2.13 ± 1.48 | −0.84 ± 1.32 | **−1.53 ± 0.98** | B faster: the default (on) gains ~1.5 % (small; the A/A interval is ±1.5) |
+| `UBO_BIND_SKIP=ab` (anka/ab-3) | +1.22 ± 3.48 | +0.55 ± 1.33 | **+0.90 ± 1.81** | no difference seen (within ±1.8 %) |
+| `DESC_XLAT=ab` (anka/ab-3) | −2.80 ± 2.03 | −0.33 ± 1.67 | **−1.62 ± 1.34** | B faster: the default (on) gains ~1.6 % (small) |
 
 - The control is resolved to ±0.9 % with two launches; b-hiz-2's run-to-run measurement of the
   same pad (−13.3 %, one pair of runs) had an uncertainty of about ±10 %.
+- The anka/ab-3 runs (UBO_BIND_SKIP, DESC_XLAT) ran at 30-35 FPS against 38-39 for the
+  anka/ab-2 ones an hour before, with noisier blocks (CV up to 13 %); a difference between runs,
+  which the within-run comparison removes, but it widens the intervals. Two A/A runs back to back
+  afterwards (anka/ab-3, then anka/ab-2) gave 36.1 and 37.1 FPS (within the 6 % between runs; A−B
+  +0.01 ± 2.97 and −0.11 ± 1.84): the machine, not the ab-3 build.
+- `DIRTY_THUNK_SKIP` in other runs: in 35 profiled DKB runs (wide and opening scenes, 3,318
+  one-second profile lines, `EDEN_NX2_GPU_PROFILE`) the "memory dirty thunks" counter was non-zero
+  in one second of one run (58 skipped, during loading). The switch has no effect in this game.
 - `DIRTY_THUNK_SKIP`: its static (and binding line) is set up the first time the pusher reaches
   the split branch for a separate macro parameter entry; in 690 s of the wide scene it never
   did, so A and B run the same code there. The one run (START=B) is A/A in effect: it had one
