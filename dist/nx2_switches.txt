@@ -350,6 +350,9 @@
 #EDEN_NX2_MODE_DIAG_MAX=48
 #EDEN_NX2_VI2_DIAG=1
 #EDEN_NX2_VDEC_TRACE=1
+# SHUTDOWN_TRACE=1: a timed line before and after each step of the emulation shutdown (to find
+# where it hangs; the menu exe stops waiting after 10 s). The steps and their order unchanged.
+#EDEN_NX2_SHUTDOWN_TRACE=1
 #EDEN_NX2_HID_DIAG=1
 #EDEN_NX2_INDIRECT_DIAG=1
 #EDEN_NX2_FRONT_DIAG=0
