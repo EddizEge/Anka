@@ -820,13 +820,27 @@ TEST_CASE("Nx2DkDynamicFps: Decide, several mods and cheats", "[core]") {
         REQUIRE(d.blockers[0].kind == "cheat");
     }
     REQUIRE_FALSE(f.Run(ModGuard::Zones, {}, cheats).Blocked());
-    // The source's name counts too: a neutral entry from a folder or cheat file named like FPS
+    // The source's name counts too: a neutral entry from a folder or cheat file named like FPS;
+    // the whole source is named, once, with no entry
     for (const std::string_view source : {"DKB 60FPS Cheats", "cheat_60fps.txt", "Unlock FPS"}) {
         const auto d = f.Run(ModGuard::Auto, {}, {{"[On]", std::string{source}}});
         REQUIRE(d.blockers.size() == 1);
-        REQUIRE(d.blockers[0].why == Why::Cheat);
+        REQUIRE(d.blockers[0].why == Why::CheatSource);
         REQUIRE(d.blockers[0].mod == source);
-        REQUIRE(d.blockers[0].file == "[On]");
+        REQUIRE(d.blockers[0].file.empty());
+    }
+    {
+        // Three entries of one FPS-named source, one of them FPS-named itself
+        const auto d = f.Run(ModGuard::Auto, {},
+                             {{"Moon Jump", "60FPS Pack"},
+                              {"Infinite Health", "60FPS Pack"},
+                              {"60 FPS", "60FPS Pack"},
+                              {"Moon Jump", "DKB Cheats"}});
+        REQUIRE(d.blockers.size() == 2);
+        REQUIRE(d.blockers[0].why == Why::CheatSource);
+        REQUIRE(d.blockers[0].mod == "60FPS Pack");
+        REQUIRE(d.blockers[1].why == Why::Cheat);
+        REQUIRE(d.blockers[1].file == "60 FPS");
     }
     REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"Moon Jump", "DKB Cheats"},
                                              {"Infinite Health", "cheat_dkb.txt"}})

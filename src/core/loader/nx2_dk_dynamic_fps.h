@@ -580,7 +580,9 @@ inline std::vector<CheatName> EnabledCheats(std::span<const Core::Memory::CheatE
 
 /// What turned the patch off.
 struct Blocker {
-    enum class Why { Zone, Name, AnyMod, Cheat };
+    /// Cheat: the entry's name reads like a frame rate cheat; CheatSource: only its source's
+    /// (mod folder / cheat file) does, once per source (`file` empty)
+    enum class Why { Zone, Name, AnyMod, Cheat, CheatSource };
     Why why{};
     std::string mod;   ///< the mod's folder; for a cheat its source (CheatName::source)
     std::string kind;  ///< "IPS" / "IPSwitch" / "cheat"
@@ -640,13 +642,22 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
         }
     }
     if (guard != ModGuard::Zones) {
+        std::vector<std::string_view> sources_blocked;
         for (const CheatName& cheat : cheats) {
-            // Its entry or where it came from ("60 FPS Cheats", cheat_60fps.txt)
-            if (FpsLikeName(cheat.name) || FpsLikeName(cheat.source)) {
+            if (FpsLikeName(cheat.name)) {
                 decision.blockers.push_back({.why = Blocker::Why::Cheat,
                                              .mod = cheat.source,
                                              .kind = "cheat",
                                              .file = cheat.name});
+                continue;
+            }
+            // Where it came from ("60 FPS Cheats", cheat_60fps.txt): the whole source, once
+            if (FpsLikeName(cheat.source) &&
+                std::find(sources_blocked.begin(), sources_blocked.end(), cheat.source) ==
+                    sources_blocked.end()) {
+                sources_blocked.push_back(cheat.source);
+                decision.blockers.push_back(
+                    {.why = Blocker::Why::CheatSource, .mod = cheat.source, .kind = "cheat"});
             }
         }
     }

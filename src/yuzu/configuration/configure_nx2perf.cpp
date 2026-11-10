@@ -145,6 +145,12 @@ void ConfigureNx2Perf::ShowDkDynConflict() {
                  "(Properties), or unset MOD_GUARD (auto), to use it.")
                   .arg(mod);
         break;
+    case Reason::CheatSource:
+        why = tr("Off in the running game: the cheats from \"%1\" are on and its name reads like "
+                 "a frame rate cheat; both at once run the game too fast. Turn \"%1\" off in "
+                 "Add-Ons (Properties), or rename it, to use it.")
+                  .arg(mod);
+        break;
     case Reason::Cheat:
         why = tr("Off in the running game: the cheat [%1] in \"%2\" reads like a frame rate cheat; "
                  "both at once run the game too fast. Turn \"%2\" off in Add-Ons (Properties; its "

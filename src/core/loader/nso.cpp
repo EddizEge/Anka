@@ -302,6 +302,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                 "in Add-Ons or delete that entry to use dynamic FPS ({})",
                                 blocker.file, blocker.mod, blocker.mod, dk_dyn_guard_label);
                     break;
+                case Why::CheatSource:
+                    LOG_WARNING(Loader,
+                                "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
+                                "boot: the cheats from \"{}\" are enabled and its name reads like "
+                                "a frame rate cheat; both would run the game too fast above 30 "
+                                "fps. Turn \"{}\" off in Add-Ons (or rename it) to use dynamic "
+                                "FPS ({})",
+                                blocker.mod, blocker.mod, dk_dyn_guard_label);
+                    break;
                 }
             }
             if (decision.Blocked()) {
@@ -313,7 +322,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                       : first.why == Why::Zone   ? Reason::Zone
                                       : first.why == Why::Name   ? Reason::Name
                                       : first.why == Why::AnyMod ? Reason::AnyMod
-                                                                 : Reason::Cheat;
+                                      : first.why == Why::CheatSource ? Reason::CheatSource
+                                                                      : Reason::Cheat;
                 Core::SetNx2DkDynConflict(
                     {.reason = reason,
                      .mod = first.mod,

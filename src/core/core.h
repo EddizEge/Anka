@@ -138,6 +138,7 @@ struct Nx2DkDynConflictInfo {
         Name,   ///< the mod's folder or file is named like a frame rate mod
         AnyMod, ///< EDEN_NX2_DK_DYN_MOD_GUARD=all: any mod changing main
         Cheat,  ///< an enabled cheat named like a frame rate cheat
+        CheatSource, ///< enabled cheats from a mod folder / cheat file named like one (`mod`)
     };
     Reason reason{Reason::None};
     std::string mod;   ///< the mod's folder; for a cheat its source (mod folder or cheat_*.txt)
