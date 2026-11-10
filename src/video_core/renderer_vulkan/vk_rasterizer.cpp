@@ -59,6 +59,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_b_pad.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
 #include "video_core/renderer_vulkan/nx2_record_list.h"
@@ -420,6 +421,8 @@ RasterizerVulkan::~RasterizerVulkan() {
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_func) {
+    // EDEN_NX2_B_PAD_NS: the virtual slowdown of the thread setting draws up (off by default).
+    VideoCommon::Nx2BPad::Pad();
 
     SCOPE_EXIT {
         gpu.TickWork();
