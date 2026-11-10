@@ -90,9 +90,6 @@ inline int Nx2SsboFast() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
 }
-/// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
-/// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
-/// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full).
 /// EDEN_NX2_DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range, as
 /// 15126fbdc1 did (their pop writes nothing there). By default the pop still writes those bytes
 /// and only keeps the range marked GPU-modified.
@@ -103,6 +100,9 @@ inline bool Nx2DownloadGpuCancel() {
     }();
     return enabled;
 }
+/// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
+/// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
+/// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full). Off unless set to 1.
 inline bool Nx2SsboCapDiag() {
     // Off unless set to 1 (ReadNx2Mode reads an unset switch as on).
     static const bool enabled = [] {
@@ -939,10 +939,13 @@ private:
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
     /// For each entry of pending_downloads: the ranges it still writes to guest memory when its
-    /// fence pops. A write to a range after a download was taken removes it from that download
-    /// (and every other pending one): its bytes are older than the write.
+    /// fence pops. A CPU write after a download was taken removes its range from every pending
+    /// download (WriteMemory / ClearDownload; a held write its pages, HeldCpuWrites): those bytes
+    /// are older than guest memory. A GPU write does not (pending_download_superseded), unless
+    /// EDEN_NX2_DL_GPU_CANCEL=1.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
-    /// For each entry of pending_downloads: the ranges the GPU wrote again after it was taken. Its
+    /// For each entry of pending_downloads: the parts of its ranges the GPU wrote again after it
+    /// was taken (only what the download covers). Its
     /// pop still writes their bytes (newer than guest memory, which a guest waiting on the fence
     /// reads) but leaves them in gpu_modified_ranges: the next download brings the newer bytes.
     std::deque<Common::RangeSet<DAddr>> pending_download_superseded;

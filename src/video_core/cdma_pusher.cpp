@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Ryujinx Team and Contributors
 // SPDX-License-Identifier: MIT
 
+#include <atomic>
 #include <bit>
 
 #include "common/thread.h"
@@ -103,8 +104,12 @@ void CDmaPusher::ExecuteCommand(u32 method, u32 arg) {
     default:
         if (method >= thi_regs.reg_array.size()) [[unlikely]] {
             // A guest command list's method index: past the THI registers it wrote other members.
-            LOG_ERROR(Service_NVDRV, "Class {} method {:#x} past the THI registers, ignored",
-                      u32(current_class), method);
+            // The first 16 are logged: a broken list repeats it per word.
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(Service_NVDRV, "Class {} method {:#x} past the THI registers, ignored",
+                          u32(current_class), method);
+            }
             break;
         }
         thi_regs.reg_array[method] = arg;

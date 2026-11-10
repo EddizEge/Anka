@@ -2280,8 +2280,13 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
             ranges.Subtract(device_addr, size);
         }
     } else {
-        for (auto& superseded : pending_download_superseded) {
-            superseded.Add(device_addr, size);
+        // Only the part each download covers: the rest would only grow the set.
+        for (size_t i = 0; i < pending_download_superseded.size(); ++i) {
+            auto& superseded = pending_download_superseded[i];
+            pending_download_ranges[i].ForEachInRange(
+                device_addr, size, [&superseded](DAddr start, DAddr end) {
+                    superseded.Add(start, end - start);
+                });
         }
     }
     memory_tracker.MarkRegionAsGpuModified(device_addr, size);
