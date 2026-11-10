@@ -35,6 +35,7 @@ add_executable(tests
     video_core/memory_tracker.cpp
     video_core/native_qmd.cpp
     video_core/invalidation_accumulator.cpp
+    video_core/pipeline_cache_load.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp
     video_core/ampere_hmma.cpp
