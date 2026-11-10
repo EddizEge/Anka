@@ -829,6 +829,15 @@ TEST_CASE("Nx2DkDynamicFps: Decide, several mods and cheats", "[core]") {
         REQUIRE(d.blockers[0].mod == source);
         REQUIRE(d.blockers[0].file.empty());
     }
+    // A cheat file's "cheat_" prefix is not read: cheat_60.txt is "60"
+    REQUIRE(CheatSourceName("cheat_60.txt") == "60.txt");
+    REQUIRE(CheatSourceName("CHEAT_fps.txt") == "fps.txt");
+    REQUIRE(CheatSourceName("cheat_") == "cheat_");
+    REQUIRE(CheatSourceName("DKB Cheats") == "DKB Cheats");
+    REQUIRE(f.Run(ModGuard::Auto, {}, {{"[On]", "cheat_60.txt"}}).blockers.at(0).why ==
+            Why::CheatSource);
+    REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"[On]", "cheat_dkb.txt"}}).Blocked());
+    REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"[On]", "cheat_v1.60.txt"}}).Blocked());
     {
         // Three entries of one FPS-named source, one of them FPS-named itself
         const auto d = f.Run(ModGuard::Auto, {},

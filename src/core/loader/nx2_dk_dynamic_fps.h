@@ -561,6 +561,25 @@ struct CheatName {
     std::string source; ///< the mod folder with cheats/<build id>.txt, or the cheat_*.txt file
 };
 
+/// A cheat source's name as FpsLikeName reads it: a cheat file's "cheat_" prefix (any case, the
+/// prefix PatchManager loads them by) left out, so "cheat_60.txt" reads as "60.txt".
+inline std::string_view CheatSourceName(std::string_view source) {
+    constexpr std::string_view Prefix = "cheat_";
+    if (source.size() > Prefix.size()) {
+        bool prefix = true;
+        for (size_t i = 0; i < Prefix.size(); ++i) {
+            const char c = source[i] >= 'A' && source[i] <= 'Z'
+                               ? static_cast<char>(source[i] - 'A' + 'a')
+                               : source[i];
+            prefix = prefix && c == Prefix[i];
+        }
+        if (prefix) {
+            return source.substr(Prefix.size());
+        }
+    }
+    return source;
+}
+
 /// The enabled cheats of `cheats` (PatchManager::CreateCheatList) with `sources` (one per entry,
 /// in the same order; missing ones are empty).
 inline std::vector<CheatName> EnabledCheats(std::span<const Core::Memory::CheatEntry> cheats,
@@ -652,7 +671,7 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
                 continue;
             }
             // Where it came from ("60 FPS Cheats", cheat_60fps.txt): the whole source, once
-            if (FpsLikeName(cheat.source) &&
+            if (FpsLikeName(CheatSourceName(cheat.source)) &&
                 std::find(sources_blocked.begin(), sources_blocked.end(), cheat.source) ==
                     sources_blocked.end()) {
                 sources_blocked.push_back(cheat.source);
