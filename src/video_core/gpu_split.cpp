@@ -139,7 +139,6 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         return s;
     }();
     g_batch_direct = direct;
-    batch_direct = direct.EverOn();
     pending_count = 0;
     ring = std::make_unique<u64[]>(RingWords);
     // EDEN_NX2_BACK_STAGES: the stages below the back start first (nothing runs behind the
