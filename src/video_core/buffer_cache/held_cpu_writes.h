@@ -86,7 +86,9 @@ u64 WriteAroundCollectedCpuWrites(DAddr addr, u64 size, Write&& write) {
 /// has not uploaded yet (CachedWriteMemory), by device page. A fence download must not write
 /// those pages back when it pops: guest memory holds the CPU's newer bytes there, which the
 /// pending upload reads. Pages, not bytes: the CPU write path skips OnCPUWrite for further writes
-/// to the page it last held. Their other bytes stay GPU-modified: a later download brings them.
+/// to the page it last held. The GPU's other bytes on those pages are queued again
+/// (requeue(begin, length): BufferCache::QueueDownload), for the next fence's download, which
+/// the upload precedes (FenceManager::SignalFence uploads after it commits).
 /// Synchronous downloads do not look at these pages: they leave out the collected writes' bytes
 /// (WriteAroundCollectedCpuWrites). The buffer cache's mutex guards it.
 template <size_t PageSize>
@@ -100,13 +102,17 @@ struct HeldCpuWrites {
         return Common::AlignUp(addr + size, PageSize);
     }
 
-    /// A held write: its pages leave every pending download (and its superseded set).
-    template <typename Downloads>
-    void OnHeldWrite(DAddr addr, u64 size, Downloads& pending_ranges, Downloads& superseded) {
+    /// A held write: its pages leave every pending download (and its superseded set); what those
+    /// downloads covered there is queued again.
+    template <typename Downloads, typename Requeue>
+    void OnHeldWrite(DAddr addr, u64 size, Downloads& pending_ranges, Downloads& superseded,
+                     Requeue&& requeue) {
         const DAddr begin = PageBegin(addr);
         const u64 length = PageEnd(addr, size) - begin;
         pages.Add(begin, length);
         for (auto& ranges : pending_ranges) {
+            ranges.ForEachInRange(begin, length,
+                                  [&](DAddr start, DAddr end) { requeue(start, end - start); });
             ranges.Subtract(begin, length);
         }
         for (auto& ranges : superseded) {
@@ -115,10 +121,13 @@ struct HeldCpuWrites {
     }
 
     /// A download taken now copies the buffer before the held writes' upload: it must not write
-    /// their pages back either.
-    void OnCommit(Common::RangeSet<DAddr>& new_ranges, DAddr addr, u64 size) const {
+    /// their pages back either; what it covered there is queued again.
+    template <typename Requeue>
+    void OnCommit(Common::RangeSet<DAddr>& new_ranges, DAddr addr, u64 size,
+                  Requeue&& requeue) const {
         pages.ForEachInRange(addr, size, [&](DAddr begin, DAddr end) {
             new_ranges.Subtract(begin, end - begin);
+            requeue(begin, end - begin);
         });
     }
 

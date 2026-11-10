@@ -26,6 +26,8 @@ std::vector<std::pair<DAddr, DAddr>> Collect(const Common::RangeSet<DAddr>& set)
 
 using V = std::vector<std::pair<DAddr, DAddr>>;
 
+constexpr auto NoRequeue = [](DAddr, u64) {};
+
 /// WriteAroundPending's pieces and the bytes it left out.
 struct Around {
     V written;
@@ -61,7 +63,7 @@ TEST_CASE("HeldCpuWrites: a held write after the download keeps its page from th
     Ranges superseded(1);
     pending[0].Add(0x10000, 0x3000); // download taken: pages 0x10000-0x12fff
     superseded[0].Add(0x11000, 0x1000);
-    held.OnHeldWrite(0x11010, 4, pending, superseded); // CPU writes 4 bytes in page 0x11000
+    held.OnHeldWrite(0x11010, 4, pending, superseded, NoRequeue); // CPU writes 4 bytes in 0x11000
     REQUIRE(Collect(pending[0]) == V{{0x10000, 0x11000}, {0x12000, 0x13000}});
     REQUIRE(superseded[0].Empty());
 }
@@ -71,10 +73,10 @@ TEST_CASE("HeldCpuWrites: a download taken before the upload skips the held page
     Held held;
     Ranges pending;
     Ranges superseded;
-    held.OnHeldWrite(0x20ff0, 0x20, pending, superseded); // spans pages 0x20000 and 0x21000
+    held.OnHeldWrite(0x20ff0, 0x20, pending, superseded, NoRequeue); // pages 0x20000 and 0x21000
     Common::RangeSet<DAddr> commit;
     commit.Add(0x1f000, 0x4000);
-    held.OnCommit(commit, 0x1f000, 0x4000);
+    held.OnCommit(commit, 0x1f000, 0x4000, NoRequeue);
     REQUIRE(Collect(commit) == V{{0x1f000, 0x20000}, {0x22000, 0x23000}});
 }
 
@@ -83,17 +85,17 @@ TEST_CASE("HeldCpuWrites: after the upload downloads write the page again and th
     Held held;
     Ranges pending;
     Ranges superseded;
-    held.OnHeldWrite(0x30100, 8, pending, superseded);
+    held.OnHeldWrite(0x30100, 8, pending, superseded, NoRequeue);
     const u32 before = VideoCommon::g_held_cpu_write_epoch.load();
     held.OnUploaded(0x30100, 8, [](DAddr, u64) { return true; });
     REQUIRE(VideoCommon::g_held_cpu_write_epoch.load() != before);
     REQUIRE(held.pages.Empty());
     Common::RangeSet<DAddr> commit;
     commit.Add(0x30000, 0x1000);
-    held.OnCommit(commit, 0x30000, 0x1000);
+    held.OnCommit(commit, 0x30000, 0x1000, NoRequeue);
     REQUIRE(Collect(commit) == V{{0x30000, 0x31000}});
     // An upload of an unrelated range does not move the epoch (no short circuit lost).
-    held.OnHeldWrite(0x40000, 4, pending, superseded);
+    held.OnHeldWrite(0x40000, 4, pending, superseded, NoRequeue);
     const u32 mid = VideoCommon::g_held_cpu_write_epoch.load();
     held.OnUploaded(0x50000, 4, [](DAddr, u64) { return true; });
     REQUIRE(VideoCommon::g_held_cpu_write_epoch.load() == mid);
@@ -122,8 +124,8 @@ TEST_CASE("HeldCpuWrites: held write vs pop order, either way the CPU bytes win"
             superseded.pop_front();
         };
         const auto cpu_write = [&] {
-            held.OnHeldWrite(0x60010, 1, pending, superseded); // under the cache lock
-            memory[0x10] = 0x55;                               // then the bytes land
+            held.OnHeldWrite(0x60010, 1, pending, superseded, NoRequeue); // under the cache lock
+            memory[0x10] = 0x55;                                          // then the bytes land
         };
         if (pop_first) {
             pop();
@@ -134,6 +136,30 @@ TEST_CASE("HeldCpuWrites: held write vs pop order, either way the CPU bytes win"
         }
         REQUIRE(memory[0x10] == 0x55);
     }
+}
+
+TEST_CASE("HeldCpuWrites: what a held write or a commit leaves out is queued again (B2)",
+          "[video_core]") {
+    Held held;
+    Ranges pending(2);
+    Ranges superseded(2);
+    pending[0].Add(0x70800, 0x1000); // the second half of page 0x70000, the first of 0x71000
+    pending[1].Add(0x70000, 0x400);
+    V requeued;
+    const auto requeue = [&](DAddr begin, u64 length) {
+        requeued.emplace_back(begin, begin + length);
+    };
+    held.OnHeldWrite(0x70020, 4, pending, superseded, requeue);
+    std::sort(requeued.begin(), requeued.end());
+    REQUIRE(requeued == V{{0x70000, 0x70400}, {0x70800, 0x71000}});
+    REQUIRE(Collect(pending[0]) == V{{0x71000, 0x71800}});
+    REQUIRE(pending[1].Empty());
+    requeued.clear();
+    Common::RangeSet<DAddr> commit;
+    commit.Add(0x6f000, 0x3000);
+    held.OnCommit(commit, 0x6f000, 0x3000, requeue);
+    REQUIRE(requeued == V{{0x70000, 0x71000}});
+    REQUIRE(Collect(commit) == V{{0x6f000, 0x70000}, {0x71000, 0x72000}});
 }
 
 TEST_CASE("WriteAroundPending: writes all but the pending bytes, in order", "[video_core]") {
