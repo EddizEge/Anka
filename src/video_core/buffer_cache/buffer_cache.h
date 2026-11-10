@@ -969,6 +969,11 @@ void BufferCache<P>::AgeCpuReads() {
     const u64 dropped = read_page_ages.Expire(frame_tick, read_latch_age, [this](DAddr page) {
         cpu_read_ranges.Subtract(page, DEVICE_PAGESIZE);
     });
+    if (dropped != 0) {
+        // The pages left the downloadable set: the CPU write paths' short circuits must reach
+        // OnCPUWrite again, as when a page joins it (NoteCpuRead).
+        held_cpu_writes.BumpEpoch();
+    }
     Common::Nx2Reactive::BumpReadAreaEpoch();
     if (dropped != 0 && Common::Nx2Reactive::StatsEnabled()) {
         Common::Nx2Reactive::Add(Common::Nx2Reactive::Counter::LatchPagesDropped, dropped);

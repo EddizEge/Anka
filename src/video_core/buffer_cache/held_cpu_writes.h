@@ -17,9 +17,11 @@
 
 namespace VideoCommon {
 
-/// Bumped each time held CPU writes are uploaded (HeldCpuWrites::OnUploaded). The CPU's write path
+/// Moves when held CPU writes are uploaded to pages a fence download can cover
+/// (HeldCpuWrites::OnUploaded), when pages become downloadable (BufferCache::NoteCpuRead) and when
+/// CPU-read pages age out (BufferCache::AgeCpuReads). The CPU's write path
 /// (Memory::HandleRasterizerWrite) skips OnCPUWrite for the page it last held only while this is
-/// unchanged: the page is then still in HeldCpuWrites::pages.
+/// unchanged: the page is then still in HeldCpuWrites::pages, or no fence download can cover it.
 inline std::atomic<u32> g_held_cpu_write_epoch{0};
 
 /// The cores' collectors of held CPU writes (Core::System::GetGPUDirtyMemoryManager), set when
@@ -151,7 +153,7 @@ struct HeldCpuWrites {
         }
     }
 
-    /// Ends every short circuit (pages became downloadable).
+    /// Ends every short circuit (pages became downloadable, or stopped being so).
     static void BumpEpoch() {
         g_held_cpu_write_epoch.fetch_add(1, std::memory_order_release);
     }
