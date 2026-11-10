@@ -132,6 +132,21 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
   may take either phase; A's thunk still costs its deferral, which is what is measured.
 - `EDEN_NX2_B_PAD_NS=ab:<n>` (`video_core/nx2_b_pad.h`, PrepareDraw; taken from anka/b-hiz-2):
   no pad in A, n ns a draw in B. The positive control: a known slowdown the method must see.
+  Digits only (a sign or other text is off: `-1` once wrapped to a 4 s spin per draw), held at
+  100 us (`MaxPadNs`), with a warning line.
+- `EDEN_NX2_UBO_BIND_SKIP=ab` (`video_core/buffer_cache/buffer_cache_base.h`,
+  `BindGraphicsUniformBuffer`): A clears every uniform buffer bind for `UpdateUniformBuffers` to
+  resolve (`=0`), B keeps a binding already resolved to the same address and size (the default).
+  The kept binding is checked against `page_table` and the buffer's bounds at each bind, whichever
+  phase resolved it, so each bind takes the phase on its own.
+- `EDEN_NX2_DESC_XLAT=ab` (`video_core/memory_manager.cpp`, `SmallReadPointer`): A translates
+  every small read (`=0`), B goes through the per-thread remembered page pointers (the default).
+  The pointers are dropped by mapping epoch and translation generation, not by the mode, so those
+  an earlier B phase left are as valid as fresh ones.
+- Lazily read 0/1/2 modes (BufferCache's `ReadNx2Mode`) bind through `Common::Nx2Ab::ReadMode`:
+  `ab` / `ab:<n>` is stored as `ModeFollows | n`, any other value is read as before; the cost
+  off is one bit test a call. Only modes correct at any call use it (not `ReadNx2Mode` as a whole:
+  `SYNC_MEMO`, `SYNC_SETS`, `STORAGE_KEEP`, `VERTEX_*` keep state only their on path maintains).
 
 ## Candidates (Anka branches, as of 2026-11-10)
 
@@ -145,6 +160,12 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
 | `EDEN_NX2_FAST_PRIORITY_SCAN` | anka/110-dkb | bound (anka/ab-2) | pure function (same result either way) | easy |
 | `EDEN_NX2_BATCH_DIRECT` | anka/110-dkb | bound (anka/ab-2) | dispatch choice, no state | easy |
 | `EDEN_NX2_DIRTY_THUNK_SKIP` | anka/110-dkb | bound (anka/ab-2) | skips a thunk nobody reads; front thread | easy |
+| `EDEN_NX2_UBO_BIND_SKIP` | anka/110-dkb | bound (anka/ab-3) | per bind, the kept binding re-checked | easy |
+| `EDEN_NX2_DESC_XLAT` | anka/110-dkb | bound (anka/ab-3) | per read, the pointer cache is epoch-checked | easy |
+| `EDEN_NX2_TOUCH_SKIP` | anka/110-dkb | yes | per touch; a stale tick only costs one more `Touch` (read into a `static const bool` today) | easy |
+| `EDEN_NX2_NOTIFY_LAZY` | anka/110-dkb | yes | per dispatch, a wake depth (`static const` in `Scheduler::DispatchWork`) | easy |
+| `EDEN_NX2_PBFLUSH_WINDOW_KIB` | anka/110-dkb | yes | per flush, a window size (`=ab:<kib>`) | easy |
+| `EDEN_NX2_INDIRECT_BATCH` | anka/110-dkb | not as is | copied into the front state at setup (`front->indirect_batch`) | medium |
 
 Not bindable on anka/110-dkb: `JIT_SAME`, `FRONT_MACRO_LEAN` (in JIT-compiled code), `CB_RUNS`
 (set up in the Maxwell3D constructor), `KEY_CMP` (pipeline cache), `BACK_STAGES` / `SPLIT`
