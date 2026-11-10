@@ -85,18 +85,32 @@ struct TakenArgs {
 };
 
 /// Core::ParseLaunchParams' getopt_long options, as far as this needs them: the long name, the
-/// short one and whether it takes a value (-p and -x take the next argument in that code too).
+/// short one, whether getopt gives the short form a value ("c:" in its option string: -c x.ini,
+/// -cx.ini), what the long form takes (--config x.ini, --config=x.ini; --program takes a value
+/// only after "=") and whether ParseLaunchParams then takes the next argument itself
+/// (argv[optind]): -p a b takes a and b, -pa b and --program b take b, -x f and --filter f take f.
 struct LaunchOption {
+    enum class Long { None, Required, Optional };
     std::string_view name;
     char short_name;
-    bool takes_value;
+    bool short_value;
+    Long long_value;
+    bool takes_next;
 };
 inline constexpr std::array<LaunchOption, 13> LaunchOptions{{
-    {"debug", 'd', false},       {"config", 'c', true},       {"fullscreen", 'f', false},
-    {"help", 'h', false},        {"game", 'g', true},         {"multiplayer", 'm', true},
-    {"program", 'p', true},      {"user", 'u', true},         {"version", 'v', false},
-    {"input-profile", 'i', false}, {"null-render", 'n', false}, {"singlecore", 's', false},
-    {"filter", 'x', true},
+    {"debug", 'd', false, LaunchOption::Long::None, false},
+    {"config", 'c', true, LaunchOption::Long::Required, false},
+    {"fullscreen", 'f', false, LaunchOption::Long::None, false},
+    {"help", 'h', false, LaunchOption::Long::None, false},
+    {"game", 'g', true, LaunchOption::Long::Required, false},
+    {"multiplayer", 'm', true, LaunchOption::Long::Required, false},
+    {"program", 'p', true, LaunchOption::Long::Optional, true},
+    {"user", 'u', true, LaunchOption::Long::Required, false},
+    {"version", 'v', false, LaunchOption::Long::None, false},
+    {"input-profile", 'i', false, LaunchOption::Long::None, false},
+    {"null-render", 'n', false, LaunchOption::Long::None, false},
+    {"singlecore", 's', false, LaunchOption::Long::None, false},
+    {"filter", 'x', false, LaunchOption::Long::None, true},
 }};
 
 /// The option "--name" means for getopt_long: the exact name, else the one it is an unambiguous
@@ -188,7 +202,16 @@ inline TakenArgs TakeArgs(int argc, const char* const* argv) {
                                                                                        : equals - 2));
             if (option != nullptr) {
                 out.options.config_given = out.options.config_given || option->short_name == 'c';
-                if (option->takes_value && equals == arg.npos) {
+                if (equals == arg.npos) {
+                    if (option->long_value == LaunchOption::Long::Required) {
+                        ++i;
+                    }
+                    if (option->takes_next) {
+                        ++i;
+                    }
+                } else if (option->long_value != LaunchOption::Long::None && option->takes_next) {
+                    // --program=a b: ParseLaunchParams takes b too (a "=" value on an option
+                    // without one is a getopt error: nothing more is taken)
                     ++i;
                 }
             }
@@ -202,7 +225,16 @@ inline TakenArgs TakeArgs(int argc, const char* const* argv) {
                     continue;
                 }
                 out.options.config_given = out.options.config_given || option->short_name == 'c';
-                if (option->takes_value) {
+                if (option->short_value) {
+                    if (k + 1 == arg.size()) {
+                        ++i;
+                    }
+                    if (option->takes_next) {
+                        ++i;
+                    }
+                    break;
+                }
+                if (option->takes_next) {
                     if (k + 1 == arg.size()) {
                         ++i;
                     }
