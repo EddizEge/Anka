@@ -22,13 +22,15 @@
 #endif
 
 // The profile's variables must be in the environment before the first switch is read, and some
-// are read before main: namespace-scope constants such as video_core's g_nx2_sync_skip_mode or
+// are read before main: namespace-scope globals such as video_core's g_nx2_sync_skip_mode or
 // texture_cache's g_nx2_tex_touch_skip (EDEN_NX2_SYNC_SKIP, _TEX_TOUCH_SKIP and the others
 // tools/baslatici112/onmain_tara.py lists in the yayin lane) are dynamic initializers in the CRT's
 // .CRT$XCU table. This file's initializers go in the library table (.CRT$XCL, init_seg(lib)), which
 // the CRT runs before every .CRT$XCU entry of the program: the EarlyEnvironment below reads the
 // command line and sets the variables there, before any of them. MSVC and clang-cl both honor the
-// pragma; other compilers get a high init_priority. Without --profile it changes nothing.
+// pragma; MinGW gets a high init_priority instead. Without --profile it changes nothing. Outside
+// Windows (Anka ships for Windows only) ApplyFromCommandLine does nothing: SDL_AppInit sets the
+// variables, after the initializers, so the switches read before main keep their outside value.
 #if defined(_MSC_VER)
 #pragma warning(disable : 4073) // initializers put in library initialization area
 #pragma init_seg(lib)
@@ -150,7 +152,8 @@ struct EarlyEnvironment {
 };
 } // namespace
 
-// Its dynamic initializer runs in the library table, after g_first_stdout's (see init_seg above).
+// Its dynamic initializer runs in the library table (see init_seg above), before the program's
+// .CRT$XCU initializers. g_first_stdout above is constant-initialized: no initializer of its own.
 ANKA_PROFILE_EARLY_INIT const EarlyEnvironment g_early_environment;
 
 bool AppliedBeforeInitializers() {
