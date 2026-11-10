@@ -5,10 +5,11 @@ rem Anka launcher for anka-cli.exe (Anka's program without menus).
 rem Put this file next to anka-cli.exe.
 rem Start: put your game (.nsp .xci .nsz .xcz .nup) in the Games folder next to this file and double-click
 rem this file; or drag a game file onto it; or write the game's path in GAME below.
-rem First start: when the user folder has no config\sdl2-config.ini yet, it is made as a copy of
+rem This file only finds the game and starts anka-cli.exe --profile reactive; anka-cli itself sets the
+rem switches of this setup and prepares its settings (README_ANKA.md, "Launchers"). First start: when
+rem the user folder has no config\sdl2-config.ini yet, anka-cli makes it as a copy of
 rem config\qt-config.ini (the controller and settings of the menu program, anka.exe). An existing
-rem sdl2-config.ini is never changed. The .ini edits are made by anka-config.ps1 next to this file
-rem (a small, readable PowerShell script). Quit the game with Alt+F4.
+rem sdl2-config.ini is never changed. Quit the game with Alt+F4.
 rem The second choice next to start-recommended.bat. Reactive flushing copies GPU-written data
 rem back to the game. On our PC (5 Nov, DK_DYN on, frame generation off) it traded the opening
 rem for open areas: with RX_RT_FIT=3, -7 percent FPS at the game's opening and +15 percent in
@@ -29,6 +30,9 @@ rem DK_DYN: 1 = Bananza dynamic frame rate patch (in memory, README), 0 = off.
 set "DK_DYN=1"
 rem OSD: 1 = FPS / speed overlay through RivaTuner Statistics Server (if running).
 set "OSD=1"
+rem RX_RT_FIT: 3 keeps the render pass going with a barrier inside it, 1 ends it (slower;
+rem try it when you see wrong images).
+set "RX_RT_FIT=3"
 rem ---------------------------------------------------------------------------------------
 set "HERE=%~dp0"
 if not exist "%HERE%anka-cli.exe" goto noexe
@@ -41,76 +45,17 @@ if "%NGAMES%"=="1" goto havegame
 goto choose
 :havegame
 if not exist "%GAME%" goto gamemissing
-if defined CONFIG goto userconfig
-call :prepconfig
-if errorlevel 1 exit /b 1
-goto configdone
-:userconfig
+if not defined CONFIG goto configdone
 if not exist "%CONFIG%" goto noconfig
 :configdone
-rem Opt-in switches this launcher does not use: cleared.
-set EDEN_NX2_PRESENT_INTERVAL=
-set EDEN_NX2_MODE_GOV=
-set EDEN_NX2_DK_DYN_MIN_FPS=
-set EDEN_NX2_BACK_CPU=
-set EDEN_NX2_SEMEXEC_DEFER=
-set EDEN_NX2_SKIP_EMPTY_DRAWS=
-set EDEN_NX2_ASYNC_SKIP=
-set EDEN_NX2_VBLANK_GRID=
-set EDEN_NX2_VRR_VSYNC=
-set EDEN_NX2_GPU_BUSY_CLOCK=
-set EDEN_NX2_GPU_TICK_DIV=
-set EDEN_NX2_PACE_GUEST_SLEEP=
-set EDEN_NX2_PRESENT_RATE=
-set EDEN_NX2_PRESENT_DIAG=
-set EDEN_NX2_MODE_DIAG=
-set EDEN_NX2_MODE_DIAG_MAX=
-set EDEN_NX2_PACE_ONE=
-set EDEN_NX2_MEMBAR=
-set EDEN_NX2_BACK_CORE=
-set EDEN_NX2_FRONT_CORE=
-set EDEN_NX2_FG_DIAG=
-set EDEN_NX2_FLUSH_FIRST_READ=
-set EDEN_NX2_READ_LATCH_AGE=
-set EDEN_NX2_RX_ONE_SUBMIT=
-set EDEN_NX2_RX_COALESCE=
-set EDEN_NX2_RX_PITCH_FORCED=
-set EDEN_NX2_RX_MASKED_TARGETS=
-set EDEN_NX2_REACTIVE_STATS=
-set EDEN_NX2_RX_NO_COPYBACK=
-set EDEN_NX2_RX_NO_RT_LATCH=
-set EDEN_NX2_RX_COALESCE_LOOSE=
-rem The recommended switches (README_ANKA.md, "Launchers").
-rem Split GPU thread: the back as stages (cut a), acquire peek, leaner front macro path.
-set EDEN_NX2_BACK_STAGES=1
-set EDEN_NX2_BACK_CUTS=a
-set EDEN_NX2_ACQUIRE_PEEK=1
-set EDEN_NX2_JIT_SAME=1
-set EDEN_NX2_FRONT_MACRO_LEAN=1
-rem Donkey Kong Bananza: follow the game's own 60/30/20 fps choice at the right speed.
-set EDEN_NX2_PRESENT_INTERVAL_WORD=12:16:4
-set EDEN_NX2_MODE_PACE=2
-set EDEN_NX2_PACE_SPIN_US=1500
-rem Donkey Kong Bananza dynamic frame rate (DK_DYN above; 0 = the game's own 60/30 rule).
-set EDEN_NX2_DK_DYN=%DK_DYN%
-rem FSR3 frame generation: generated frames blended for the time they are shown (only
-rem does something when frame generation is on in the config, README).
-set EDEN_NX2_FG_TIMED=1
-rem Game FPS, display FPS and speed in RivaTuner Statistics Server's overlay (OSD above).
-set EDEN_NX2_OSD=%OSD%
-rem Reactive flushing: Bananza's opening renders into one image instead of a copy per draw
-rem (needs barrier_feedback_loops=true in the config); 3 keeps the render pass going with a
-rem barrier inside it, 1 ends it (slower). Do not add RX_MASKED_TARGETS (known defect) or
-rem RX_COALESCE_LOOSE (diagnostic only).
-set EDEN_NX2_RX_RT_FIT=3
 if defined CONFIG goto withconfig
-"%HERE%anka-cli.exe" %FULLSCREEN% -g "%GAME%"
+"%HERE%anka-cli.exe" --profile reactive --dk-dyn "%DK_DYN%" --osd "%OSD%" --rx-rt-fit "%RX_RT_FIT%" %FULLSCREEN% -g "%GAME%"
 goto ran
 :withconfig
-"%HERE%anka-cli.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+"%HERE%anka-cli.exe" --profile reactive --dk-dyn "%DK_DYN%" --osd "%OSD%" --rx-rt-fit "%RX_RT_FIT%" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
 :ran
 rem Keep the window open when the emulator stopped with an error (any non-zero code, a crash's
-rem is negative), so it can be read.
+rem is negative, 1 also when there were no settings yet), so it can be read.
 if not "%errorlevel%"=="0" pause
 goto end
 :nogame
@@ -190,65 +135,5 @@ set /a I+=1
 if "%I%"=="%PICK%" set "GAME=%F%"
 exit /b 0
 
-rem ---- the config: the user folder as anka-cli finds it (user\ next to the program, else
-rem %APPDATA%\eden); an existing sdl2-config.ini is only read, never written ---------------
-:prepconfig
-if exist "%HERE%anka-config.ps1" goto prepstart
-echo  [Anka] anka-config.ps1 is not next to this .bat: the settings step is skipped.
-exit /b 0
-:prepstart
-set "UDIR=%APPDATA%\eden"
-if exist "%HERE%user\" set "UDIR=%HERE%user"
-set "CDIR=%UDIR%\config"
-set "SDL=%CDIR%\sdl2-config.ini"
-set "FRESH="
-if exist "%SDL%" goto sdlready
-if not exist "%CDIR%\qt-config.ini" goto noini
-copy /y "%CDIR%\qt-config.ini" "%SDL%" >nul
-if errorlevel 1 goto noini
-set "FRESH=1"
-echo  [Anka] config\sdl2-config.ini was made from qt-config.ini: the controller and settings of
-echo            the menu program (anka.exe) are used.
-:sdlready
-if not defined FRESH goto rxcopy
-set "NX2_INI=%SDL%"
-set "NX2_SET=use_reactive_flushing\default=false|use_reactive_flushing=false"
-call :psset
-:rxcopy
-set "RXI=%CDIR%\sdl2-config-reactive.ini"
-if exist "%RXI%" goto rxuse
-copy /y "%SDL%" "%RXI%" >nul
-if errorlevel 1 goto rxfail
-set "NX2_INI=%RXI%"
-set "NX2_SET=use_reactive_flushing\default=false|use_reactive_flushing=true|barrier_feedback_loops\default=false|barrier_feedback_loops=true"
-call :psset
-if errorlevel 1 goto rxfail
-echo  [Anka] config\sdl2-config-reactive.ini made (reactive flushing on).
-:rxuse
-set "CONFIG=%RXI%"
-exit /b 0
-:rxfail
-rem the half-made copy is this launcher's own (it did not exist above): remove it, try again next time
-if exist "%RXI%" del /f /q "%RXI%" >nul 2>&1
-echo  [Anka] config\sdl2-config-reactive.ini could not be made: this start uses sdl2-config.ini
-echo            as it is (reactive flushing as set there).
-pause
-exit /b 0
-:noini
-echo.
-echo  [Anka] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
-echo            "%CDIR%".
-echo            Start anka.exe once and set up your controller there, then start this again.
-echo.
-pause
-exit /b 1
-:psset
-set "NX2_MODE=set"
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%HERE%anka-config.ps1"
-if errorlevel 1 goto psfail
-exit /b 0
-:psfail
-echo  [Anka] Could not edit "%NX2_INI%".
-exit /b 1
 :end
 endlocal

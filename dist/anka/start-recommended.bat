@@ -5,11 +5,12 @@ rem Anka launcher for anka-cli.exe (Anka's program without menus).
 rem Put this file next to anka-cli.exe.
 rem Start: put your game (.nsp .xci .nsz .xcz .nup) in the Games folder next to this file and double-click
 rem this file; or drag a game file onto it; or write the game's path in GAME below.
-rem First start: when the user folder has no config\sdl2-config.ini yet, it is made as a copy of
+rem This file only finds the game and starts anka-cli.exe --profile recommended; anka-cli itself sets the
+rem switches of this setup and prepares its settings (README_ANKA.md, "Launchers"). First start: when
+rem the user folder has no config\sdl2-config.ini yet, anka-cli makes it as a copy of
 rem config\qt-config.ini (the controller and settings of the menu program, anka.exe). An existing
-rem sdl2-config.ini is never changed. The .ini edits are made by anka-config.ps1 next to this file
-rem (a small, readable PowerShell script). Quit the game with Alt+F4.
-rem Bananza-specific lines are marked; for other games use start-safe.bat.
+rem sdl2-config.ini is never changed. Quit the game with Alt+F4.
+rem Bananza-specific settings: DK_DYN below and the frame pacing; for other games use start-safe.bat.
 rem ---- your settings -------------------------------------------------------------------
 rem GAME: the game to start (a drag-and-drop file wins over this line, this line over Games).
 set "GAME="
@@ -33,72 +34,17 @@ if "%NGAMES%"=="1" goto havegame
 goto choose
 :havegame
 if not exist "%GAME%" goto gamemissing
-if defined CONFIG goto userconfig
-call :prepconfig
-if errorlevel 1 exit /b 1
-goto configdone
-:userconfig
+if not defined CONFIG goto configdone
 if not exist "%CONFIG%" goto noconfig
 :configdone
-rem Opt-in switches this launcher does not use: cleared.
-set EDEN_NX2_PRESENT_INTERVAL=
-set EDEN_NX2_MODE_GOV=
-set EDEN_NX2_DK_DYN_MIN_FPS=
-set EDEN_NX2_BACK_CPU=
-set EDEN_NX2_SEMEXEC_DEFER=
-set EDEN_NX2_SKIP_EMPTY_DRAWS=
-set EDEN_NX2_ASYNC_SKIP=
-set EDEN_NX2_VBLANK_GRID=
-set EDEN_NX2_VRR_VSYNC=
-set EDEN_NX2_GPU_BUSY_CLOCK=
-set EDEN_NX2_GPU_TICK_DIV=
-set EDEN_NX2_PACE_GUEST_SLEEP=
-set EDEN_NX2_PRESENT_RATE=
-set EDEN_NX2_PRESENT_DIAG=
-set EDEN_NX2_MODE_DIAG=
-set EDEN_NX2_MODE_DIAG_MAX=
-set EDEN_NX2_PACE_ONE=
-set EDEN_NX2_MEMBAR=
-set EDEN_NX2_BACK_CORE=
-set EDEN_NX2_FRONT_CORE=
-set EDEN_NX2_FG_DIAG=
-set EDEN_NX2_RX_RT_FIT=
-set EDEN_NX2_FLUSH_FIRST_READ=
-set EDEN_NX2_READ_LATCH_AGE=
-set EDEN_NX2_RX_ONE_SUBMIT=
-set EDEN_NX2_RX_COALESCE=
-set EDEN_NX2_RX_PITCH_FORCED=
-set EDEN_NX2_RX_MASKED_TARGETS=
-set EDEN_NX2_REACTIVE_STATS=
-set EDEN_NX2_RX_NO_COPYBACK=
-set EDEN_NX2_RX_NO_RT_LATCH=
-set EDEN_NX2_RX_COALESCE_LOOSE=
-rem The recommended switches (README_ANKA.md, "Launchers").
-rem Split GPU thread: the back as stages (cut a), acquire peek, leaner front macro path.
-set EDEN_NX2_BACK_STAGES=1
-set EDEN_NX2_BACK_CUTS=a
-set EDEN_NX2_ACQUIRE_PEEK=1
-set EDEN_NX2_JIT_SAME=1
-set EDEN_NX2_FRONT_MACRO_LEAN=1
-rem Donkey Kong Bananza: follow the game's own 60/30/20 fps choice at the right speed.
-set EDEN_NX2_PRESENT_INTERVAL_WORD=12:16:4
-set EDEN_NX2_MODE_PACE=2
-set EDEN_NX2_PACE_SPIN_US=1500
-rem Donkey Kong Bananza dynamic frame rate (DK_DYN above; 0 = the game's own 60/30 rule).
-set EDEN_NX2_DK_DYN=%DK_DYN%
-rem FSR3 frame generation: generated frames blended for the time they are shown (only
-rem does something when frame generation is on in the config, README).
-set EDEN_NX2_FG_TIMED=1
-rem Game FPS, display FPS and speed in RivaTuner Statistics Server's overlay (OSD above).
-set EDEN_NX2_OSD=%OSD%
 if defined CONFIG goto withconfig
-"%HERE%anka-cli.exe" %FULLSCREEN% -g "%GAME%"
+"%HERE%anka-cli.exe" --profile recommended --dk-dyn "%DK_DYN%" --osd "%OSD%" %FULLSCREEN% -g "%GAME%"
 goto ran
 :withconfig
-"%HERE%anka-cli.exe" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
+"%HERE%anka-cli.exe" --profile recommended --dk-dyn "%DK_DYN%" --osd "%OSD%" -c "%CONFIG%" %FULLSCREEN% -g "%GAME%"
 :ran
 rem Keep the window open when the emulator stopped with an error (any non-zero code, a crash's
-rem is negative), so it can be read.
+rem is negative, 1 also when there were no settings yet), so it can be read.
 if not "%errorlevel%"=="0" pause
 goto end
 :nogame
@@ -178,58 +124,5 @@ set /a I+=1
 if "%I%"=="%PICK%" set "GAME=%F%"
 exit /b 0
 
-rem ---- the config: the user folder as anka-cli finds it (user\ next to the program, else
-rem %APPDATA%\eden); an existing sdl2-config.ini is only read, never written ---------------
-:prepconfig
-if exist "%HERE%anka-config.ps1" goto prepstart
-echo  [Anka] anka-config.ps1 is not next to this .bat: the settings step is skipped.
-exit /b 0
-:prepstart
-set "UDIR=%APPDATA%\eden"
-if exist "%HERE%user\" set "UDIR=%HERE%user"
-set "CDIR=%UDIR%\config"
-set "SDL=%CDIR%\sdl2-config.ini"
-set "FRESH="
-if exist "%SDL%" goto sdlready
-if not exist "%CDIR%\qt-config.ini" goto noini
-copy /y "%CDIR%\qt-config.ini" "%SDL%" >nul
-if errorlevel 1 goto noini
-set "FRESH=1"
-echo  [Anka] config\sdl2-config.ini was made from qt-config.ini: the controller and settings of
-echo            the menu program (anka.exe) are used.
-:sdlready
-if not defined FRESH goto checkrx
-set "NX2_INI=%SDL%"
-set "NX2_SET=use_reactive_flushing\default=false|use_reactive_flushing=false"
-call :psset
-if errorlevel 1 goto checkrx
-echo  [Anka] Reactive flushing off in the new copy (the measured setup).
-exit /b 0
-:checkrx
-set "NX2_INI=%SDL%"
-set "NX2_MODE=check"
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%HERE%anka-config.ps1"
-rem exit code 42 = reactive flushing on; anything else (0, or PowerShell not found) = no note
-if errorlevel 43 exit /b 0
-if not errorlevel 42 exit /b 0
-echo  [Anka] Note: reactive flushing is on in your sdl2-config.ini; this launcher was measured with
-echo            it off (README_ANKA.md, "Reactive flushing"). The file was not changed.
-exit /b 0
-:noini
-echo.
-echo  [Anka] No settings yet: neither config\sdl2-config.ini nor config\qt-config.ini in
-echo            "%CDIR%".
-echo            Start anka.exe once and set up your controller there, then start this again.
-echo.
-pause
-exit /b 1
-:psset
-set "NX2_MODE=set"
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%HERE%anka-config.ps1"
-if errorlevel 1 goto psfail
-exit /b 0
-:psfail
-echo  [Anka] Could not edit "%NX2_INI%".
-exit /b 1
 :end
 endlocal
