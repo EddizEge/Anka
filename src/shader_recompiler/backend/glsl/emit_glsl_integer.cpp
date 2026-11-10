@@ -43,9 +43,11 @@ void EmitIAdd32(EmitContext& ctx, IR::Inst& inst, std::string_view a, std::strin
     if (IR::Inst * overflow{inst.GetAssociatedPseudoOperation(IR::Opcode::GetOverflowFromOp)}) {
         // https://stackoverflow.com/questions/55468823/how-to-detect-integer-overflow-in-c
         constexpr u32 s32_max{static_cast<u32>((std::numeric_limits<s32>::max)())};
+        constexpr u32 s32_min{static_cast<u32>((std::numeric_limits<s32>::min)())};
         const auto sub_a{fmt::format("{}u-{}", s32_max, a)};
+        const auto sub_min_a{fmt::format("{}u-{}", s32_min, a)};
         const auto positive_result{fmt::format("int({})>int({})", b, sub_a)};
-        const auto negative_result{fmt::format("int({})<int({})", b, sub_a)};
+        const auto negative_result{fmt::format("int({})<int({})", b, sub_min_a)};
         ctx.AddU1("{}=int({})>=0?{}:{};", *overflow, a, positive_result, negative_result);
         overflow->Invalidate();
     }

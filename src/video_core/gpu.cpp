@@ -24,6 +24,7 @@
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/perf_stats.h"
+#include "video_core/buffer_cache/held_cpu_writes.h"
 #include "video_core/cdma_pusher.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/control/scheduler.h"
@@ -68,9 +69,14 @@ struct GPU::Impl {
         , use_nvdec{use_nvdec_}
         , shader_notify()
         , is_async{is_async_}
-    {}
+    {
+        // Synchronous buffer downloads leave out the held CPU writes these collect (K1b).
+        VideoCommon::g_cpu_write_collectors = system.GetGPUDirtyMemoryManager();
+    }
 
-    ~Impl() = default;
+    ~Impl() {
+        VideoCommon::g_cpu_write_collectors = {};
+    }
 
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);

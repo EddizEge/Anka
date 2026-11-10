@@ -19,6 +19,7 @@
 #include <queue>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -157,6 +158,17 @@ public:
     }
 
     void SignalSyncPoint(u32 value) {
+        // The id comes from a command list (the 3D engine's sync method, the puller's fence
+        // action). Past the syncpoint table, the increment would walk memory after it as an
+        // action list; command words read wrong carry any id (Splatoon Raiders on Linux).
+        if (value >= Tegra::Host1x::SyncpointManager::NUM_MAX_SYNCPOINTS) {
+            // The first 16 are logged: a broken list repeats it per word.
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(HW_GPU, "Signal of syncpoint {} past the table, ignored", value);
+            }
+            return;
+        }
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
         SignalFence(std::move(func));

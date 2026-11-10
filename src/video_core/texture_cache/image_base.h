@@ -113,6 +113,19 @@ struct ImageBase {
     /// Large layered images uploaded by layer: one bit per layer written since the last upload
     /// while CpuModified. Empty while CpuModified means the whole image.
     std::vector<u64> dirty_layers;
+    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: while a swizzled download of this image is pending, the
+    /// CPU writes over it (sequence, device address, size), so its pop keeps their bytes.
+    struct CpuWriteRecord {
+        u64 seq;
+        DAddr addr;
+        u64 size;
+        /// Sequence of the upload that put these bytes in the image (RefreshContents); none yet:
+        /// the maximum. A copy recorded after it already holds them.
+        u64 in_image = ~u64{0};
+    };
+    std::vector<CpuWriteRecord> cpu_writes_since_download;
+    u64 download_queued_seq = 0;      ///< Sequence of the last swizzled download queued, 0: none.
+    bool cpu_writes_overflow = false; ///< More writes than recorded: pops swizzle as before.
     u64 scale_tick = 0;
     bool has_scaled = false;
 

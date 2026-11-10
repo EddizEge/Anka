@@ -33,6 +33,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "core/nx2_host_core.h"
+#include "video_core/buffer_cache/held_cpu_writes.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -804,22 +805,44 @@ struct Memory::Impl {
             // It may not be a good idea to assume accesses are within the same subaddress (i.e same page)
             // It is often the case the games like to access wildly different addresses. Hence why I propose
             // we should let the compiler just do it's thing...
-            if (current_area.last_address != subaddress) {
+            // The page this core's last held write went to skips OnCPUWrite only while the epoch
+            // has not moved since (VideoCommon::g_held_cpu_write_epoch): the buffer cache still
+            // keeps that page from the pending downloads (HeldCpuWrites), or none covers it.
+            const u32 epoch =
+                VideoCommon::g_held_cpu_write_epoch.load(std::memory_order_acquire);
+            if (current_area.last_address != subaddress || current_area.epoch != epoch) {
                 // Short circuit the need to check for address/size
                 auto const do_collection = (address != 0 && size != 0)
                     && system.GPU().OnCPUWrite(address, size);
                 if (do_collection) {
                     current_area.last_address = subaddress;
+                    current_area.epoch = epoch;
                 } else {
                     return;
                 }
             }
             gpu_dirty_managers[core].Collect(address, size);
+            // An upload of the page between the epoch's load and Collect (this thread preempted:
+            // the gather did not see this write yet) let the next fence's download cover the
+            // page again; its pop would write the GPU's older bytes over this write. Hold it again
+            // before the bytes reach guest memory (B3). What is left: an upload between this load
+            // and the caller's copy into guest memory.
+            for (u32 now = VideoCommon::g_held_cpu_write_epoch.load(std::memory_order_acquire);
+                 now != current_area.epoch;
+                 now = VideoCommon::g_held_cpu_write_epoch.load(std::memory_order_acquire)) {
+                current_area.epoch = now;
+                if (!system.GPU().OnCPUWrite(address, size)) {
+                    // No longer GPU-modified: the buffer cache marked it CPU-modified instead.
+                    current_area.last_address = ~PAddr{0};
+                    break;
+                }
+            }
         });
     }
 
     struct GPUDirtyState {
         PAddr last_address;
+        u32 epoch;
     };
 
     void InvalidateGPUMemory(u8* p, size_t size) {

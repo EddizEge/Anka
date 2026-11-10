@@ -46,11 +46,13 @@ Id EmitIAdd32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
     if (IR::Inst * overflow{inst->GetAssociatedPseudoOperation(IR::Opcode::GetOverflowFromOp)}) {
         // https://stackoverflow.com/questions/55468823/how-to-detect-integer-overflow-in-c
         constexpr u32 s32_max{static_cast<u32>((std::numeric_limits<s32>::max)())};
+        constexpr u32 s32_min{static_cast<u32>((std::numeric_limits<s32>::min)())};
         const Id is_positive{ctx.OpSGreaterThanEqual(ctx.U1, a, ctx.u32_zero_value)};
         const Id sub_a{ctx.OpISub(ctx.U32[1], ctx.Const(s32_max), a)};
+        const Id sub_min_a{ctx.OpISub(ctx.U32[1], ctx.Const(s32_min), a)};
 
         const Id positive_test{ctx.OpSGreaterThan(ctx.U1, b, sub_a)};
-        const Id negative_test{ctx.OpSLessThan(ctx.U1, b, sub_a)};
+        const Id negative_test{ctx.OpSLessThan(ctx.U1, b, sub_min_a)};
         const Id carry_flag{ctx.OpSelect(ctx.U1, is_positive, positive_test, negative_test)};
         overflow->SetDefinition(carry_flag);
         overflow->Invalidate();
