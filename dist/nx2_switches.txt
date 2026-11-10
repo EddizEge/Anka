@@ -38,6 +38,7 @@
 #EDEN_NX2_FAST_PRIORITY_SCAN=0
 #EDEN_NX2_DESC_XLAT=0
 #EDEN_NX2_DIRTY_THUNK_SKIP=0
+# (FAST_PRIORITY_SCAN=ab, DIRTY_THUNK_SKIP=ab: =0 in the A/B test's phase A, on in B.)
 
 # --- limits / tuning ---
 #EDEN_NX2_VRAM_LIMIT_MIB=8192
@@ -94,6 +95,7 @@
 # BATCH_DIRECT=0: a batch entry's writes reach the engine one virtual call each (default:
 # CallMethodBatch).
 #EDEN_NX2_BATCH_DIRECT=0
+# (BATCH_DIRECT=ab: =0 in the A/B test's phase A, on in B.)
 # CB_RUNS=0: the back runs the constant buffer words a macro writes one at a time (default:
 # in runs).
 #EDEN_NX2_CB_RUNS=0

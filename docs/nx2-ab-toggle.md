@@ -113,6 +113,17 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
 - `EDEN_NX2_TICK_SKIP=ab` (`video_core/gpu.cpp`, `TickWork`): A looks at the GPU tick queue under
   its lock after every draw (the old way, `=0`), B skips it when the queue is empty (the default).
   Both are correct at any tick; each call takes the phase itself.
+- `EDEN_NX2_FAST_PRIORITY_SCAN=ab` (`core/hle/kernel/k_priority_queue.h`, `FindSet`): A scans
+  the priority bitset bit by bit (`=0`), B with one count-trailing-zeros (the default). The same
+  bit either way (`=2` checks that), so any scan may take either phase.
+- `EDEN_NX2_BATCH_DIRECT=ab` (`video_core/gpu_split.cpp`, the back's Batch entries): A goes
+  write by write through the engine's virtual calls (`=0`), B through `CallMethodBatch` (the
+  default). The same writes in the same order, nothing carried between entries: each Batch entry
+  takes the phase on its own.
+- `EDEN_NX2_DIRTY_THUNK_SKIP=ab` (`video_core/dma_pusher.cpp`, front macros on a native Turing
+  Maxwell3D): A defers the `current_dirty` thunk to the back (`=0`), B skips it (the default).
+  For these macros nobody reads the value (the back's ProcessMacro never sees them), so an entry
+  may take either phase; A's thunk still costs its deferral, which is what is measured.
 
 ## Candidates (Anka branches, as of 2026-11-10)
 
@@ -123,9 +134,9 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
 | `EDEN_NX2_READ_TRAPS` | anka/read-trap | no | correctness mechanism (A would be known-wrong); page protections, trap maps and Dynarmic's recompiled reads persist | — |
 | `EDEN_NX2_NULL_AUDIO_PACE` | anka/qt-hiz-2 | technically easy, not useful | pacing: it sets how often the game runs, not how fast the emulator is | — |
 | `EDEN_NX2_TEX_FLUSH_HELD` | anka/dogru | not useful | correctness fix (A known-wrong), needs the run-fixed `TEX_FLUSH_KEEP_CPU` | medium |
-| `EDEN_NX2_FAST_PRIORITY_SCAN` | anka/110-dkb | yes | pure function (same result either way) | easy |
-| `EDEN_NX2_BATCH_DIRECT` | anka/110-dkb | yes | dispatch choice, no state | easy |
-| `EDEN_NX2_DIRTY_THUNK_SKIP` | anka/110-dkb | yes | skips a thunk nobody reads; front thread | easy |
+| `EDEN_NX2_FAST_PRIORITY_SCAN` | anka/110-dkb | bound (anka/ab-2) | pure function (same result either way) | easy |
+| `EDEN_NX2_BATCH_DIRECT` | anka/110-dkb | bound (anka/ab-2) | dispatch choice, no state | easy |
+| `EDEN_NX2_DIRTY_THUNK_SKIP` | anka/110-dkb | bound (anka/ab-2) | skips a thunk nobody reads; front thread | easy |
 
 Not bindable on anka/110-dkb: `JIT_SAME`, `FRONT_MACRO_LEAN` (in JIT-compiled code), `CB_RUNS`
 (set up in the Maxwell3D constructor), `KEY_CMP` (pipeline cache), `BACK_STAGES` / `SPLIT`
