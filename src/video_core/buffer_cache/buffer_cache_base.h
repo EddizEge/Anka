@@ -943,9 +943,10 @@ private:
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
     /// For each entry of pending_downloads: the ranges it still writes to guest memory when its
     /// fence pops. A CPU write after a download was taken removes its range from every pending
-    /// download (WriteMemory / ClearDownload; a held write its pages, HeldCpuWrites): those bytes
-    /// are older than guest memory. A GPU write does not (pending_download_superseded), unless
-    /// EDEN_NX2_DL_GPU_CANCEL=1.
+    /// download (WriteMemory / ClearDownload; a held write its pages, HeldCpuWrites, which queues
+    /// the GPU's other bytes there again): those bytes are older than guest memory. So do the DMA
+    /// engine's copies and clears into it (DMACopy / DMAClear: ClearDownload). Another GPU write
+    /// does not (pending_download_superseded), unless EDEN_NX2_DL_GPU_CANCEL=1.
     std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
     /// For each entry of pending_downloads: the parts of its ranges the GPU wrote again after it
     /// was taken (only what the download covers). Its

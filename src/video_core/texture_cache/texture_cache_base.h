@@ -57,7 +57,8 @@ struct ChannelState;
 namespace VideoCommon {
 
 /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the
-/// image after the download was queued (ImageBase::cpu_writes_since_download). Off: as before.
+/// image that were not in it when its copy was recorded (ImageBase::cpu_writes_since_download).
+/// Off: as before.
 inline bool Nx2TexFlushKeepCpu() {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_TEX_FLUSH_KEEP_CPU");

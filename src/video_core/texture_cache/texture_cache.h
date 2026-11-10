@@ -1369,7 +1369,8 @@ void TextureCache<P>::RecordCpuWrite(ImageBase& image, u64 seq, DAddr cpu_addr, 
 
 template <class P>
 void TextureCache<P>::NoteHeldCpuWrite(DAddr cpu_addr, size_t size) {
-    // The sequence is taken now: a download queued after this write must not keep its bytes.
+    // The sequence is taken now. The record's in_image stays "never" (no RefreshContents tells
+    // when the held bytes reach the image): every later copy keeps them (known bug, switches).
     const u64 seq = NextCpuWriteSeq();
     std::scoped_lock lock{held_cpu_writes_mutex};
     constexpr size_t max_held = 1024;
@@ -1423,8 +1424,9 @@ void TextureCache<P>::PopAsyncFlushes() {
         DrainHeldCpuWrites();
     }
     // Writes the GPU's bytes back to guest memory. EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: what the CPU
-    // wrote over the image since the download was queued is newer, so its bytes are kept (read
-    // before, written back after). Without a record (overflow, or the switch off) as before.
+    // wrote over the image that was not in it when the copy was recorded (copy_seq) is newer, so
+    // its bytes are kept (read before, written back after). Without a record (overflow, or the
+    // switch off) as before.
     const auto swizzle = [this](ImageBase& image, u64 queued_seq, u64 copy_seq,
                                 std::span<const BufferImageCopy> copies, std::span<u8> span) {
         boost::container::small_vector<std::pair<const ImageBase::CpuWriteRecord*, std::vector<u8>>, 4>
