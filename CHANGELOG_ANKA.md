@@ -22,7 +22,9 @@ and `=0` brings back the 2.0.0 code path.
 - Cheats: a mod's `cheats/<build id>.txt` is read once on Windows (its upper and lower case names
   opened the same file twice).
 - Menu program: `EDEN_NX2_QT_GAME_INPUT_MS=<1-8>`, the input pump's interval while a game runs
-  (off by default; no frame rate gain measured).
+  (off by default; no frame rate gain measured). `EDEN_NX2_QT_INPUT_MS` is read strictly now: a
+  whole number of 1-16 (trailing spaces allowed); "4ms" or "16.5", taken as 4 and 16 before, are
+  ignored with a warning in the log.
 
 ## Anka 1.0.1 (`anka-v1.0.1`)
 

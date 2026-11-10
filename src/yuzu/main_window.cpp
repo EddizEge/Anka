@@ -493,7 +493,11 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         }
         char* end = nullptr;
         const long value = std::strtol(text, &end, 10);
-        if (end == text || *end != '\0' || value < 1 || value > high) {
+        const char* rest = end;
+        while (*rest == ' ' || *rest == '\t') { // trailing spaces (a .bat line's) are fine
+            ++rest;
+        }
+        if (end == text || *rest != '\0' || value < 1 || value > high) {
             LOG_WARNING(Frontend, "{}=\"{}\": not a whole number of 1-{}, ignored", name, text,
                         high);
             return 0;
