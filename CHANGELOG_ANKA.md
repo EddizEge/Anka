@@ -24,8 +24,8 @@ and `=0` brings back the 2.0.0 code path.
   `RX_RT_FIT=` line at its top. The programs are still unsigned, so a virus scanner may still
   warn about them.
 - If `sdl2-config-reactive.ini` cannot be made (for example the `user` folder cannot be written),
-  the reactive launcher now stops with a message. 1.1.1 started the game with `sdl2-config.ini`
-  (reactive flushing off) in that case.
+  the reactive launcher now stops with a message. In that case 1.1.1 started the game with
+  `sdl2-config.ini` as it was (reactive flushing as set there) and `EDEN_NX2_RX_RT_FIT=3`.
 
 ## Anka 1.1.1 (`anka-v1.1.1`)
 
