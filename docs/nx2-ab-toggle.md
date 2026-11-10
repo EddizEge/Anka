@@ -26,7 +26,10 @@ blocks). A start line `NX2_AB on (EDEN_NX2_AB_TOGGLE): ...` gives the settings.
 
 The counting is on the vi2 present thread (`core/hle/service/nx2_gsv.h`, next to the
 `nx2:vi2 last 600 presents` statistics) and flips the phase between two of the game's frames:
-the game's next frame runs in the new phase. Off, the present path reads one static bool.
+the game's next frame runs in the new phase. A block's `blok=` and `faz=` come from the run's
+global flip count (what the features read), not from the present session's own count. Off, the
+present path calls `Enabled()` once a present: a function-local static (a guarded load) and a
+compare.
 
 ## Binding a feature switch to the phase
 
@@ -51,10 +54,22 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
   its own thread and calls `Update()` only at that boundary; `Update()` returns true when the phase
   changed, which is the place to flush or reset mode-specific state. `latch.Value(foo)` gives the
   switch's value in the latched phase.
-- The presents counted are the guest's. A GPU-thread or render-thread feature sees the flip a frame
-  or two later than the guest: that is what the discard covers. Keep `K` at least the depth of the
-  pipeline the feature sits in (60 presents is ~1.5-2 s at 30-40 FPS).
-- Log the binding once ("EDEN_NX2_FOO follows the A/B phase") so a run's log shows it.
+- The presents counted are the guest's. The flip happens while the guest waits in its present
+  call, but the GPU thread may then be in the middle of the previous frame (`frames_ahead` waits
+  for an older fence): a GPU-thread or render-thread feature reading `Now()` sees the flip **in
+  the middle of a frame**. That is fine for a feature correct at any call (all bound so far are);
+  one that must not mix modes within a frame needs a `Latch` taken at its own boundary (no bound
+  feature uses one yet: the class is tested, not yet run in a game). Either way the frames in
+  flight from the other phase fall in the discard: keep `K` at least the depth of the pipeline
+  the feature sits in (60 presents is ~1.5-2 s at 30-40 FPS).
+- Log the binding once with `Common::Nx2Ab::LogBinding("EDEN_NX2_FOO", foo)` where it is
+  parsed: "EDEN_NX2_FOO=ab: follows the A/B phase (0 in A, 1 in B)", and a warning if
+  `EDEN_NX2_AB_TOGGLE` is off (the phase never flips: `=ab` alone, with START=A, is the feature
+  off for the whole run).
+- **Cost off.** A switch not set to `ab` costs one more load and branch per call than a plain
+  `static const bool` (`Now()` looks at `follows`); with `ab`, a guarded static (`GetConfig`) and
+  a relaxed atomic load as well, in both phases alike. So A under `=ab` is the old way plus that
+  check, not byte for byte the `=0` build path; the difference between A and B is the feature.
 
 ### What to check when flipping
 

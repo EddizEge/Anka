@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 
 // EDEN_NX2_AB_TOGGLE=<N> (off by default): A/B within one run. Every N presents a global phase
 // flips between A and B; a feature switch set to "ab" (EDEN_NX2_FOO=ab, or ab:<value> for a switch
@@ -171,6 +172,21 @@ private:
     u32 on{};
 };
 
+/// Logs a switch's binding once, where it is parsed: "<name>=ab follows the A/B phase", and a
+/// warning when EDEN_NX2_AB_TOGGLE is off (the phase never flips: the switch keeps its start
+/// phase's value for the whole run, which for "ab" and START=A turns the feature off).
+inline void LogBinding(const char* name, const Switch& s) {
+    if (!s.FollowsPhase()) {
+        return;
+    }
+    LOG_INFO(Common, "{}=ab: follows the A/B phase (0 in A, {} in B)", name, s.At(Phase::B));
+    if (!Enabled()) {
+        LOG_WARNING(Common,
+                    "{}=ab without EDEN_NX2_AB_TOGGLE: the phase never flips, {} all run", name,
+                    s.At(GetConfig().start));
+    }
+}
+
 /// The phase as one thread last took it at its safe point (a frame boundary, a drained queue):
 /// between two Update() calls the phase it reports stays the same, so a frame isn't half one
 /// phase and half the other.
@@ -228,6 +244,15 @@ inline std::string FormatLine(const Block& b) {
                        "ust100={}",
                        b.index, PhaseName(b.phase), b.presents, b.Ms(), b.Fps(),
                        static_cast<double>(b.max_us) / 1000.0, b.over_100ms);
+}
+
+/// `b` numbered and labelled by the run's global flips (taken before the flip that ends it): the
+/// phase the features read during the block. A game that opened a second present session would
+/// restart that session's own count at 0, and its labels could be the wrong way round.
+constexpr Block Globally(Block b, Phase start, u32 flips) {
+    b.index = flips;
+    b.phase = PhaseAfter(start, flips);
+    return b;
 }
 
 /// The present counting, apart from the clock and the globals (tests feed it times). Phase n

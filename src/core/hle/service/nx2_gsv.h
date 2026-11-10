@@ -1384,8 +1384,12 @@ private:
         }
         const auto step = m_ab.Present(now_us);
         if (step.flipped) {
+            // Labelled by the global flips (what the features read), then flipped.
+            const auto block = Common::Nx2Ab::Globally(
+                *step.block, Common::Nx2Ab::GetConfig().start,
+                Common::Nx2Ab::g_flips.load(std::memory_order_relaxed));
             Common::Nx2Ab::Flip();
-            LOG_INFO(Service, "{}", Common::Nx2Ab::FormatLine(*step.block));
+            LOG_INFO(Service, "{}", Common::Nx2Ab::FormatLine(block));
         }
     }
     bool m_ab_started{};

@@ -469,9 +469,7 @@ struct GPU::Impl {
     const Common::Nx2Ab::Switch tick_skip = [] {
         const char* value = std::getenv("EDEN_NX2_TICK_SKIP");
         const auto s = Common::Nx2Ab::Switch::Parse(value, value == nullptr || value[0] != '0');
-        if (s.FollowsPhase()) {
-            LOG_INFO(HW_GPU, "EDEN_NX2_TICK_SKIP=ab: off in the A/B phase A, on in B");
-        }
+        Common::Nx2Ab::LogBinding("EDEN_NX2_TICK_SKIP", s);
         return s;
     }();
     std::mutex sync_request_mutex;

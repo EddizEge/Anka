@@ -222,3 +222,20 @@ TEST_CASE("Nx2Ab: latch holds the phase between its updates", "[nx2_ab]") {
     CHECK(latch.Value(ab) == ab.At(latch.Get()));
     g_flips.store(saved);
 }
+
+TEST_CASE("Nx2Ab: blocks labelled by the global flips", "[nx2_ab]") {
+    // A second present session restarts its own count at 0; the run's flips go on.
+    Feed f{Config{.toggle = 10, .discard = 2, .start = Phase::A}};
+    f.Run(1 + 10, 1000);
+    REQUIRE(f.done.size() == 1);
+    CHECK(f.done[0].index == 0);
+    CHECK(f.done[0].phase == Phase::A);
+    // Taken with 5 flips before it: the sixth block, in B (from A), whatever its own count said.
+    const Block g = Globally(f.done[0], Phase::A, 5);
+    CHECK(g.index == 5);
+    CHECK(g.phase == Phase::B);
+    CHECK(g.presents == f.done[0].presents);
+    CHECK(g.us == f.done[0].us);
+    CHECK(Globally(f.done[0], Phase::B, 5).phase == Phase::A);
+    CHECK(Globally(f.done[0], Phase::B, 0).phase == Phase::B);
+}
