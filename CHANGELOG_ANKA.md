@@ -21,8 +21,11 @@ and `=0` brings back the 2.0.0 code path.
   in it; `sdl2-config-reactive.ini` for the reactive launcher), with the same contents and
   messages as before. New anka-cli options: `--profile`, `--dk-dyn`, `--osd` and `--rx-rt-fit`
   (README, "Launchers"); without them anka-cli behaves as before. The reactive launcher has a
-  `RX_RT_FIT=` line at its top. The programs are still unsigned, so a virus scanner may still
-  warn about them.
+  `RX_RT_FIT=` line at its top. The detections users reported named a script, by a
+  machine-learning heuristic (`Trojan:Script/Sabsik.En.A!ml`, `Trojan:Script/Wacatac.H!ml`).
+  The package now has no PowerShell script, but the three launchers are batch files, scripts
+  too, and the programs are still unsigned: a virus scanner may still warn about the launchers
+  or the programs.
 - If `sdl2-config-reactive.ini` cannot be made (for example the `user` folder cannot be written),
   the reactive launcher now stops with a message. In that case 1.1.1 started the game with
   `sdl2-config.ini` as it was (reactive flushing as set there) and `EDEN_NX2_RX_RT_FIT=3`.
