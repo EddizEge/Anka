@@ -1271,21 +1271,23 @@ void TextureCache<P>::CommitAsyncFlushes() {
     // This is intentionally passing the value by copy
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         auto& download_ids = uncommitted_downloads;
-        std::unordered_map<const Image*, u64> latest_queued;
+        // Only with the switch: an empty std::unordered_map allocates (B10).
+        std::optional<std::unordered_map<const Image*, u64>> latest_queued;
         if (Nx2TexFlushKeepCpu()) [[unlikely]] {
+            latest_queued.emplace();
             // Duplicates are dropped below: the kept entry stands for the latest one queued.
             for (const PendingDownload& download : download_ids) {
                 if (download.is_swizzle) {
-                    u64& latest = latest_queued[&download.GetImage(slot_images)];
+                    u64& latest = (*latest_queued)[&download.GetImage(slot_images)];
                     latest = (std::max)(latest, download.queued_seq);
                 }
             }
         }
         const size_t redundant_images = DeduplicatePendingImageDownloads(download_ids, slot_images);
-        if (!latest_queued.empty()) [[unlikely]] {
+        if (latest_queued && !latest_queued->empty()) [[unlikely]] {
             for (PendingDownload& download : download_ids) {
                 if (download.is_swizzle && download.queued_seq != 0) {
-                    download.queued_seq = latest_queued[&download.GetImage(slot_images)];
+                    download.queued_seq = (*latest_queued)[&download.GetImage(slot_images)];
                     // Its copy is recorded now: CPU writes not in the image by now are newer.
                     download.copy_seq = NextCpuWriteSeq();
                 }
