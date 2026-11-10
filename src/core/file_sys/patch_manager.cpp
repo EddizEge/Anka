@@ -405,7 +405,8 @@ std::vector<VirtualFile> CollectNsoPatches(const std::vector<VirtualDir>& patch_
     return out;
 }
 
-std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualDir>& patch_dirs, const std::string& build_id) const {
+std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualDir>& patch_dirs,
+                                                      const std::string& build_id) const {
     return CollectNsoPatches(patch_dirs, build_id, GetDisabledAddons());
 }
 
@@ -460,10 +461,11 @@ std::vector<u8> ApplyNsoPatches(const std::vector<u8>& nso,
         auto bytes = patched->ReadAllBytes();
         if (mod_changes != nullptr) {
             // Also with no bytes changed (an earlier mod wrote the same): its names still count
+            auto ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader));
             mod_changes->push_back({.mod = mod,
                                     .kind = std::string{kind},
                                     .file = patch_file->GetName(),
-                                    .ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader))});
+                                    .ranges = std::move(ranges)});
         }
         out = std::move(bytes);
     }

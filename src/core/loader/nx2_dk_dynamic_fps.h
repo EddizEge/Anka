@@ -131,7 +131,8 @@ struct Result {
     size_t step_matches{};
     u32 min_fps{};       // EDEN_NX2_DK_DYN_MIN_FPS put in (0: the game's 40 kept)
     bool min_fps_missed{}; // asked for, but controller + 59 / + 60 were not the words above
-    bool cave_in_use{};    // the free space it writes to was not all zero (a mod's code?): not applied
+    bool cave_in_use{}; // the free space it writes to was not all zero (a mod's code?): not
+                        // applied
 };
 
 // Donkey Kong Bananza picks its frame rate target from the time of a frame: above 40 fps it
@@ -255,7 +256,8 @@ struct Zone {
 
 constexpr size_t ZoneMarginWords = 32;
 
-/// The zone of the free space the patch writes to (checked in every EDEN_NX2_DK_DYN_MOD_GUARD mode).
+/// The zone of the free space the patch writes to (checked in every EDEN_NX2_DK_DYN_MOD_GUARD
+/// mode).
 constexpr std::string_view CaveZone = "free space it uses";
 
 inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
@@ -309,13 +311,16 @@ inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
 // of Bananza change other things (resolution, FXAA, camera), and turning the patch off for every
 // one of them took dynamic FPS from all their users. What EDEN_NX2_DK_DYN_MOD_GUARD does (only
 // the mods' folder and file names and the cheats' names are read, never what they change):
-//   unset / "auto": Auto, a mod in the zones (Anka 1.1.1's rule), or one whose folder or file
-//                   name reads like a frame rate mod (FpsLikeName), turns the patch off for that
-//                   boot; so does an enabled cheat named like one, or from a mod folder / cheat
-//                   file named like one. The others are named in the log.
-//   "all" / "1":    All, any exefs mod changing main, and a cheat named like a frame rate one.
-//   "name":         Names, only the names (mods and cheats); the zones are not looked at.
-//   "0":            Zones, Anka 1.1.1's rule: only a mod in the zones; cheats only named in the log.
+//   unset / "auto": Auto, a mod in the zones (Anka 1.1.1's rule) or in the free space the patch
+//                   writes to, or one whose folder or file name reads like a frame rate mod
+//                   (FpsLikeName), turns the patch off for that boot; so does an enabled cheat
+//                   named like one, or from a mod folder / cheat file named like one
+//                   (CheatSourceName). The other mods are named in the log.
+//   "all" / "1":    All, any exefs mod changing main, and the cheats as in auto.
+//   "name":         Names, only the names (mods, cheats and their sources) and the free space
+//                   the patch writes to; the rest of the zones is not looked at.
+//   "0":            Zones, Anka 1.1.1's rule: only a mod in the zones; enabled cheats are only
+//                   counted in a log warning.
 // Any other value: Auto, with one warning in the log. Case and spaces around it do not count.
 enum class ModGuard { Auto, All, Names, Zones };
 
