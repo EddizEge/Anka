@@ -2949,8 +2949,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
     const u8* const mapped_memory = download_staging.mapped_span.data();
     for (const Download& download : downloads) {
         const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
-        Tegra::Nx2MarkUntrackedWrite(device_addr, download.copy.size);
-        device_memory.WriteBlockUnsafe(
+        WriteDownloadAroundCpuWrites(
             device_addr, mapped_memory + (download.copy.dst_offset - download_staging.offset),
             download.copy.size);
     }
@@ -3003,16 +3002,37 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             // Undo the modified offset
             const u64 dst_offset = copy.dst_offset - download_staging.offset;
             const u8* copy_mapped_memory = mapped_memory + dst_offset;
-            Tegra::Nx2MarkUntrackedWrite(copy_device_addr, copy.size);
-            device_memory.WriteBlockUnsafe(copy_device_addr, copy_mapped_memory, copy.size);
+            WriteDownloadAroundCpuWrites(copy_device_addr, copy_mapped_memory, copy.size);
         }
     } else {
         const std::span<u8> immediate_buffer = ImmediateBuffer(largest_copy);
         for (const BufferCopy& copy : copies) {
             buffer.ImmediateDownload(copy.src_offset, immediate_buffer.subspan(0, copy.size));
             const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
-            Tegra::Nx2MarkUntrackedWrite(copy_device_addr, copy.size);
-            device_memory.WriteBlockUnsafe(copy_device_addr, immediate_buffer.data(), copy.size);
+            WriteDownloadAroundCpuWrites(copy_device_addr, immediate_buffer.data(), copy.size);
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::WriteDownloadAroundCpuWrites(DAddr device_addr, const u8* data, u64 size) {
+    // K1b: a held CPU write's bytes stay; guest memory holds them newer than the GPU's copy here
+    // (held_cpu_writes.h, WriteAroundPending). Read after the copy finished (runtime.Finish):
+    // the writes collected while waiting count too.
+    const u64 kept = WriteAroundCollectedCpuWrites(device_addr, size, [&](DAddr begin, DAddr end) {
+        Tegra::Nx2MarkUntrackedWrite(begin, end - begin);
+        device_memory.WriteBlockUnsafe(begin, data + (begin - device_addr), end - begin);
+    });
+    if (kept != 0) [[unlikely]] {
+        static std::atomic<u64> times{};
+        static std::atomic<u64> bytes{};
+        const u64 count = times.fetch_add(1, std::memory_order_relaxed) + 1;
+        const u64 total = bytes.fetch_add(kept, std::memory_order_relaxed) + kept;
+        if ((count & (count - 1)) == 0) {
+            LOG_INFO(HW_GPU,
+                     "Synchronous download kept held CPU writes: {} bytes at {:#x} ({} times, {} "
+                     "bytes so far)",
+                     kept, device_addr, count, total);
         }
     }
 }

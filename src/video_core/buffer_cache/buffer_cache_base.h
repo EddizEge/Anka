@@ -702,6 +702,9 @@ private:
     /// Downloads the GPU-written data of several buffers with one wait for the GPU.
     void DownloadBuffersMemory(std::span<const BufferId> buffer_ids);
 
+    /// A synchronous download's bytes to guest memory, but for held CPU writes (K1b).
+    void WriteDownloadAroundCpuWrites(DAddr device_addr, const u8* data, u64 size);
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
