@@ -264,7 +264,7 @@ private:
         }();
         struct Released {
             TFence fence;
-            std::deque<std::function<void()>> operations;
+            OperationList operations;
             u8 flushes;
         };
         std::vector<Released> batch;
@@ -483,8 +483,13 @@ private:
     }
 
     std::queue<TFence> fences;
-    std::deque<std::function<void()>> uncommitted_operations;
-    std::deque<std::deque<std::function<void()>>> pending_operations;
+    // Vectors, not deques (Lichii 140f2b71aa): MSVC's deque of std::function holds one element per
+    // block, so every queued operation (one per query report; ~1000 a frame in one title's busy
+    // scenes) allocated a block. The moved-from list grows again from its first operation: no
+    // capacity is reserved under uncommitted_guard for fences that queue none.
+    using OperationList = std::vector<std::function<void()>>;
+    OperationList uncommitted_operations;
+    std::deque<OperationList> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
     /// EDEN_NX2_RX_ONE_SUBMIT: no FlushCommands after a real fence's own submission

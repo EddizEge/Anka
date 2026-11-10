@@ -270,7 +270,8 @@ enum class Counter : u32 {
     CommandListDrainWaits, ///< Of CommandListChecks: the drain had to wait for the back
     HleIndirectDraws, ///< NVN indexed indirect draws whose record the host GPU reads
     IndirectBarriers, ///< Barriers before indirect draws (buffers written since the last one)
-    EmptyDraws,       ///< Draws with no indices, vertices or instances
+    EmptyDraws,       ///< Direct draws with no indices, vertices or instances, or quads under 4 vertices
+                      ///< (after the topology; before 10.11.2026 the quads were not counted)
     HleIndirectMerged, ///< Of HleIndirectDraws: joined the previous call's multi-draw
     DescriptorStages, ///< Graphics stages with image descriptors (EDEN_NX2_DESC_REUSE)
     DescriptorStagesReused, ///< Of DescriptorStages: copied from the stage's last draw

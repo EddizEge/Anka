@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -334,8 +335,16 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
     const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
         GraphicsPipelineKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        // A record holds one environment per stage its key names (SerializePipeline). Thrown
+        // here, inside LoadPipelines, a mismatch drops this record and the ones after it.
+        if (static_cast<size_t>(std::ranges::count_if(key.unique_hashes, [](u64 hash) {
+                return hash != 0;
+            })) != envs.size()) {
+            throw std::ios_base::failure("Pipeline cache key and environments disagree");
+        }
         queue_work([this, key, envs_ = std::move(envs), &state, &callback](Context* ctx) mutable {
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }

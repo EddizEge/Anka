@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 
@@ -302,23 +304,81 @@ void Maxwell3D::DrawManager::UpdateTopology(Maxwell3D& maxwell3d) {
     }
 }
 
+namespace {
+// Empty direct draws, all threads together. Logged at the 1st, 2nd, 4th, 8th... empty draw.
+struct EmptyDrawCounts {
+    std::atomic<u64> draws{};      ///< Direct draws
+    std::atomic<u64> no_vertices{}; ///< No vertices or indices
+    std::atomic<u64> quads{};      ///< Quads or a quad strip of fewer than 4: no host vertices
+    std::atomic<u64> no_instances{}; ///< No instances
+    std::atomic<u64> feedback{};   ///< Of the above, drawn anyway: transform feedback was on
+    std::atomic<u64> skipped{};    ///< Not handed to the rasterizer (EDEN_NX2_SKIP_EMPTY_DRAWS=1)
+};
+EmptyDrawCounts g_empty_draws;
+
+bool SkipEmptyDraws() {
+    static const bool skip = [] {
+        const char* value = std::getenv("EDEN_NX2_SKIP_EMPTY_DRAWS");
+        return value != nullptr && value[0] == '1';
+    }();
+    return skip;
+}
+} // Anonymous namespace
+
 void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count) {
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
-    // A draw without indices, vertices or instances changes nothing on the GPU, but the
-    // rasterizer still binds its buffers, textures and pipeline. EDEN_NX2_SKIP_EMPTY_DRAWS=1
-    // skips them (off by default for now: counted first).
-    if ((draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count) == 0 ||
-        instance_count == 0) {
+    // The topology first: a separate state override can turn the draw into quads.
+    UpdateTopology(maxwell3d);
+    // A draw the host would record with no vertices or no instances draws nothing, but the
+    // rasterizer still binds its buffers, textures and pipeline and records the draw.
+    // EDEN_NX2_SKIP_EMPTY_DRAWS=1 skips it: what it would have applied (dirty state, query
+    // counter toggles) stays pending for the next draw or clear. A quad list or strip of fewer
+    // than 4 vertices has no host vertices (MakeDrawParams). With transform feedback on the draw
+    // still goes through, as in Lichii cebd921fa0. The counts used to be taken before the
+    // topology was known and missed the quads.
+    // Counted and logged only with the switch or the GPU profile on: off, a draw does what it did
+    // before. A plain add, not a locked one: this runs for every draw (from one thread).
+    const bool counting = SkipEmptyDraws() || VideoCommon::Nx2Profile::Enabled();
+    if (counting) {
+        g_empty_draws.draws.store(g_empty_draws.draws.load(std::memory_order_relaxed) + 1,
+                                  std::memory_order_relaxed);
+    }
+    const u32 count = draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+    const bool quad_topology = draw_state.topology == Maxwell3D::Regs::PrimitiveTopology::Quads ||
+                               draw_state.topology == Maxwell3D::Regs::PrimitiveTopology::QuadStrip;
+    const bool no_vertices = count == 0;
+    const bool short_quads = !no_vertices && quad_topology && count < 4;
+    if (counting && (no_vertices || short_quads || instance_count == 0)) [[unlikely]] {
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::EmptyDraws, 1);
-        static const bool skip_empty = [] {
-            const char* value = std::getenv("EDEN_NX2_SKIP_EMPTY_DRAWS");
-            return value != nullptr && value[0] == '1';
-        }();
-        if (skip_empty) {
+        auto& counts = g_empty_draws;
+        (no_vertices ? counts.no_vertices : short_quads ? counts.quads : counts.no_instances)
+            .fetch_add(1, std::memory_order_relaxed);
+        const bool feedback = maxwell3d.regs.transform_feedback_enabled != 0;
+        if (feedback) {
+            counts.feedback.fetch_add(1, std::memory_order_relaxed);
+        }
+        const bool skip = !feedback && SkipEmptyDraws();
+        if (skip) {
+            counts.skipped.fetch_add(1, std::memory_order_relaxed);
+        }
+        const u64 total = counts.no_vertices.load(std::memory_order_relaxed) +
+                          counts.quads.load(std::memory_order_relaxed) +
+                          counts.no_instances.load(std::memory_order_relaxed);
+        if (std::has_single_bit(total)) {
+            LOG_INFO(HW_GPU,
+                     "Empty draws: {} of {} direct draws ({} no vertices, {} quads under 4, {} no "
+                     "instances; {} with transform feedback), {} skipped (EDEN_NX2_SKIP_EMPTY_DRAWS={})",
+                     total, counts.draws.load(std::memory_order_relaxed),
+                     counts.no_vertices.load(std::memory_order_relaxed),
+                     counts.quads.load(std::memory_order_relaxed),
+                     counts.no_instances.load(std::memory_order_relaxed),
+                     counts.feedback.load(std::memory_order_relaxed),
+                     counts.skipped.load(std::memory_order_relaxed), SkipEmptyDraws() ? 1 : 0);
+        }
+        if (skip) {
             return;
         }
     }
-    UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
     }

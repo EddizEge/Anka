@@ -106,6 +106,18 @@ public:
                                   const Core::HID::VibrationDeviceHandle& handle);
     Result SendVibrationValue(u64 aruid, const Core::HID::VibrationDeviceHandle& handle,
                               const Core::HID::VibrationValue& value);
+    /// Where SendVibrationValue stopped, for diagnostics (HID 214).
+    enum class VibrationSendPath : u8 {
+        AruidError,     ///< IsVibrationAruidActive failed
+        AruidInactive,  ///< The aruid is not the one vibration is enabled for: nothing sent
+        HandleInvalid,  ///< IsVibrationHandleValid failed
+        NoDevice,       ///< No NS vibration device for the handle
+        DeviceInactive, ///< The device is not activated: nothing sent
+        NotMounted,     ///< The device has no controller mounted: nothing sent
+        Sent,           ///< Handed to the device (and on to the controller)
+    };
+    Result SendVibrationValue(u64 aruid, const Core::HID::VibrationDeviceHandle& handle,
+                              const Core::HID::VibrationValue& value, VibrationSendPath& path);
 
     Result GetTouchScreenFirmwareVersion(Core::HID::FirmwareVersion& firmware) const;
 
