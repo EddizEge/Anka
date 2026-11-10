@@ -32,6 +32,7 @@
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/held_cpu_writes.h"
 #include "video_core/buffer_cache/nx2_draw_memo.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
@@ -945,6 +946,8 @@ private:
     /// pop still writes their bytes (newer than guest memory, which a guest waiting on the fence
     /// reads) but leaves them in gpu_modified_ranges: the next download brings the newer bytes.
     std::deque<Common::RangeSet<DAddr>> pending_download_superseded;
+    /// Held CPU writes not uploaded yet: no download writes their pages back (see the type).
+    HeldCpuWrites<Core::DEVICE_PAGESIZE> held_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

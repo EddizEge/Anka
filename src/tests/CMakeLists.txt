@@ -34,6 +34,7 @@ add_executable(tests
     core/nx2_vi2_reply.cpp
     core/nx2_vi2_events.cpp
     video_core/memory_tracker.cpp
+    video_core/held_cpu_writes.cpp
     video_core/native_qmd.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp

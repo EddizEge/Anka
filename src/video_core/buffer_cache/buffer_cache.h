@@ -220,6 +220,9 @@ void BufferCache<P>::WriteMemoryRanges(std::span<const std::pair<DAddr, std::siz
 
 template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
+    // The held writes' bytes are copied in below (or need no copy): downloads taken after this
+    // carry them.
+    held_cpu_writes.OnUploaded(device_addr, size);
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return;
@@ -244,6 +247,11 @@ bool BufferCache<P>::OnCPUWrite(DAddr device_addr, u64 size) {
         return false;
     }
     if (memory_tracker.IsRegionGpuModified(device_addr, size)) {
+        // Held until InvalidateGPUCache copies it in. Under this lock, before the CPU's bytes
+        // reach guest memory: a pending download's pop (the fencing thread) must not write the
+        // GPU's older bytes over them afterwards.
+        held_cpu_writes.OnHeldWrite(device_addr, size, pending_download_ranges,
+                                    pending_download_superseded);
         return true;
     }
     WriteMemory(device_addr, size);
@@ -830,6 +838,7 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
             Nx2Profile::Add(Nx2Profile::Counter::DownloadBytesOnDmaPages, on_dma_pages);
         }
         download_ranges.Add(orig_device_addr, copy.size);
+        held_cpu_writes.OnCommit(download_ranges, orig_device_addr, copy.size);
         buffer.MarkUsage(copy.src_offset, copy.size);
         runtime.CopyBuffer(download_staging.buffer, buffer, copies, false);
         normalized_copies.push_back(second_copy);
