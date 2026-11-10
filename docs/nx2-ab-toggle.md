@@ -151,11 +151,34 @@ Not bindable on anka/110-dkb: `JIT_SAME`, `FRONT_MACRO_LEAN` (in JIT-compiled co
 (threads built at start); `LAYOUT_MEMO`, `UBO_REUSE` / `UBO_STAGE`, `LIGHT_*`, `INDEX_SKIP` keep
 memos that would need invalidating at a latch change.
 
-## First results (anka/110-dkb 18aac47131 + this, -O2, wide scene, Null audio, throughput profile)
+## Results (anka/110-dkb 895bfd0264 + anka/ab-2, -O2, wide scene, Null audio, throughput profile)
+
+`N=600`, `K=60`, blocks from album + 240 s, neighbour estimate (interval ×1.15), A − B in % of A
+(negative: B, the switch on, is faster). One launch START=A and one START=B each, ~12 neighbour
+differences per launch.
+
+| Switch (A: off, B: on) | START=A | START=B | Both | Verdict |
+|---|---|---|---|---|
+| none (A/A) | +0.42 ± 2.69 | +1.40 ± 1.54 | **+0.91 ± 1.47** | no bias seen |
+| `B_PAD_NS=ab:300` (positive control: 300 ns a draw) | +7.98 ± 1.18 | +6.95 ± 1.51 | **+7.49 ± 0.92** | B slower, as built |
+| `TICK_SKIP=ab` | −3.72 ± 2.77 | −2.20 ± 1.33 | **−2.99 ± 1.52** | B faster: the default (on) gains ~3 % |
+| `BATCH_DIRECT=ab` | −0.56 ± 1.13 | — | (one launch) | undecided, within ±1.7 % |
+| `DIRTY_THUNK_SKIP=ab` | — | (not reached) | — | the path never ran in this scene: no binding line in 690 s |
+| `FAST_PRIORITY_SCAN=ab` | — | — | — | not run yet |
+
+- The control is resolved to ±0.9 % with two launches; b-hiz-2's run-to-run measurement of the
+  same pad (−13.3 %, one pair of runs) had an uncertainty of about ±10 %.
+- `DIRTY_THUNK_SKIP`: its static (and binding line) is set up the first time the pusher reaches
+  the split branch for a separate macro parameter entry; in 690 s of the wide scene it never
+  did, so A and B run the same code there. The one run (START=B) is A/A in effect: it had one
+  12.8 s GPU semaphore wait ("Channel 2 waits on semaphore", block 35), not from the binding.
+
+## First results (anka/110-dkb 18aac47131 + anka/ab-toggle, blocks from album + 90 s)
 
 - A/A (nothing bound), `N=600`, `K=60`, blocks from album+90 s: START=A 17 pairs, A−B −0.43 ±
   2.36 % (90 %); START=B 17 pairs, +1.55 ± 1.28 %. Both launches: **+0.56 ± 1.31 %** (34 pairs),
   pair SD 4.5 %: no bias seen at this resolution. The later block of a pair was ~1 % faster in
-  both launches (order effect or chance): always run both START=A and START=B.
+  both launches (the warm-up; from album + 240 the gap shrinks): always run both START=A and
+  START=B.
 - `TICK_SKIP=ab`, one launch (START=A, 18 pairs): A (off) − B (on) −2.2 ± 2.3 %; with one
   launch, order and effect can't be told apart: a preview, not a result.
