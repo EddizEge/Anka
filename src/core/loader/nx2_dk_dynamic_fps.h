@@ -668,20 +668,22 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
     if (guard != ModGuard::Zones) {
         std::vector<std::string_view> sources_blocked;
         for (const CheatName& cheat : cheats) {
+            // Where it came from ("60 FPS Cheats", cheat_60fps.txt) first: the whole source, once,
+            // and its entries are not named again (turning the source off is the one fix)
+            if (FpsLikeName(CheatSourceName(cheat.source))) {
+                if (std::find(sources_blocked.begin(), sources_blocked.end(), cheat.source) ==
+                    sources_blocked.end()) {
+                    sources_blocked.push_back(cheat.source);
+                    decision.blockers.push_back(
+                        {.why = Blocker::Why::CheatSource, .mod = cheat.source, .kind = "cheat"});
+                }
+                continue;
+            }
             if (FpsLikeName(cheat.name)) {
                 decision.blockers.push_back({.why = Blocker::Why::Cheat,
                                              .mod = cheat.source,
                                              .kind = "cheat",
                                              .file = cheat.name});
-                continue;
-            }
-            // Where it came from ("60 FPS Cheats", cheat_60fps.txt): the whole source, once
-            if (FpsLikeName(CheatSourceName(cheat.source)) &&
-                std::find(sources_blocked.begin(), sources_blocked.end(), cheat.source) ==
-                    sources_blocked.end()) {
-                sources_blocked.push_back(cheat.source);
-                decision.blockers.push_back(
-                    {.why = Blocker::Why::CheatSource, .mod = cheat.source, .kind = "cheat"});
             }
         }
     }

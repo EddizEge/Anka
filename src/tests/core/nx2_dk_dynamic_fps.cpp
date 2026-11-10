@@ -839,17 +839,21 @@ TEST_CASE("Nx2DkDynamicFps: Decide, several mods and cheats", "[core]") {
     REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"[On]", "cheat_dkb.txt"}}).Blocked());
     REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"[On]", "cheat_v1.60.txt"}}).Blocked());
     {
-        // Three entries of one FPS-named source, one of them FPS-named itself
+        // Three entries of one FPS-named source, one of them FPS-named itself (first, too): one
+        // CheatSource blocker, the entry is not named again; another source's FPS entry is
         const auto d = f.Run(ModGuard::Auto, {},
-                             {{"Moon Jump", "60FPS Pack"},
+                             {{"60 FPS", "60FPS Pack"},
+                              {"Moon Jump", "60FPS Pack"},
                               {"Infinite Health", "60FPS Pack"},
-                              {"60 FPS", "60FPS Pack"},
-                              {"Moon Jump", "DKB Cheats"}});
+                              {"Moon Jump", "DKB Cheats"},
+                              {"Unlock FPS", "DKB Cheats"}});
         REQUIRE(d.blockers.size() == 2);
         REQUIRE(d.blockers[0].why == Why::CheatSource);
         REQUIRE(d.blockers[0].mod == "60FPS Pack");
+        REQUIRE(d.blockers[0].file.empty());
         REQUIRE(d.blockers[1].why == Why::Cheat);
-        REQUIRE(d.blockers[1].file == "60 FPS");
+        REQUIRE(d.blockers[1].mod == "DKB Cheats");
+        REQUIRE(d.blockers[1].file == "Unlock FPS");
     }
     REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"Moon Jump", "DKB Cheats"},
                                              {"Infinite Health", "cheat_dkb.txt"}})
