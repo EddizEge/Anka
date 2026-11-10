@@ -2362,6 +2362,10 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.OnCPUWrite(addr, size)) {
+            if (VideoCommon::Nx2TexFlushHeld()) [[unlikely]] {
+                // Held until its flush: an async texture flush before then must keep its bytes.
+                texture_cache.NoteHeldCpuWrite(addr, size);
+            }
             return true;
         }
     }
