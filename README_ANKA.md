@@ -242,19 +242,19 @@ files in `Games`, and the `user` folder (your keys, firmware and saves).
    are fine), or drag it onto the launcher instead.
 2. Double-click `start-recommended.bat`.
 
-**On the first start** the launcher prepares the settings. anka-cli uses the same `user\` folder
+**On the first start** anka-cli prepares the settings (the launchers start it with
+`--profile`, see "Launchers"). anka-cli uses the same `user\` folder
 as `anka.exe` (the one next to the programs): the same keys, firmware and saves. It keeps its
 settings in `user\config\sdl2-config.ini`, apart from the menu program's `qt-config.ini`. When
-`sdl2-config.ini` does not exist yet, the launcher makes it as a copy of `qt-config.ini`, so the
+`sdl2-config.ini` does not exist yet, anka-cli makes it as a copy of `qt-config.ini`, so the
 controller and settings you set up in `anka.exe` come along, and turns reactive flushing off in
 the copy (the measured setup, see "Reactive flushing"). It never changes an existing
-`sdl2-config.ini`, nor `qt-config.ini`. The editing is done by `anka-config.ps1` next to the
-launchers, a small, readable PowerShell script; without it the launchers skip this step and
-start the game. If neither file exists, the launcher stops with a message: start `anka.exe`
-once and set up your controller there, then start the launcher again. With more than one game
+`sdl2-config.ini`, nor `qt-config.ini`. If neither file exists, anka-cli stops with a message
+and the launcher keeps its window open: start `anka.exe` once and set up your controller there,
+then start the launcher again. With more than one game
 in `Games`, the launcher lists them and asks for a number. The launchers' messages start with
-`[Anka]`. (Without a `user\` folder next to them, the launchers and anka-cli would use
-`%APPDATA%\eden` instead; keep the folder.)
+`[Anka]`. (Without a `user\` folder next to it, anka-cli would use `%APPDATA%\eden` instead;
+keep the folder.)
 
 The game starts in full screen; anka-cli has no menu. **Quit with Alt+F4.**
 
@@ -278,6 +278,7 @@ changed:
 | `FULLSCREEN=-f` | full screen; empty = window |
 | `DK_DYN=1` | Bananza dynamic frame rate patch (below); `0` = off |
 | `OSD=1` | FPS / speed display through RTSS; `0` = off |
+| `RX_RT_FIT=3` | reactive launcher only: `1` ends the render pass instead (slower; try it if you see image errors) |
 
 (`DK_DYN=` and `OSD=` are in the recommended and reactive launchers only.) If the path of your
 game contains `&`, `^`, `,`, `;` or `=` but no space, Windows passes a dragged file badly: put
@@ -286,6 +287,23 @@ A launcher stops with a message when its `CONFIG=` file does not exist (anka-cli
 make a new one with default settings), and keeps its window open when the emulator exits with an
 error. Take the launchers from the release zip: they need Windows line endings (CRLF).
 
+Since 1.1.2 the launchers only find the game and start `anka-cli.exe --profile recommended`
+(`safe`, `reactive`); anka-cli itself sets the launcher's switches and prepares the settings
+files as described above, with the same messages. No PowerShell script is involved any more
+(1.1.1's launchers called `anka-config.ps1` through PowerShell). The options also work from a
+command line or a shortcut:
+
+| Option | Meaning |
+|---|---|
+| `--profile recommended`, `safe` or `reactive` | the launcher's setup: its switches set, and the other switches it knows cleared, in anka-cli's own environment, whatever your environment holds; without `-c` (also `--config`, or `-c` grouped as in `-fc`), the settings step above (`reactive` starts with `sdl2-config-reactive.ini`) |
+| `--dk-dyn <value>` | `DK_DYN` instead of `1` (`recommended`, `reactive`; empty = off) |
+| `--osd <value>` | `OSD` instead of `1` (`recommended`, `reactive`) |
+| `--rx-rt-fit <value>` | `RX_RT_FIT` instead of `3` (`reactive`) |
+
+Without `--profile`, anka-cli behaves as before: it reads the switches only from its
+environment, so a set of your own works by setting the `EDEN_NX2_*` variables and starting it
+without `--profile`.
+
 - **`start-recommended.bat`** - the settings we play with (Donkey Kong Bananza):
   the GPU thread's back as stages (`BACK_STAGES=1`, `BACK_CUTS=a`), `ACQUIRE_PEEK=1`,
   `JIT_SAME=1`, `FRONT_MACRO_LEAN=1`; Bananza's own 60/30/20 fps choice followed at the right
@@ -293,7 +311,7 @@ error. Take the launchers from the release zip: they need Windows line endings (
   frame rate patch (`DK_DYN=1`; while it is applied, the two pacing lines above are set aside:
   they act with `DK_DYN=0` or when the patch does not apply); timed FSR3 generated frames
   (`FG_TIMED=1`, only does something with frame generation on); the RTSS display (`OSD=1`). The
-  Bananza-specific lines are marked; for other games use the safe launcher, or remove them. It
+  Bananza settings are set for every game: for other games use the safe launcher. It
   was measured with reactive flushing **off**: it turns it off in an `sdl2-config.ini` it makes,
   and only prints a note when an existing one has it on ("Reactive flushing").
 - **`start-safe.bat`** - for troubleshooting and for games other than Bananza: Anka's shortcut
@@ -312,9 +330,11 @@ error. Take the launchers from the release zip: they need Windows line endings (
   `sdl2-config.ini` with reactive flushing and `barrier_feedback_loops` on ("Reactive flushing"
   below). With a `CONFIG=` file that has reactive flushing off, `RX_RT_FIT=3` still acts, a
   combination that was not measured.
+  If that file cannot be made (for example the `user` folder cannot be written), the launcher
+  stops with a message instead of starting the game.
 
-anka-cli reads the switches only from its environment (the launchers); it does not read the
-Anka tab. `nx2_switches_ANKA.txt` lists every switch with its default and what it does. Under
+anka-cli reads the switches only from its environment (set by `--profile`, or by you); it does
+not read the Anka tab. `nx2_switches_ANKA.txt` lists every switch with its default and what it does. Under
 that name no program reads it: `anka.exe` (not anka-cli) reads a `nx2_switches.txt` next to it
 and one in `%APPDATA%\eden`, so copy the lines you want into a `nx2_switches.txt` of your own.
 
@@ -402,8 +422,8 @@ matches our recommended setup; `=true` (or no such lines) is reactive flushing o
 program it is *Enable Reactive Flushing* under Graphics > Advanced: the Anka tab's
 **Recommended** preset turns it off (also on Anka's first start), **Recommended + Reactive
 Flushing** turns it on with barrier feedback loops (and `RX_RT_FIT=3`), **Safe** leaves it as it
-is. The launchers take care of it for anka-cli. `start-recommended.bat` writes
-these two lines into the `sdl2-config.ini` it makes on the first start; it never changes an
+is. The launchers take care of it for anka-cli (through `--profile`). `start-recommended.bat`
+writes these two lines into the `sdl2-config.ini` it makes on the first start; it never changes an
 existing one, it only prints a note when reactive flushing is on there (change the two lines by
 hand, with the program closed, for the measured setup). `start-reactive-experimental.bat` uses
 its own copy, `config\sdl2-config-reactive.ini`, made once from `sdl2-config.ini` with

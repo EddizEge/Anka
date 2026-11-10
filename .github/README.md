@@ -51,8 +51,8 @@ onto a launcher) and double-click a launcher:
 
 On the first start a launcher makes anka-cli's settings file (`user\config\sdl2-config.ini`) as
 a copy of `anka.exe`'s `qt-config.ini`, so your controller setup comes along; it never changes
-a settings file that already exists (`anka-config.ps1`, a small, readable PowerShell script,
-does this). The game starts in full screen: **quit with Alt+F4**.
+a settings file that already exists (since 1.1.2 anka-cli does this itself, started with
+`--profile`; no script is involved). The game starts in full screen: **quit with Alt+F4**.
 
 ### Anka's second core
 

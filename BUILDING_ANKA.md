@@ -145,8 +145,8 @@ standalone install, unzipped into a new, empty folder. It holds the two programs
 `anka-cli.exe`, the Qt 6.8.3 DLLs and plugins `anka.exe` needs, the Visual C++ runtime DLLs, an
 empty `user/` folder (so the programs start in portable mode and keep everything in it), the
 launchers from `dist/anka/` (`start-recommended.bat`, `start-reactive-experimental.bat`,
-`start-safe.bat`) with `anka-config.ps1` (the small PowerShell script they call with `-File` to
-prepare the `.ini` files on the first start), an empty `Games` folder with its note
+`start-safe.bat`; since 1.1.2 they only start `anka-cli.exe --profile <name>`, which prepares
+the `.ini` files on the first start itself; 1.1.1 also shipped `anka-config.ps1`), an empty `Games` folder with its note
 (`dist/anka/Games/PUT-YOUR-GAMES-HERE.txt`), `README_ANKA.md`, `CHANGELOG_ANKA.md`,
 `BUILDING_ANKA.md`, `LICENSE.txt`, `LICENSES/`, `THIRD_PARTY_NOTICES_ANKA.txt` (the license
 texts and notices of the third-party components), `QT_THIRD_PARTY_NOTICES.txt` (the third-party

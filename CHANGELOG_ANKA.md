@@ -6,6 +6,27 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
+## Anka 1.1.2 (draft, not released)
+
+### Changed
+
+- The launchers (`start-*.bat`) no longer call PowerShell, and `anka-config.ps1` is gone.
+  A user reported Microsoft Defender flagging the 1.1.1 download as a trojan (a false positive).
+  A batch file that runs `powershell.exe -ExecutionPolicy Bypass` is a known trigger for such
+  warnings, but the same launchers also shipped in 1.0.0, 1.0.1 and 1.1.0, so it is not proven
+  that they caused it. The launchers now only pick the game and start
+  `anka-cli.exe --profile recommended` (`safe`, `reactive`). anka-cli sets the same switches
+  itself, as the program starts and before anything reads them, and prepares the same settings
+  files (`sdl2-config.ini` copied from `qt-config.ini` on the first start, reactive flushing off
+  in it; `sdl2-config-reactive.ini` for the reactive launcher), with the same contents and
+  messages as before. New anka-cli options: `--profile`, `--dk-dyn`, `--osd` and `--rx-rt-fit`
+  (README, "Launchers"); without them anka-cli behaves as before. The reactive launcher has a
+  `RX_RT_FIT=` line at its top. The programs are still unsigned, so a virus scanner may still
+  warn about them.
+- If `sdl2-config-reactive.ini` cannot be made (for example the `user` folder cannot be written),
+  the reactive launcher now stops with a message. 1.1.1 started the game with `sdl2-config.ini`
+  (reactive flushing off) in that case.
+
 ## Anka 1.1.1 (`anka-v1.1.1`)
 
 A fix release on top of 1.1.0. Anka's second core is unchanged from 1.1.0 (same commit).
