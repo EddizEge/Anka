@@ -221,8 +221,15 @@ void BufferCache<P>::WriteMemoryRanges(std::span<const std::pair<DAddr, std::siz
 template <class P>
 void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
     // The held writes' bytes are copied in below (or need no copy): downloads taken after this
-    // carry them.
-    held_cpu_writes.OnUploaded(device_addr, size);
+    // carry them. Without AsyncBufferDownloads only the CPU-read pages are downloaded.
+    held_cpu_writes.OnUploaded(device_addr, size, [this](DAddr begin, u64 length) {
+        if (AsyncBufferDownloads()) {
+            return true;
+        }
+        bool read = false;
+        cpu_read_ranges.ForEachInRange(begin, length, [&read](DAddr, DAddr) { read = true; });
+        return read;
+    });
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return;
@@ -943,6 +950,9 @@ bool BufferCache<P>::NoteCpuRead(DAddr addr, size_t size) {
         return false;
     }
     cpu_read_ranges.Add(addr, size);
+    // Downloadable from now on: the CPU write paths' short circuits must reach OnCPUWrite again
+    // (HeldCpuWrites::OnUploaded did not end them for pages that were not).
+    held_cpu_writes.BumpEpoch();
     if (Nx2Profile::Enabled()) {
         static u64 noted{};
         if ((++noted & 255) == 1) {

@@ -55,7 +55,7 @@ TEST_CASE("HeldCpuWrites: after the upload downloads write the page again and th
     Ranges superseded;
     held.OnHeldWrite(0x30100, 8, pending, superseded);
     const u32 before = VideoCommon::g_held_cpu_write_epoch.load();
-    held.OnUploaded(0x30100, 8);
+    held.OnUploaded(0x30100, 8, [](DAddr, u64) { return true; });
     REQUIRE(VideoCommon::g_held_cpu_write_epoch.load() != before);
     REQUIRE(held.pages.Empty());
     Common::RangeSet<DAddr> commit;
@@ -65,7 +65,11 @@ TEST_CASE("HeldCpuWrites: after the upload downloads write the page again and th
     // An upload of an unrelated range does not move the epoch (no short circuit lost).
     held.OnHeldWrite(0x40000, 4, pending, superseded);
     const u32 mid = VideoCommon::g_held_cpu_write_epoch.load();
-    held.OnUploaded(0x50000, 4);
+    held.OnUploaded(0x50000, 4, [](DAddr, u64) { return true; });
+    REQUIRE(VideoCommon::g_held_cpu_write_epoch.load() == mid);
+    // Uploaded but not downloadable: the page leaves the set, the epoch stays.
+    held.OnUploaded(0x40000, 4, [](DAddr, u64) { return false; });
+    REQUIRE(held.pages.Empty());
     REQUIRE(VideoCommon::g_held_cpu_write_epoch.load() == mid);
 }
 

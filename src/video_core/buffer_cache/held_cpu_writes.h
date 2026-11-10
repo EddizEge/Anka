@@ -56,7 +56,12 @@ struct HeldCpuWrites {
     }
 
     /// The held bytes in [addr, addr + size) were uploaded: downloads taken from now on copy them.
-    void OnUploaded(DAddr addr, u64 size) {
+    /// downloadable(begin, length): whether a fence download can cover those pages at all. Only
+    /// then do the CPU write paths' short circuits for them have to end (the epoch moves): moving
+    /// it on every upload sent each core's next write through OnCPUWrite (the buffer cache's
+    /// lock) once per fence.
+    template <typename Downloadable>
+    void OnUploaded(DAddr addr, u64 size, Downloadable&& downloadable) {
         if (pages.Empty()) {
             return;
         }
@@ -64,8 +69,15 @@ struct HeldCpuWrites {
         const u64 length = PageEnd(addr, size) - begin;
         if (pages.Intersects(begin, length)) {
             pages.Subtract(begin, length);
-            g_held_cpu_write_epoch.fetch_add(1, std::memory_order_release);
+            if (downloadable(begin, length)) {
+                BumpEpoch();
+            }
         }
+    }
+
+    /// Ends every short circuit (pages became downloadable).
+    static void BumpEpoch() {
+        g_held_cpu_write_epoch.fetch_add(1, std::memory_order_release);
     }
 };
 
