@@ -187,6 +187,40 @@ inline void LogBinding(const char* name, const Switch& s) {
     }
 }
 
+/// A 0/1/2 mode read lazily into an s8 (BufferCache's ReadNx2Mode: unset or another value 1, "0"
+/// 0, "2" 2) that may also be "ab" / "ab:<n>": stored as ModeFollows | n (n held at 63); its
+/// value now is then 0 in A and n in B. Only for modes correct at any call (see the doc).
+inline constexpr s8 ModeFollows = 0x40;
+
+constexpr s8 ParseMode(const char* value) {
+    if (const auto on = AbOnValue(value)) {
+        return static_cast<s8>(ModeFollows | (*on < 0x3f ? *on : 0x3f));
+    }
+    return static_cast<s8>(value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1);
+}
+
+/// The value now of a stored mode (fixed: itself; following: by the phase).
+inline int ModeNow(s8 mode) {
+    if ((mode & ModeFollows) == 0) [[likely]] {
+        return mode;
+    }
+    return CurrentPhase() == Phase::B ? (mode & 0x3f) : 0;
+}
+
+/// ReadNx2Mode with "ab": reads `name` at the first call (after main has loaded
+/// nx2_switches.txt), logs an "ab" binding, then one relaxed load and a bit test a call. Two
+/// threads racing on the first call compute the same value (the line may show twice).
+inline int ReadMode(std::atomic<s8>& mode, const char* name) {
+    s8 value = mode.load(std::memory_order_relaxed);
+    if (value < 0) [[unlikely]] {
+        const char* const env = std::getenv(name);
+        value = ParseMode(env);
+        LogBinding(name, Switch::Parse(env, 0));
+        mode.store(value, std::memory_order_relaxed);
+    }
+    return ModeNow(value);
+}
+
 /// The phase as one thread last took it at its safe point (a frame boundary, a drained queue):
 /// between two Update() calls the phase it reports stays the same, so a frame isn't half one
 /// phase and half the other.

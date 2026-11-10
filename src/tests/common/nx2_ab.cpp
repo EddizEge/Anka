@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/nx2_ab.h"
+#include "video_core/nx2_b_pad.h"
 
 namespace {
 using namespace Common::Nx2Ab;
@@ -238,4 +239,45 @@ TEST_CASE("Nx2Ab: blocks labelled by the global flips", "[nx2_ab]") {
     CHECK(g.us == f.done[0].us);
     CHECK(Globally(f.done[0], Phase::B, 5).phase == Phase::A);
     CHECK(Globally(f.done[0], Phase::B, 0).phase == Phase::B);
+}
+
+TEST_CASE("Nx2Ab: B_PAD_NS takes digits only, held at 100 us", "[nx2_ab]") {
+    using VideoCommon::Nx2BPad::ClampPadNs;
+    using VideoCommon::Nx2BPad::MaxPadNs;
+    // A sign is not a length: "-1" is off, not a wrap to 0xffffffff ns (a 4 s spin per draw).
+    CHECK(ClampPadNs(Detail::ParseU32("-1")) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32("+300")) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32("300ns")) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32("")) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32(nullptr)) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32("0")) == 0);
+    CHECK(ClampPadNs(Detail::ParseU32("300")) == 300);
+    CHECK(ClampPadNs(Detail::ParseU32("100000")) == MaxPadNs);
+    CHECK(ClampPadNs(Detail::ParseU32("100001")) == MaxPadNs);
+    CHECK(ClampPadNs(Detail::ParseU32("4294967295")) == MaxPadNs);
+    CHECK(ClampPadNs(Detail::ParseU32("99999999999")) == 0); // above u32: not a number
+    // ab:<n>: the on value is held too; ab:-1 is not an ab binding (the fixed reading, off).
+    CHECK(ClampPadNs(Switch::Parse("ab:250000", 0).At(Phase::B)) == MaxPadNs);
+    CHECK(!Switch::Parse("ab:-1", 0).FollowsPhase());
+}
+
+TEST_CASE("Nx2Ab: lazily read 0/1/2 modes take ab", "[nx2_ab]") {
+    // The old reading (BufferCache's ReadNx2Mode) for everything but ab / ab:<n>.
+    STATIC_REQUIRE(ParseMode(nullptr) == 1);
+    STATIC_REQUIRE(ParseMode("0") == 0);
+    STATIC_REQUIRE(ParseMode("1") == 1);
+    STATIC_REQUIRE(ParseMode("2") == 2);
+    STATIC_REQUIRE(ParseMode("x") == 1);
+    STATIC_REQUIRE(ParseMode("abc") == 1);
+    STATIC_REQUIRE(ParseMode("ab:0") == 1);
+    STATIC_REQUIRE(ParseMode("ab") == (ModeFollows | 1));
+    STATIC_REQUIRE(ParseMode("ab:2") == (ModeFollows | 2));
+    STATIC_REQUIRE(ParseMode("ab:200") == (ModeFollows | 0x3f));
+    // Fixed modes are themselves in either phase; following ones 0 in A, n in B.
+    for (const s8 fixed : {s8{0}, s8{1}, s8{2}}) {
+        CHECK(ModeNow(fixed) == fixed);
+    }
+    const bool in_b = CurrentPhase() == Phase::B;
+    CHECK(ModeNow(ParseMode("ab")) == (in_b ? 1 : 0));
+    CHECK(ModeNow(ParseMode("ab:2")) == (in_b ? 2 : 0));
 }

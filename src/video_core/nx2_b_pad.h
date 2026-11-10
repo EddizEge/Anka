@@ -6,7 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <optional>
 
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/nx2_ab.h"
@@ -28,6 +30,15 @@
 // state, so each draw takes the phase on its own.
 namespace VideoCommon::Nx2BPad {
 
+/// The longest pad (100 us): far above any useful slowdown, far below a frozen game.
+inline constexpr u32 MaxPadNs = 100'000;
+
+/// A pad length (ns) as given: digits only (a sign or other text is off, so "-1" cannot wrap
+/// to a 4 s spin per draw), held at MaxPadNs.
+constexpr u32 ClampPadNs(std::optional<u32> ns) {
+    return !ns ? 0 : *ns < MaxPadNs ? *ns : MaxPadNs;
+}
+
 /// Pad length in time stamp counter ticks: -1 not read yet, 0 off.
 inline std::atomic<s64> g_pad_ticks{-1};
 /// =ab:<n>: the pad follows the A/B phase (stored before g_pad_ticks).
@@ -35,11 +46,18 @@ inline std::atomic<bool> g_pad_follows{false};
 
 YUZU_NO_INLINE inline s64 ReadPadTicks() {
     const char* value = std::getenv("EDEN_NX2_B_PAD_NS");
-    const u64 fixed = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
-    const auto pad = Common::Nx2Ab::Switch::Parse(
-        value, static_cast<u32>(fixed < 0xffffffffULL ? fixed : 0xffffffffULL));
+    const auto digits = Common::Nx2Ab::Detail::ParseU32(value);
+    const auto pad = Common::Nx2Ab::Switch::Parse(value, ClampPadNs(digits));
     Common::Nx2Ab::LogBinding("EDEN_NX2_B_PAD_NS", pad);
-    const u64 ns = pad.At(Common::Nx2Ab::Phase::B); // the on value
+    // The length asked for (ab:<n>: n), and the one used.
+    const std::optional<u32> asked = pad.FollowsPhase() ? pad.At(Common::Nx2Ab::Phase::B) : digits;
+    const u64 ns = ClampPadNs(asked);
+    if (value != nullptr && !asked) {
+        LOG_WARNING(HW_GPU, "EDEN_NX2_B_PAD_NS={}: not a pad length (digits, or ab:<n>): off",
+                    value);
+    } else if (asked && *asked != ns) {
+        LOG_WARNING(HW_GPU, "EDEN_NX2_B_PAD_NS={}: held at {} ns", value, ns);
+    }
     s64 ticks = 0;
 #ifdef ARCHITECTURE_x86_64
     if (ns != 0) {
