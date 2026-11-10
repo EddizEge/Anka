@@ -29,8 +29,17 @@ and `=0` brings back the 2.0.0 code path.
 - If `sdl2-config-reactive.ini` cannot be made (for example the `user` folder cannot be written),
   the reactive launcher now stops with a message. In that case 1.1.1 started the game with
   `sdl2-config.ini` as it was (reactive flushing as set there) and `EDEN_NX2_RX_RT_FIT=3`.
+- In `anka.exe` (the menu program) `nx2_switches.txt` now also sets the eight switches below.
 
-## Anka 1.1.1 (`anka-v1.1.1`)
+### Fixed
+
+- `anka.exe`'s **Safe** preset (Anka tab) now really turns off eight of the GPU shortcuts on its
+  list: `EDEN_NX2_RANGE_SKIP`, `SSBO_MEMO`, `SYNC_SKIP`, `SYNC_EXACT`, `SAME_SKIP`, `SMALL_WRITE`,
+  `ALIAS_LAZY` and `TEX_TOUCH_SKIP`. Since 1.0.0 these were read once as the program started,
+  before `anka.exe` set its Anka settings, so Safe left them on (the log and the tab said `=0`)
+  unless they were set outside the program. `start-safe.bat` (anka-cli) was not affected. The
+  menu program now reads them again after setting its Anka settings, before the first game
+  starts.
 
 A fix release on top of 1.1.0. Anka's second core is unchanged from 1.1.0 (same commit).
 
