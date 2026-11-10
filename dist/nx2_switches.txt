@@ -100,6 +100,7 @@
 # TICK_SKIP=0: the GPU tick looks at its queue under the lock every time (default: skipped
 # when empty).
 #EDEN_NX2_TICK_SKIP=0
+# (TICK_SKIP=ab: =0 in the A/B test's phase A, on in B; see AB_TOGGLE below.)
 
 # --- split GPU thread: front (video_core/engines/maxwell_3d.cpp, puller.cpp, macro JIT) ---
 # ACQUIRE_PEEK: a semaphore acquire whose value memory already holds goes on without

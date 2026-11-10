@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/nx2_ab.h"
 #include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -165,7 +166,7 @@ struct GPU::Impl {
         // far has run when the two counts are equal (one is counted as queued before its lock is
         // released, as run after it ran); then the lock would find nothing. A request queued
         // meanwhile runs at the next tick, as one queued just after the lock was taken does.
-        if (tick_skip && requested_sync_fence.load(std::memory_order_acquire) ==
+        if (tick_skip.Now() != 0 && requested_sync_fence.load(std::memory_order_acquire) ==
                              current_sync_fence.load(std::memory_order_acquire)) {
             return;
         }
@@ -462,9 +463,16 @@ struct GPU::Impl {
     /// last_sync_fence, for TickWork to read without the lock (EDEN_NX2_TICK_SKIP).
     std::atomic<u64> requested_sync_fence{};
     /// EDEN_NX2_TICK_SKIP (default on), read once per session: no guarded static per TickWork.
-    const bool tick_skip = [] {
+    /// =ab: off in the A/B test's phase A, on in B (common/nx2_ab.h). Both ways are right at any
+    /// tick (requested_sync_fence is stored under the lock with every request), so each TickWork
+    /// takes the phase on its own.
+    const Common::Nx2Ab::Switch tick_skip = [] {
         const char* value = std::getenv("EDEN_NX2_TICK_SKIP");
-        return value == nullptr || value[0] != '0';
+        const auto s = Common::Nx2Ab::Switch::Parse(value, value == nullptr || value[0] != '0');
+        if (s.FollowsPhase()) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_TICK_SKIP=ab: off in the A/B phase A, on in B");
+        }
+        return s;
     }();
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
