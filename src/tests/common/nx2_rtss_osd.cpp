@@ -426,6 +426,8 @@ TEST_CASE("Nx2RtssOsd: the DK_DYN conflict line", "[common]") {
             "Dynamic FPS off: turn off \"Unlock 60fps\" in Add-Ons");
     REQUIRE(ConflictLine("DKB Cheats", "60 FPS") ==
             "Dynamic FPS off: cheat [60 FPS] in \"DKB Cheats\" (Add-Ons)");
+    // No mod named: the free space it writes to was in use
+    REQUIRE(ConflictLine("", "") == "Dynamic FPS off: code space in use (see the log)");
     // Long names cut with "...", the quote after the cut
     const std::string longer(60, 'x');
     REQUIRE(ConflictLine(longer, "") ==

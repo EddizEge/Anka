@@ -134,6 +134,7 @@ struct Nx2DkDynConflictInfo {
         None,   ///< no conflict
         Zone,   ///< the mod changes the frame rate code the patch rewrites
         Cave,   ///< the mod writes to the free space past main's code the patch uses
+        CaveInUse, ///< that free space was not empty at load (no mod named: e.g. a LayeredFS main)
         Name,   ///< the mod's folder or file is named like a frame rate mod
         AnyMod, ///< EDEN_NX2_DK_DYN_MOD_GUARD=all: any mod changing main
         Cheat,  ///< an enabled cheat named like a frame rate cheat

@@ -350,8 +350,12 @@ inline std::string OsdName(std::string_view name, size_t max = 40) {
 }
 
 /// The line: for a mod, `Dynamic FPS off: turn off "<mod>" in Add-Ons`; for a cheat (`cheat` its
-/// entry, `mod` its source), `Dynamic FPS off: cheat [<cheat>] in "<source>" (Add-Ons)`.
+/// entry, `mod` its source), `Dynamic FPS off: cheat [<cheat>] in "<source>" (Add-Ons)`; with
+/// neither (the free space it writes to was in use), `Dynamic FPS off: code space in use (log)`.
 inline std::string ConflictLine(std::string_view mod, std::string_view cheat) {
+    if (mod.empty() && cheat.empty()) {
+        return "Dynamic FPS off: code space in use (see the log)";
+    }
     if (cheat.empty()) {
         return fmt::format("Dynamic FPS off: turn off \"{}\" in Add-Ons", OsdName(mod));
     }

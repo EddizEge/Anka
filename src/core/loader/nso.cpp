@@ -378,6 +378,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                                         "applied: the 40 fps check is not where expected");
                 }
             } else if (dk_dyn->cave_in_use) {
+                Core::SetNx2DkDynConflict(
+                    {.reason = Core::Nx2DkDynConflictInfo::Reason::CaveInUse});
                 LOG_WARNING(Loader,
                             "Donkey Kong Bananza: dynamic FPS not applied: the free space past "
                             "main's code it writes to is not empty (main+{:#x}; an exefs mod's "
