@@ -18,9 +18,12 @@
 
 #include "common/logging.h"
 #include "common/nx2_early_switches.h"
+#include "common/assert.h"
 #include "common/settings.h"
+#include "core/core.h"
 #include "core/nx2_perf_settings.h"
 #include "qt_common/config/uisettings.h"
+#include "qt_common/qt_common.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -133,6 +136,8 @@ Boot Prepare(QWidget* parent, u64 program_id, const QString& game, bool fullscre
         }
         // A few switches were read before main (Safe's GPU shortcuts among them): read them again
         // now, before the game's threads start; nothing has used them yet.
+        ASSERT_MSG(!QtCommon::system || !QtCommon::system->IsPoweredOn(),
+                   "Anka: the early switches are read again while emulation runs");
         const std::size_t reloaded = Common::Nx2EarlySwitches::ReloadAll();
         LOG_INFO(Frontend, "Anka settings for {:016X}{}: {}", program_id,
                  bananza ? " (Donkey Kong Bananza)" : "", Describe(plan).toStdString());

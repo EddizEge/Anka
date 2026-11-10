@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <vector>
+
+#include "common/assert.h"
 
 /// The EDEN_NX2_* switches read once, before main, into plain globals (the per-draw paths test
 /// them without a function-local static's initialization check): EDEN_NX2_RANGE_SKIP, SSBO_MEMO,
@@ -29,7 +32,11 @@ inline bool Register(ReloadFunction function) {
 }
 
 /// Reads every registered switch again from the environment. Returns how many functions ran.
+/// Once per process: a second call asserts (the globals are plain, not atomic; a game that ran
+/// already may have threads reading them). The caller asserts that no emulation runs.
 inline std::size_t ReloadAll() {
+    static std::atomic<bool> reloaded{false};
+    ASSERT_MSG(!reloaded.exchange(true), "Nx2EarlySwitches::ReloadAll called twice");
     for (const ReloadFunction function : Registry()) {
         function();
     }
