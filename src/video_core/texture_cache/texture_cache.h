@@ -18,6 +18,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/nx2_early_switches.h"
 #include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
@@ -49,14 +50,17 @@ using namespace Common::Literals;
 // SynchronizeAliases walks an image's aliases only when one of them may have a newer tick
 // (ImageBase::alias_check). EDEN_NX2_ALIAS_LAZY=0 walks them on every use (for comparisons),
 // EDEN_NX2_ALIAS_LAZY=2 also checks every skip against the full walk.
-inline const bool g_nx2_alias_lazy = [] {
+// Read before main and again by Common::Nx2EarlySwitches::ReloadAll (the menu program's settings).
+inline bool ReadNx2AliasLazy() {
     const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
     return value == nullptr || value[0] != '0';
-}();
-inline const bool g_nx2_alias_verify = [] {
+}
+inline bool ReadNx2AliasVerify() {
     const char* value = std::getenv("EDEN_NX2_ALIAS_LAZY");
     return value != nullptr && value[0] == '2';
-}();
+}
+inline bool g_nx2_alias_lazy = ReadNx2AliasLazy();
+inline bool g_nx2_alias_verify = ReadNx2AliasVerify();
 // Back stages, cut c or STAGE_CHECK: the page summary B asks instead of this cache whether a page
 // holds GPU-written data (Nx2Stages::GpuPages, nx2_gpu_pages.h). The hooks keep a mark on every
 // page an image marked GPU-modified covers (ImageBase::nx2_pages_set: once until it is unmarked)
@@ -149,11 +153,20 @@ void Nx2UnmarkImagePages(ImageBase& image, ImageId image_id, const SparseViews& 
 // PrepareImage touches an image in the LRU once per frame: a second Touch with the same frame_tick
 // returns at once (its item's tick is not older), but finding the item costs two dependent loads
 // into the LRU's deque for every texture of every draw. EDEN_NX2_TEX_TOUCH_SKIP=0 touches on every
-// use.
-inline const bool g_nx2_tex_touch_skip = [] {
+// use. Read before main and again by Common::Nx2EarlySwitches::ReloadAll (the menu program's
+// settings), as ALIAS_LAZY above.
+inline bool ReadNx2TexTouchSkip() {
     const char* value = std::getenv("EDEN_NX2_TEX_TOUCH_SKIP");
     return value == nullptr || value[0] != '0';
-}();
+}
+inline bool g_nx2_tex_touch_skip = ReadNx2TexTouchSkip();
+inline void ReloadNx2TextureCacheSwitches() {
+    g_nx2_alias_lazy = ReadNx2AliasLazy();
+    g_nx2_alias_verify = ReadNx2AliasVerify();
+    g_nx2_tex_touch_skip = ReadNx2TexTouchSkip();
+}
+[[maybe_unused]] inline const bool g_nx2_texture_cache_switches_registered =
+    Common::Nx2EarlySwitches::Register(&ReloadNx2TextureCacheSwitches);
 
 template <class P>
 TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManager& device_memory_)

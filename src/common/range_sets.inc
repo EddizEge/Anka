@@ -18,6 +18,7 @@
 #include <boost/pool/pool.hpp>
 #include <boost/pool/poolfwd.hpp>
 
+#include "common/nx2_early_switches.h"
 #include "common/range_sets.h"
 
 namespace Common {
@@ -122,12 +123,17 @@ namespace {
 template <class T>
 using RangeSetsAllocator = RangeSetsDetail::Allocator<T>;
 
-/// EDEN_NX2_RANGE_SKIP=0: RangeSet::Add always inserts, as before. Read once (not a
-/// function-local static: Add runs several times per draw).
-const bool g_range_skip_covered_adds = [] {
+/// EDEN_NX2_RANGE_SKIP=0: RangeSet::Add always inserts, as before. Read before main (not a
+/// function-local static: Add runs several times per draw) and again by
+/// Common::Nx2EarlySwitches::ReloadAll.
+bool ReadRangeSkip() {
     const char* value = std::getenv("EDEN_NX2_RANGE_SKIP");
     return value == nullptr || value[0] != '0';
-}();
+}
+bool g_range_skip_covered_adds = ReadRangeSkip();
+[[maybe_unused]] const bool g_range_skip_registered = Common::Nx2EarlySwitches::Register([] {
+    g_range_skip_covered_adds = ReadRangeSkip();
+});
 }
 
 template <typename AddressType>

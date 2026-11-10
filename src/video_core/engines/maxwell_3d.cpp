@@ -13,6 +13,7 @@
 #include <utility>
 #include "common/assert.h"
 #include "common/bit_util.h"
+#include "common/nx2_early_switches.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -147,10 +148,14 @@ const std::array<u16, Maxwell3D::Regs::NUM_REGS>& g_light_classes = LightClasses
 
 // EDEN_NX2_SAME_SKIP=0: a constant buffer write of the bytes guest memory already holds that
 // IsLightSameWrite counted is still made, and its range invalidated at the next FlushCaching.
-const bool g_same_skip = [] {
+// Read before main and again by Common::Nx2EarlySwitches::ReloadAll (the menu program's settings).
+bool ReadSameSkip() {
     const char* value = std::getenv("EDEN_NX2_SAME_SKIP");
     return value == nullptr || value[0] != '0';
-}();
+}
+bool g_same_skip = ReadSameSkip();
+[[maybe_unused]] const bool g_same_skip_registered =
+    Common::Nx2EarlySwitches::Register([] { g_same_skip = ReadSameSkip(); });
 
 MAXWELL3D_FORCE_INLINE void NoteSameWriteSkipped() {
     VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameWritesSkipped, 1);

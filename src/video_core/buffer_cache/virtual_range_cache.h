@@ -15,6 +15,7 @@
 
 #include "common/common_types.h"
 #include "common/container/unordered_map.h"
+#include "common/nx2_early_switches.h"
 #include "video_core/memory_manager.h"
 
 namespace VideoCommon {
@@ -28,12 +29,18 @@ struct VirtualSegment {
 using VirtualSegments = boost::container::small_vector<VirtualSegment, 8>;
 
 /// EDEN_NX2_SSBO_MEMO=0: storage buffer bindings and their virtual ranges are resolved again for
-/// every draw, as before. Read once at startup (per-draw paths test it; from the real environment
-/// only, as nx2_switches.txt is loaded later).
-inline const bool g_nx2_ssbo_memo = [] {
+/// every draw, as before. Read before main (per-draw paths test it) and again by
+/// Common::Nx2EarlySwitches::ReloadAll (the menu program's settings, nx2_switches.txt).
+inline bool ReadNx2SsboMemo() {
     const char* value = std::getenv("EDEN_NX2_SSBO_MEMO");
     return value == nullptr || value[0] != '0';
-}();
+}
+inline bool g_nx2_ssbo_memo = ReadNx2SsboMemo();
+inline void ReloadNx2SsboMemo() {
+    g_nx2_ssbo_memo = ReadNx2SsboMemo();
+}
+[[maybe_unused]] inline const bool g_nx2_ssbo_memo_registered =
+    Common::Nx2EarlySwitches::Register(&ReloadNx2SsboMemo);
 
 class VirtualRangeCache {
 public:

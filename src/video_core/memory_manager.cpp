@@ -11,6 +11,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/nx2_early_switches.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -73,10 +74,14 @@ int DescXlatMode() {
 // Small writes within one 4 KiB page (macros' constant buffer words: four per draw in title 1,
 // ~2% of the split back thread walking the page tables in WriteBlockImpl for each; inline records)
 // go through the same remembered page pointers. EDEN_NX2_SMALL_WRITE=0 walks for every write.
-const bool g_nx2_small_write = [] {
+// Read before main and again by Common::Nx2EarlySwitches::ReloadAll (the menu program's settings).
+bool ReadSmallWrite() {
     const char* value = std::getenv("EDEN_NX2_SMALL_WRITE");
     return value == nullptr || value[0] != '0';
-}();
+}
+bool g_nx2_small_write = ReadSmallWrite();
+[[maybe_unused]] const bool g_nx2_small_write_registered =
+    Common::Nx2EarlySwitches::Register([] { g_nx2_small_write = ReadSmallWrite(); });
 
 struct SmallReadCache {
     static constexpr std::size_t NumSlots = 64;

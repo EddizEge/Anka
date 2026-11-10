@@ -17,6 +17,7 @@
 #include <QStringList>
 
 #include "common/logging.h"
+#include "common/nx2_early_switches.h"
 #include "common/settings.h"
 #include "core/nx2_perf_settings.h"
 #include "qt_common/config/uisettings.h"
@@ -130,8 +131,12 @@ Boot Prepare(QWidget* parent, u64 program_id, const QString& game, bool fullscre
         for (const auto& var : plan) {
             SetVariable(var);
         }
+        // A few switches were read before main (Safe's GPU shortcuts among them): read them again
+        // now, before the game's threads start; nothing has used them yet.
+        const std::size_t reloaded = Common::Nx2EarlySwitches::ReloadAll();
         LOG_INFO(Frontend, "Anka settings for {:016X}{}: {}", program_id,
                  bananza ? " (Donkey Kong Bananza)" : "", Describe(plan).toStdString());
+        LOG_INFO(Frontend, "Anka: switches read before main read again ({} places)", reloaded);
         for (const std::string_view name : g_set_outside) {
             LOG_INFO(Frontend, "Anka: {} was set outside the program, left as it is", name);
         }

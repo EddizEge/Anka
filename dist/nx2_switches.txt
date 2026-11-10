@@ -11,9 +11,10 @@
 # Restart the emulator after editing.
 #
 # A few switches are read before this file is loaded, so only the real environment (a
-# launcher .bat) sets them: EDEN_NX2_3D_METHODS, ALIAS_LAZY, PROFILE_TSC, RANGE_SKIP,
-# SAME_SKIP, SMALL_WRITE, SSBO_MEMO, SYNC_EXACT, SYNC_SKIP, TEX_TOUCH_SKIP, and the
-# pusher's EDEN_NX2_PB_CHECK and SEM_WATCH (all EDEN_NX2_...).
+# launcher .bat) sets them: EDEN_NX2_3D_METHODS, PROFILE_TSC, and the pusher's
+# EDEN_NX2_PB_CHECK and SEM_WATCH. ALIAS_LAZY, RANGE_SKIP, SAME_SKIP, SMALL_WRITE, SSBO_MEMO,
+# SYNC_EXACT, SYNC_SKIP and TEX_TOUCH_SKIP are read again when the first game starts, so this
+# file (and the menu program's Anka settings) set them too (all EDEN_NX2_...).
 
 # --- workarounds / behaviour ---
 #EDEN_NX2_BUFFER_DOWNLOADS=1

@@ -19,6 +19,7 @@
 #include "common/common_types.h"
 #include "common/div_ceil.h"
 #include "common/logging.h"
+#include "common/nx2_early_switches.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 
 namespace VideoCommon {
@@ -37,18 +38,26 @@ enum class Type {
 };
 
 // EDEN_NX2_SYNC_SKIP (WordManager::SyncSkipMode) and EDEN_NX2_SYNC_EXACT (MayHaveCpuDirtyWords),
-// read once at startup (from the real environment only, as nx2_switches.txt is loaded later): as
-// function-local statics every query paid a thread-safe initialization check (SyncSkipMode alone
-// ~0.5% of the split back thread).
-inline const int g_nx2_sync_skip_mode = [] {
+// read before main and again by Common::Nx2EarlySwitches::ReloadAll (the menu program's
+// settings, nx2_switches.txt): as function-local statics every query paid a thread-safe
+// initialization check (SyncSkipMode alone ~0.5% of the split back thread).
+inline int ReadNx2SyncSkipMode() {
     const char* value = std::getenv("EDEN_NX2_SYNC_SKIP");
     return value == nullptr ? 1 : (value[0] == '0' ? 0 : (value[0] == '2' ? 2 : 1));
-}();
+}
 /// EDEN_NX2_SYNC_EXACT=0: MayHaveCpuDirtyWords tests whole words only, as before.
-inline const bool g_nx2_sync_exact = [] {
+inline bool ReadNx2SyncExact() {
     const char* value = std::getenv("EDEN_NX2_SYNC_EXACT");
     return value == nullptr || value[0] != '0';
-}();
+}
+inline int g_nx2_sync_skip_mode = ReadNx2SyncSkipMode();
+inline bool g_nx2_sync_exact = ReadNx2SyncExact();
+inline void ReloadNx2SyncSwitches() {
+    g_nx2_sync_skip_mode = ReadNx2SyncSkipMode();
+    g_nx2_sync_exact = ReadNx2SyncExact();
+}
+[[maybe_unused]] inline const bool g_nx2_sync_switches_registered =
+    Common::Nx2EarlySwitches::Register(&ReloadNx2SyncSwitches);
 
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
