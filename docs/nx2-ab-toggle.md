@@ -124,12 +124,14 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
   Maxwell3D): A defers the `current_dirty` thunk to the back (`=0`), B skips it (the default).
   For these macros nobody reads the value (the back's ProcessMacro never sees them), so an entry
   may take either phase; A's thunk still costs its deferral, which is what is measured.
+- `EDEN_NX2_B_PAD_NS=ab:<n>` (`video_core/nx2_b_pad.h`, PrepareDraw; taken from anka/b-hiz-2):
+  no pad in A, n ns a draw in B. The positive control: a known slowdown the method must see.
 
 ## Candidates (Anka branches, as of 2026-11-10)
 
 | Switch | Branch | Bindable | What the flip needs | Effort |
 |---|---|---|---|---|
-| `EDEN_NX2_B_PAD_NS` (deliberate per-draw delay) | anka/b-hiz-2 | yes | calibrate at start whatever the phase; `Pad()` spins only in B | easy; a positive control for the method |
+| `EDEN_NX2_B_PAD_NS` (deliberate per-draw delay) | anka/b-hiz-2 | bound (anka/ab-2, `=ab:<ns>`) | calibrate at start whatever the phase; `Pad()` spins only in B | easy; a positive control for the method |
 | `EDEN_NX2_UBO_KEEP` | anka/b-hiz-2 | yes, with care | the per-stage "last bind streamed" bits are only kept while on: clear them at off→on (draw boundary, latch) or keep them always; read the phase once per draw (rasterizer and buffer cache both look) | medium; verify with `=2` across flips |
 | `EDEN_NX2_READ_TRAPS` | anka/read-trap | no | correctness mechanism (A would be known-wrong); page protections, trap maps and Dynarmic's recompiled reads persist | — |
 | `EDEN_NX2_NULL_AUDIO_PACE` | anka/qt-hiz-2 | technically easy, not useful | pacing: it sets how often the game runs, not how fast the emulator is | — |
