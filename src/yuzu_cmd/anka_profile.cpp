@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <string>
 #include <system_error>
 
 #include "common/fs/fs_paths.h"
@@ -19,6 +20,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #include "common/string_util.h"
+#else
+#include <unistd.h>
 #endif
 
 // The profile's variables must be in the environment before the first switch is read, and some
@@ -97,6 +100,64 @@ bool SetKeys(const fs::path& path, std::span<const std::string_view> pairs) {
     Ini ini = ParseIni(*bytes);
     SetRenderer(ini, pairs);
     return WriteFileWhole(path, WriteIni(ini));
+}
+
+/// Whether something is at `path`: a file, a folder, a link (a broken one too). When it cannot
+/// be checked it counts as there: nothing is made over what could not be checked.
+bool Present(const fs::path& path) {
+    std::error_code ec;
+    return fs::symlink_status(path, ec).type() != fs::file_type::not_found;
+}
+
+enum class Made { Yes, Already, Failed };
+
+/// `target` as a copy of `source`, with `pairs` set in it when there are any, made whole under
+/// another name next to it and moved in only while nothing is at `target` (another start may
+/// have made it meanwhile: Already). Never replaces nor removes a file it did not make.
+/// `edit_failed`: the copy was made but `pairs` could not be set in it.
+Made MakeCopy(const fs::path& source, const fs::path& target,
+              std::span<const std::string_view> pairs, bool& edit_failed) {
+    edit_failed = false;
+#ifdef _WIN32
+    const unsigned long pid = GetCurrentProcessId();
+#else
+    const unsigned long pid = static_cast<unsigned long>(getpid());
+#endif
+    fs::path tmp = target;
+    tmp += ".nx2new" + std::to_string(pid); // this process's own name
+    std::error_code ec;
+    const auto drop = [&tmp] {
+        std::error_code ignored;
+        fs::remove(tmp, ignored);
+    };
+    if (!fs::copy_file(source, tmp, fs::copy_options::overwrite_existing, ec) || ec) {
+        drop();
+        return Made::Failed;
+    }
+    if (!pairs.empty() && !SetKeys(tmp, pairs)) {
+        edit_failed = true;
+        drop();
+        return Made::Failed;
+    }
+#ifdef _WIN32
+    // No MOVEFILE_REPLACE_EXISTING: fails when something is at `target`.
+    if (MoveFileExW(tmp.c_str(), target.c_str(), 0)) {
+        return Made::Yes;
+    }
+    const DWORD error = GetLastError();
+    const bool already = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS;
+#else
+    // A hard link fails when something is at `target`; then the temporary name goes.
+    fs::create_hard_link(tmp, target, ec);
+    const bool linked = !ec;
+    const bool already = ec == std::errc::file_exists;
+    if (linked) {
+        drop();
+        return Made::Yes;
+    }
+#endif
+    drop();
+    return already ? Made::Already : Made::Failed;
 }
 
 std::string Utf8(const fs::path& path) {
@@ -263,10 +324,13 @@ ConfigResult PrepareConfig(Profile profile, const fs::path& config_dir) {
     const fs::path qt = config_dir / "qt-config.ini";
     std::error_code ec;
     bool fresh = false;
-    if (!fs::exists(sdl, ec)) {
+    if (!Present(sdl)) {
         bool copied = fs::exists(qt, ec);
         if (copied) {
-            copied = fs::copy_file(qt, sdl, fs::copy_options::overwrite_existing, ec) && !ec;
+            bool edit_failed = false;
+            const Made made = MakeCopy(qt, sdl, {}, edit_failed);
+            copied = made != Made::Failed;
+            fresh = made == Made::Yes;
         }
         if (!copied) {
             say("");
@@ -277,7 +341,8 @@ ConfigResult PrepareConfig(Profile profile, const fs::path& config_dir) {
             result.go = false;
             return result;
         }
-        fresh = true;
+    }
+    if (fresh) {
         say(" [Anka] config\\sdl2-config.ini was made from qt-config.ini: the controller and settings of");
         say("           the menu program (anka.exe) are used.");
     }
@@ -304,27 +369,24 @@ ConfigResult PrepareConfig(Profile profile, const fs::path& config_dir) {
         say(" [Anka] Could not edit \"" + Utf8(sdl) + "\".");
     }
     const fs::path reactive = config_dir / "sdl2-config-reactive.ini";
-    if (!fs::exists(reactive, ec)) {
-        const bool made = fs::copy_file(sdl, reactive, fs::copy_options::overwrite_existing, ec) &&
-                          !ec;
-        bool edited = false;
-        if (made) {
-            edited = SetKeys(reactive, ReactiveOn);
-            if (!edited) {
-                say(" [Anka] Could not edit \"" + Utf8(reactive) + "\".");
-            }
+    if (!Present(reactive)) {
+        bool edit_failed = false;
+        const Made made = MakeCopy(sdl, reactive, ReactiveOn, edit_failed);
+        if (edit_failed) {
+            say(" [Anka] Could not edit \"" + Utf8(reactive) + "\".");
         }
-        if (!edited) {
-            // The half-made copy is this program's own (it did not exist above): removed, tried
-            // again next time. The start stops (exit 1, the launcher keeps its window open): a
-            // game started with sdl2-config.ini instead would not be the reactive setup.
-            fs::remove(reactive, ec);
+        if (made == Made::Failed) {
+            // Nothing was left at `reactive` (MakeCopy works under another name): tried again
+            // next time. The start stops (exit 1, the launcher keeps its window open): a game
+            // started with sdl2-config.ini instead would not be the reactive setup.
             say(" [Anka] config\\sdl2-config-reactive.ini could not be made: the game was not started.");
             say("           Check that the user folder can be written, or set CONFIG in this .bat.");
             result.go = false;
             return result;
         }
-        say(" [Anka] config\\sdl2-config-reactive.ini made (reactive flushing on).");
+        if (made == Made::Yes) {
+            say(" [Anka] config\\sdl2-config-reactive.ini made (reactive flushing on).");
+        }
     }
     result.config = reactive;
     return result;
