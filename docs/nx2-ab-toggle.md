@@ -103,10 +103,16 @@ if (foo.Now() != 0) { ... }          // the phase now: one relaxed atomic load
 - `N=600`, `K=60`: one block ≈ 540 presents ≈ 15 s at 36 FPS; a 10 minute window gives ~18 pairs.
 - First an A/A run (no switch bound): the A−B mean should be zero within its confidence interval;
   its pair SD is the method's noise.
-- Pair adjacent blocks (2k, 2k+1) and report the mean A−B difference with a t-based 90 %
-  interval; run once with `AB_START=A` and once with `AB_START=B` to cancel any order effect.
-  Comparing each B block with the mean of its two A neighbours also removes a linear drift
-  within a run.
+- **Primary estimate: neighbours.** Compare each B block with the mean of its two A neighbours
+  (an ABA triple): that removes a linear drift within the run. Two consecutive differences share
+  an A block (correlation 1/6 for independent blocks), so widen the t-based 90 % interval by
+  √(1 + 2ρ(n−1)/n) ≈ 1.15. Adjacent pairs (2k, 2k+1) are a secondary estimate: the pair's first
+  phase is always the same, so the warm-up's rise biases them by half a block's drift.
+- **Window after the warm-up:** blocks starting at album + 240 s. In the first A/A runs the
+  blocks from album + 60 to 240 s were ~7 % below the later mean (and rising); from 240 s on the
+  slope is near 0. With album + 90 the two launches' pair means differed by 1.98 points; from 240,
+  by 1.18.
+- Always two launches, `AB_START=A` and `AB_START=B`, and the result over both.
 
 ## Bound so far
 
