@@ -6,7 +6,7 @@ switches (`nx2_switches_ANKA.txt`; in the source `dist/nx2_switches.txt`): the o
 off unless a launcher or the menu program's Anka tab sets them, the per-draw shortcuts are on
 and `=0` brings back the 2.0.0 code path.
 
-## Anka 1.1.2 (draft, not released)
+## Anka 1.1.2 (`anka-v1.1.2`)
 
 ### Changed
 
@@ -40,6 +40,8 @@ and `=0` brings back the 2.0.0 code path.
   unless they were set outside the program. `start-safe.bat` (anka-cli) was not affected. The
   menu program now reads them again after setting its Anka settings, before the first game
   starts.
+
+## Anka 1.1.1 (`anka-v1.1.1`)
 
 A fix release on top of 1.1.0. Anka's second core is unchanged from 1.1.0 (same commit).
 
