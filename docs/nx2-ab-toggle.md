@@ -116,3 +116,12 @@ Not bindable on anka/110-dkb: `JIT_SAME`, `FRONT_MACRO_LEAN` (in JIT-compiled co
 (set up in the Maxwell3D constructor), `KEY_CMP` (pipeline cache), `BACK_STAGES` / `SPLIT`
 (threads built at start); `LAYOUT_MEMO`, `UBO_REUSE` / `UBO_STAGE`, `LIGHT_*`, `INDEX_SKIP` keep
 memos that would need invalidating at a latch change.
+
+## First results (anka/110-dkb 18aac47131 + this, -O2, wide scene, Null audio, throughput profile)
+
+- A/A (nothing bound), `N=600`, `K=60`, blocks from album+90 s: START=A 17 pairs, A−B −0.43 ±
+  2.36 % (90 %); START=B 17 pairs, +1.55 ± 1.28 %. Both launches: **+0.56 ± 1.31 %** (34 pairs),
+  pair SD 4.5 %: no bias seen at this resolution. The later block of a pair was ~1 % faster in
+  both launches (order effect or chance): always run both START=A and START=B.
+- `TICK_SKIP=ab`, one launch (START=A, 18 pairs): A (off) − B (on) −2.2 ± 2.3 %; with one
+  launch, order and effect can't be told apart: a preview, not a result.
