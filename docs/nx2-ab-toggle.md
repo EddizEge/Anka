@@ -162,7 +162,7 @@ differences per launch.
 | none (A/A) | +0.42 ± 2.69 | +1.40 ± 1.54 | **+0.91 ± 1.47** | no bias seen |
 | `B_PAD_NS=ab:300` (positive control: 300 ns a draw) | +7.98 ± 1.18 | +6.95 ± 1.51 | **+7.49 ± 0.92** | B slower, as built |
 | `TICK_SKIP=ab` | −3.72 ± 2.77 | −2.20 ± 1.33 | **−2.99 ± 1.52** | B faster: the default (on) gains ~3 % |
-| `BATCH_DIRECT=ab` | −0.56 ± 1.13 | — | (one launch) | undecided, within ±1.7 % |
+| `BATCH_DIRECT=ab` | −0.56 ± 1.13 | +0.21 ± 2.33 | **−0.17 ± 1.23** | no difference seen (within ±1.4 %) |
 | `DIRTY_THUNK_SKIP=ab` | — | (not reached) | — | the path never ran in this scene: no binding line in 690 s |
 | `FAST_PRIORITY_SCAN=ab` | — | — | — | not run yet |
 
