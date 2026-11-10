@@ -260,6 +260,17 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             for (const auto& blocker : decision.blockers) {
                 switch (blocker.why) {
                 case Why::Zone:
+                    if (blocker.what == Nx2DkDynamicFps::CaveZone) {
+                        LOG_WARNING(Loader,
+                                    "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for "
+                                    "this boot: the {} mod \"{}\" ({}) writes to the free space "
+                                    "past main's code that the patch uses (main+{:#x}); the patch "
+                                    "would overwrite the mod's code there. Turn the mod off in "
+                                    "Add-Ons to use dynamic FPS ({})",
+                                    blocker.kind, blocker.mod, blocker.file, blocker.offset,
+                                    dk_dyn_guard_label);
+                        break;
+                    }
                     LOG_WARNING(Loader,
                                 "Donkey Kong Bananza: dynamic FPS (EDEN_NX2_DK_DYN) off for this "
                                 "boot: the {} mod \"{}\" changes its {} (main+{:#x}); both would "
@@ -296,7 +307,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             if (decision.Blocked()) {
                 const auto& first = decision.blockers.front();
                 using Reason = Core::Nx2DkDynConflictInfo::Reason;
-                const Reason reason = first.why == Why::Zone     ? Reason::Zone
+                const bool cave = first.why == Why::Zone &&
+                                  first.what == Nx2DkDynamicFps::CaveZone;
+                const Reason reason = cave                       ? Reason::Cave
+                                      : first.why == Why::Zone   ? Reason::Zone
                                       : first.why == Why::Name   ? Reason::Name
                                       : first.why == Why::AnyMod ? Reason::AnyMod
                                                                  : Reason::Cheat;

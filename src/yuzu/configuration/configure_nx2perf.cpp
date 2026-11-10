@@ -123,6 +123,12 @@ void ConfigureNx2Perf::ShowDkDynConflict() {
                  "use it.")
                   .arg(mod);
         break;
+    case Reason::Cave:
+        why = tr("Off in the running game: the mod \"%1\" puts its own code in the free space past "
+                 "the game's code that dynamic FPS writes to; using it would break the mod. Turn "
+                 "the mod off in Add-Ons (Properties) to use it.")
+                  .arg(mod);
+        break;
     case Reason::Name:
         why = tr("Off in the running game: the mod \"%1\" is named like a frame rate mod; both at "
                  "once run the game too fast. Turn the mod off in Add-Ons (Properties) to use it.")
