@@ -252,8 +252,8 @@
 # rate mod with a neutral name in a build id file is not caught, nor a mod replacing exefs/main
 # whole (LayeredFS) in any mode; turn those off in Add-Ons yourself.
 # all (or 1): any such mod. name: the names only (mods and cheats) and the free space DK_DYN
-# writes to, not the rest of the code. 0: the frame rate code only (Anka 1.1.1), cheats only
-# named in the log. Other values: auto, with a warning (only for Bananza with DK_DYN on).
+# writes to, not the rest of the code. 0: the frame rate code only (Anka 1.1.1); enabled cheats
+# only counted in a log warning. Other values: auto, with a warning (only for Bananza with DK_DYN on).
 # When it turns DK_DYN off: the log, the Anka tab, and with OSD=1 a line for 30 s from the first
 # game frame. The launchers clear it (auto).
 #EDEN_NX2_DK_DYN_MOD_GUARD=all

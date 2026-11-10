@@ -461,13 +461,16 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
         const auto cheats =
             early_cheats ? std::move(*early_cheats) : pm->CreateCheatList(nso_header.build_id);
-        if (!cheats.empty() && name == "main" && Nx2DkDynamicFps::Enabled(dk_dyn_switch) &&
+        // Only the enabled ones: each cheats file also gives an empty entry (no opcodes)
+        const auto enabled_cheats = std::count_if(
+            cheats.begin(), cheats.end(), [](const auto& cheat) { return cheat.enabled; });
+        if (enabled_cheats != 0 && name == "main" && Nx2DkDynamicFps::Enabled(dk_dyn_switch) &&
             process.GetProgramId() == Nx2DkDynamicFps::ProgramId &&
             Core::g_nx2_dk_dyn_applied.load(std::memory_order_relaxed)) {
             LOG_WARNING(Loader,
                         "Donkey Kong Bananza: {} cheat(s) with dynamic FPS (EDEN_NX2_DK_DYN); if "
                         "one changes the frame rate, the game runs too fast above 30 fps",
-                        cheats.size());
+                        enabled_cheats);
         }
         if (!cheats.empty()) {
             system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);
