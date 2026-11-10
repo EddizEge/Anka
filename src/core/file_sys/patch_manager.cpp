@@ -443,8 +443,14 @@ std::vector<u8> ApplyNsoPatches(const std::vector<u8>& nso,
             patched = PatchIPS(std::make_shared<VectorVfsFile>(out), patch_file);
             kind = "IPS";
         } else if (patch_file->GetExtension() == "pchtxt") {
-            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"", mod);
             const IPSwitchCompiler compiler{patch_file};
+            if (!compiler.HasEnabledPatch()) {
+                // Every block @disabled: nothing to apply, and not reported (EDEN_NX2_DK_DYN
+                // reads the names of the patches that apply)
+                LOG_INFO(Loader, "    - IPSwitch patch of mod \"{}\": no @enabled block", mod);
+                continue;
+            }
+            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"", mod);
             patched = compiler.Apply(std::make_shared<VectorVfsFile>(out));
             kind = "IPSwitch";
         }

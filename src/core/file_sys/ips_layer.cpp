@@ -286,6 +286,11 @@ void IPSwitchCompiler::Parse(std::span<u8 const> bytes) {
     }
 }
 
+bool IPSwitchCompiler::HasEnabledPatch() const {
+    return std::any_of(patches.begin(), patches.end(),
+                       [](const auto& patch) { return patch.enabled && !patch.records.empty(); });
+}
+
 VirtualFile IPSwitchCompiler::Apply(const VirtualFile& in) const {
     if (in == nullptr)
         return nullptr;

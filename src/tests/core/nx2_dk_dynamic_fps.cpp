@@ -878,13 +878,17 @@ TEST_CASE("PatchManager: the mods PatchNSO reports, from a load folder", "[core]
     const std::string pchtxt = "@nsobid-" + build_id +
                                "\n@flag offset_shift 0x100\n@enabled\n00000010 AABB\n@stop\n";
     AddMod(load, "E Tweaks", "tweaks.pchtxt", std::vector<u8>(pchtxt.begin(), pchtxt.end()));
+    // An FPS-named IPSwitch mod whose blocks are all @disabled: not applied, not reported
+    const std::string off = "@nsobid-" + build_id +
+                            "\n@flag offset_shift 0x100\n@disabled\n00000020 CCDD\n@stop\n";
+    AddMod(load, "F 60 FPS off", "60fps.pchtxt", std::vector<u8>(off.begin(), off.end()));
 
     auto dirs = load->GetSubdirectories();
     std::sort(dirs.begin(), dirs.end(),
               [](const auto& l, const auto& r) { return l->GetName() < r->GetName(); });
     const auto patches = FileSys::CollectNsoPatches(dirs, build_id, {"B Off"});
     // The disabled mod and the other build id's are left out
-    REQUIRE(patches.size() == 3);
+    REQUIRE(patches.size() == 4);
 
     std::vector<FileSys::NsoModChange> changes;
     const auto out = FileSys::ApplyNsoPatches(nso, patches, &changes);
@@ -925,7 +929,7 @@ TEST_CASE("PatchManager: the mods PatchNSO reports, from a load folder", "[core]
     // Enabled, the disabled mod is reported in its place
     std::vector<FileSys::NsoModChange> all;
     (void)FileSys::ApplyNsoPatches(nso, FileSys::CollectNsoPatches(dirs, build_id, {}), &all);
-    REQUIRE(all.size() == 4);
+    REQUIRE(all.size() == 4); // "F 60 FPS off" never in it
     REQUIRE(all[1].mod == "B Off");
     REQUIRE(all[1].ranges == Ranges{{0x20, 0x22}});
 }
