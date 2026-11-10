@@ -60,6 +60,7 @@ struct NsoModChange {
     std::string kind; ///< "IPS" or "IPSwitch"
     std::string file; ///< the patch file's name (EDEN_NX2_DK_DYN_MOD_GUARD=name reads it)
     /// [begin, end) offsets into the module's code (after the NSO header), merged and sorted.
+    /// Empty: the patch applied but wrote only bytes already there (an earlier mod wrote them).
     std::vector<std::pair<size_t, size_t>> ranges;
 };
 
@@ -113,8 +114,10 @@ public:
     [[nodiscard]] bool HasNSOPatch(const BuildID& build_id, std::string_view name) const;
 
     // Creates a CheatList object with all
+    // `sources` (optional): one per entry, where it came from: the mod folder holding
+    // cheats/<build id>.txt, or the cheat_*.txt file (EDEN_NX2_DK_DYN names it).
     [[nodiscard]] std::vector<Core::Memory::CheatEntry> CreateCheatList(
-        const BuildID& build_id) const;
+        const BuildID& build_id, std::vector<std::string>* sources = nullptr) const;
 
     // Currently tracked RomFS patches:
     // - Game Updates

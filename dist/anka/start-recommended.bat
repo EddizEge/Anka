@@ -44,6 +44,7 @@ rem Opt-in switches this launcher does not use: cleared.
 set EDEN_NX2_PRESENT_INTERVAL=
 set EDEN_NX2_MODE_GOV=
 set EDEN_NX2_DK_DYN_MIN_FPS=
+set EDEN_NX2_DK_DYN_MOD_GUARD=
 set EDEN_NX2_BACK_CPU=
 set EDEN_NX2_SEMEXEC_DEFER=
 set EDEN_NX2_SKIP_EMPTY_DRAWS=

@@ -312,15 +312,21 @@ for tests.
 **Mods and cheats.** A "60 FPS" mod or cheat together with the patch runs the game too fast
 (twice as fast above 30 fps in a user's report). So, unset (`DK_DYN_MOD_GUARD=auto`), the patch
 stays off for that boot when an enabled exefs mod (IPS / pchtxt) changes the frame rate code it
-patches, when a mod's folder or file name reads like a frame rate mod (the words fps, vsync, hz,
-framerate / frame rate, frame pacing, or 60 alone: "60 FPS", "Unlock 60fps", "60.pchtxt"; not
-"2160p" or "Framebuffer"), or when an enabled cheat is named like one. Other mods (resolution,
-FXAA, camera) keep it; the log names them. When it stays off, the log says why, the Anka tab names
-the mod or cheat and, with `OSD=1`, the OSD shows a line for 30 s: turn that mod off in Add-Ons
-(Properties) to get dynamic FPS back. A frame rate mod with a neutral folder name and a build id
-file name is not caught: turn it off yourself. `DK_DYN_MOD_GUARD=all`: any exefs mod changing
-the game's code turns it off; `name`: the names only; `0`: Anka 1.1.1's rule (the frame rate code
-only). Only names are read, never what a mod changes.
+patches (or the free space it writes to), when a mod's folder or file name reads like a frame
+rate mod ("fps", "vsync", "framerate", "framepacing" anywhere in a word, as in "FPSunlock" or
+"novsync"; the words "hz", "frame rate", "frame pacing"; "60" next to fps / hz / frames or alone,
+as in "60 FPS" or "60.pchtxt"; not "2160p", "Season 60", "v1.60" or "Framebuffer"), or when an
+enabled cheat is named like one. Other mods (resolution, FXAA, camera) keep it; the log names
+them. When it stays off, the log says why, the Anka tab names the mod (or the cheat and its mod
+folder or cheat file) and, with `OSD=1`, the OSD shows a line for 30 s from the first game frame:
+turn that mod off in Add-Ons (Properties) to get dynamic FPS back. A frame rate mod with a neutral
+folder name and a build id file name, outside the frame rate code, is not caught: turn it off
+yourself. Nor is a mod that replaces `exefs/main` whole (LayeredFS) rather than patching it with
+IPS / pchtxt: no mode sees it. `DK_DYN_MOD_GUARD=all` (or `1`): any exefs IPS / pchtxt mod
+changing the game's code turns it off; `name`: the names only (and the free space it writes to);
+`0`: Anka 1.1.1's rule (the frame rate code only). The names and the bytes a mod changes are
+compared; what the change does is never read. The launchers clear `DK_DYN_MOD_GUARD` (auto); set
+it below that line.
 
 It is off by default in anka-cli; `start-recommended.bat` turns it on (`DK_DYN=1` at its top),
 and so does the menu program's Anka tab (Dynamic frame rate, on in the Recommended presets,

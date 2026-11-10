@@ -14,7 +14,13 @@ and `=0` brings back the 2.0.0 code path.
 - DK-DYN and mods: `DK_DYN_MOD_GUARD` (unset = `auto`). Besides a mod in the frame rate code
   (Anka 1.1.1), a mod named like a frame rate mod and an enabled cheat named like one turn the
   patch off for that boot; resolution and graphics mods keep it. The log, the Anka tab and the
-  OSD (30 s) say so. `all`, `name` and `0` (1.1.1's rule) for other choices.
+  OSD (30 s from the first frame) say so; for a cheat they name its mod folder or cheat file.
+  `all` (or `1`), `name` and `0` (1.1.1's rule) for other choices; the launchers clear it. A mod
+  that replaces `exefs/main` whole (LayeredFS) is not seen in any mode.
+- DK-DYN does not write over a non-empty free space past main's code (a mod's code there): it
+  stays off for that boot, with a line in the log.
+- Cheats: a mod's `cheats/<build id>.txt` is read once on Windows (its upper and lower case names
+  opened the same file twice).
 - Menu program: `EDEN_NX2_QT_GAME_INPUT_MS=<1-8>`, the input pump's interval while a game runs
   (off by default; no frame rate gain measured).
 

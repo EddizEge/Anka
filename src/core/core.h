@@ -126,11 +126,23 @@ extern std::atomic<u32> g_nx2_session;
 /// EDEN_NX2_DK_DYN: Donkey Kong Bananza's dynamic frame rate patch went into its main module as it
 /// loaded (core/loader/nx2_dk_dynamic_fps.h); vi2 then reports VRR and paces every vblank.
 extern std::atomic<bool> g_nx2_dk_dyn_applied;
-/// EDEN_NX2_DK_DYN was on but another exefs mod changes the frame rate code it patches: the patch
-/// stayed out of this boot, and this names the mod (empty: no such mod). Cleared at each boot; the
-/// Anka tab shows it.
-void SetNx2DkDynConflict(std::string mod);
-[[nodiscard]] std::string Nx2DkDynConflict();
+/// EDEN_NX2_DK_DYN was on but an exefs mod or a cheat that may change the frame rate kept the patch
+/// out of this boot (core/loader/nso.cpp, EDEN_NX2_DK_DYN_MOD_GUARD): the first one and why.
+/// Cleared at each boot; the Anka tab and the OSD show it.
+struct Nx2DkDynConflictInfo {
+    enum class Reason : u8 {
+        None,   ///< no conflict
+        Zone,   ///< the mod changes the frame rate code or the free space the patch uses
+        Name,   ///< the mod's folder or file is named like a frame rate mod
+        AnyMod, ///< EDEN_NX2_DK_DYN_MOD_GUARD=all: any mod changing main
+        Cheat,  ///< an enabled cheat named like a frame rate cheat
+    };
+    Reason reason{Reason::None};
+    std::string mod;   ///< the mod's folder; for a cheat its source (mod folder or cheat_*.txt)
+    std::string cheat; ///< the cheat's entry name (Reason::Cheat)
+};
+void SetNx2DkDynConflict(Nx2DkDynConflictInfo conflict);
+[[nodiscard]] Nx2DkDynConflictInfo Nx2DkDynConflict();
 
 class CpuManager;
 class Debugger;

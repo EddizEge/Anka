@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -410,4 +411,33 @@ TEST_CASE("Nx2RtssOsd: the frame generation multiplier", "[common]") {
     h.generated_frames = 40;
     f.generated_frames = 0;
     REQUIRE(*Compute(f, h).multiplier == 2.0);
+}
+
+TEST_CASE("Nx2RtssOsd: the DK_DYN conflict line", "[common]") {
+    using namespace Common::Nx2RtssOsd;
+    // Shown before the first game frame (the 30 s not started) and for 30 s after it
+    REQUIRE(ConflictLineShown(std::nullopt));
+    REQUIRE(ConflictLineShown(0.0));
+    REQUIRE(ConflictLineShown(29.9));
+    REQUIRE_FALSE(ConflictLineShown(30.0));
+    REQUIRE_FALSE(ConflictLineShown(120.0));
+    // A mod; a cheat with its source
+    REQUIRE(ConflictLine("Unlock 60fps", "") ==
+            "Dynamic FPS off: turn off \"Unlock 60fps\" in Add-Ons");
+    REQUIRE(ConflictLine("DKB Cheats", "60 FPS") ==
+            "Dynamic FPS off: cheat [60 FPS] in \"DKB Cheats\" (Add-Ons)");
+    // Long names cut with "...", the quote after the cut
+    const std::string longer(60, 'x');
+    REQUIRE(ConflictLine(longer, "") ==
+            "Dynamic FPS off: turn off \"" + std::string(37, 'x') + "...\" in Add-Ons");
+    REQUIRE(ConflictLine(longer, longer) == "Dynamic FPS off: cheat [" + std::string(29, 'x') +
+                                                "...] in \"" + std::string(29, 'x') +
+                                                "...\" (Add-Ons)");
+    // UTF-8: one '?' per character, never half of one; control bytes and RTSS tags too
+    REQUIRE(OsdName("\xC3\x87\xC3\xB6z\xC3\xBCn\xC3\xBCrl\xC3\xBCk") == "??z?n?rl?k");
+    REQUIRE(OsdName("\xE2\x82\xAC 60") == "? 60");
+    REQUIRE(OsdName("a\nb<C=FF0000>") == "a?b?C=FF0000?");
+    REQUIRE(OsdName(std::string(10, 'a') + "\xC3\x87", 8) == "aaaaa...");
+    REQUIRE(OsdName("\x80\x80z") == "?z");
+    REQUIRE(OsdName("") == "");
 }

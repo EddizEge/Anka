@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "core/memory/dmnt_cheat_types.h"
 
 // EDEN_NX2_DK_DYN=1 (off by default): Donkey Kong Bananza's dynamic frame rate patch, taken from
 // the ZendNevs fork (v2.0.5, nso.cpp, setting dk_dynamic_fps, on by default there). It rewrites the
@@ -130,6 +131,7 @@ struct Result {
     size_t step_matches{};
     u32 min_fps{};       // EDEN_NX2_DK_DYN_MIN_FPS put in (0: the game's 40 kept)
     bool min_fps_missed{}; // asked for, but controller + 59 / + 60 were not the words above
+    bool cave_in_use{};    // the free space it writes to was not all zero (a mod's code?): not applied
 };
 
 // Donkey Kong Bananza picks its frame rate target from the time of a frame: above 40 fps it
@@ -191,6 +193,14 @@ inline Result Apply(std::span<u8> text, u32 text_size, u32 aligned_size, u32 min
     if (!extras_found || (cave + CaveWords) * sizeof(u32) > aligned_size) {
         return result;
     }
+    // The free space must be free: a mod (IPS / IPSwitch) may have put its own code there, and
+    // writing over it would break that mod in silence.
+    for (size_t i = cave; i < cave + CaveWords; ++i) {
+        if (word(i) != 0) {
+            result.cave_in_use = true;
+            return result;
+        }
+    }
     const size_t no_sleep = sleep + 1 + ((word(sleep + 1) >> 5) & 0x7FFFF);
     put(cave, 0xEB080120);                         // subs x0, x9, x8
     put(cave + 1, 0x5400004C);                     // b.gt +8
@@ -245,6 +255,9 @@ struct Zone {
 
 constexpr size_t ZoneMarginWords = 32;
 
+/// The zone of the free space the patch writes to (checked in every EDEN_NX2_DK_DYN_MOD_GUARD mode).
+constexpr std::string_view CaveZone = "free space it uses";
+
 inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
     std::vector<Zone> zones;
     if (text.size() < text_size) {
@@ -268,7 +281,7 @@ inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
     }
     // The free space Apply writes to (past the end of the code, in its last page)
     const size_t cave = (text_size + 15) / 16 * 4;
-    zones.push_back({cave * sizeof(u32), (cave + CaveWords) * sizeof(u32), "free space it uses"});
+    zones.push_back({cave * sizeof(u32), (cave + CaveWords) * sizeof(u32), CaveZone});
 
     const u8* const code = text.data();
     const auto word = [code](size_t index) {
@@ -391,18 +404,74 @@ inline std::vector<std::string> NameWords(std::string_view name) {
     return words;
 }
 
-/// A mod folder / patch file / cheat name that reads like a frame rate mod, by whole words (any
-/// case): fps, vsync (v-sync), hz, framerate (frame rate, frame-rate), frame pacing, or 60 alone
-/// ("60 FPS", "Unlock 60fps", "dkb_60hz.pchtxt", "60.pchtxt"). Not "2160p", "1600p", "960p",
-/// "1360" or "Framebuffer Fix".
+/// A mod folder / patch file / cheat name that reads like a frame rate mod (any case):
+/// - "fps", "vsync", "framerate" or "framepacing" anywhere in a run of letters and digits
+///   ("FPSunlock", "NoFPSlimit", "VSYNCoff", "unlockfps", "dkbfps", "60fps");
+/// - the words "hz", "frame rate" / "frame-rate", "frame pacing", "v-sync" (NameWords);
+/// - "60" as a word only next to fps / hz / frame(s) / vsync ("60 FPS", "60Hz", "60 frames"), or
+///   the whole name ("60", "60.pchtxt"); not "Season 60", "v1.60", "60%", "2160p" or "1600p".
+/// "frame" alone is not enough ("Framebuffer Fix"). A ".ips" / ".pchtxt" / ".txt" end is not read.
 inline bool FpsLikeName(std::string_view name) {
-    const auto words = NameWords(name);
+    const auto lower_ascii = [](std::string_view text) {
+        std::string out(text);
+        for (char& c : out) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return out;
+    };
+    std::string stem = lower_ascii(name);
+    for (const std::string_view ext : {".pchtxt", ".ips", ".txt"}) {
+        if (stem.size() > ext.size() && stem.ends_with(ext)) {
+            stem.resize(stem.size() - ext.size());
+            break;
+        }
+    }
+    {
+        const auto first = stem.find_first_not_of(" \t");
+        const auto last = stem.find_last_not_of(" \t");
+        if (first != std::string::npos && stem.substr(first, last - first + 1) == "60") {
+            return true;
+        }
+    }
+    // Runs of letters and digits, joined however they are written
+    std::string run;
+    const auto run_matches = [&run] {
+        for (const std::string_view part : {"fps", "vsync", "framerate", "framepacing"}) {
+            if (run.find(part) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const char c : stem) {
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            run.push_back(c);
+            continue;
+        }
+        if (run_matches()) {
+            return true;
+        }
+        run.clear();
+    }
+    if (run_matches()) {
+        return true;
+    }
+    // Words of the name as written (its case marks where they meet)
+    const auto words = NameWords(name.substr(0, stem.size()));
+    const auto rate_word = [](std::string_view w) {
+        return w == "fps" || w == "hz" || w == "frame" || w == "frames" || w == "vsync";
+    };
     for (size_t i = 0; i < words.size(); ++i) {
         const std::string& w = words[i];
         const std::string_view next = i + 1 < words.size() ? std::string_view{words[i + 1]} : "";
-        if (w == "fps" || w == "vsync" || w == "hz" || w == "60" || w == "framerate" ||
-            w == "framepacing" || (w == "frame" && (next == "rate" || next == "pacing")) ||
+        const std::string_view prev = i > 0 ? std::string_view{words[i - 1]} : "";
+        if (w == "hz" || (w == "frame" && (next == "rate" || next == "pacing")) ||
             (w == "v" && next == "sync")) {
+            return true;
+        }
+        if (w == "60" && (rate_word(next) || rate_word(prev))) {
             return true;
         }
     }
@@ -480,16 +549,41 @@ struct ModChange {
     std::string_view mod;  ///< its folder
     std::string_view kind; ///< "IPS" / "IPSwitch"
     std::string_view file; ///< the patch file
-    std::span<const std::pair<size_t, size_t>> ranges; ///< [begin, end) in module code offsets
+    /// [begin, end) in module code offsets; empty: it applied but wrote only the bytes already
+    /// there (an earlier mod wrote the same), its names are still read.
+    std::span<const std::pair<size_t, size_t>> ranges;
 };
+
+/// An enabled cheat of main: its entry name and where it came from.
+struct CheatName {
+    std::string name;   ///< the [entry] name, up to its first NUL
+    std::string source; ///< the mod folder with cheats/<build id>.txt, or the cheat_*.txt file
+};
+
+/// The enabled cheats of `cheats` (PatchManager::CreateCheatList) with `sources` (one per entry,
+/// in the same order; missing ones are empty).
+inline std::vector<CheatName> EnabledCheats(std::span<const Core::Memory::CheatEntry> cheats,
+                                            std::span<const std::string> sources) {
+    std::vector<CheatName> out;
+    for (size_t i = 0; i < cheats.size(); ++i) {
+        if (!cheats[i].enabled) {
+            continue;
+        }
+        const auto& raw = cheats[i].definition.readable_name;
+        const std::string_view full{raw.data(), raw.size()};
+        out.push_back({.name = std::string{full.substr(0, full.find('\0'))},
+                       .source = i < sources.size() ? sources[i] : std::string{}});
+    }
+    return out;
+}
 
 /// What turned the patch off.
 struct Blocker {
     enum class Why { Zone, Name, AnyMod, Cheat };
     Why why{};
-    std::string mod;   ///< the mod's folder, or the cheat's name
+    std::string mod;   ///< the mod's folder; for a cheat its source (CheatName::source)
     std::string kind;  ///< "IPS" / "IPSwitch" / "cheat"
-    std::string file;  ///< the patch file (empty for a cheat)
+    std::string file;  ///< the patch file; for a cheat its entry name
     size_t offset{};   ///< Zone: the first changed byte in a zone; else the mod's first change
     std::string_view what; ///< Zone: the zone
 };
@@ -504,17 +598,24 @@ struct Decision {
 
 /// Whether the patch stays out of this boot under `guard`, given the mods' changes to main
 /// (`zones` from FpsZones, the text at `text_location` in module code offsets) and the enabled
-/// cheats' names. The loader's decision, kept apart to be tested (nso.cpp).
+/// cheats (EnabledCheats). The loader's decision, kept apart to be tested (nso.cpp).
+/// In "name" mode only the free space the patch writes to (CaveZone) is checked of the zones.
 inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t text_location,
-                       std::span<const ModChange> mods,
-                       std::span<const std::string_view> cheat_names = {}) {
+                       std::span<const ModChange> mods, std::span<const CheatName> cheats = {}) {
     Decision decision;
+    std::vector<Zone> cave_only;
+    if (guard == ModGuard::Names) {
+        for (const Zone& zone : zones) {
+            if (zone.what == CaveZone) {
+                cave_only.push_back(zone);
+            }
+        }
+    }
+    const std::vector<Zone>& checked = guard == ModGuard::Names ? cave_only : zones;
     for (const ModChange& change : mods) {
         const std::vector<std::pair<size_t, size_t>> ranges(change.ranges.begin(),
                                                              change.ranges.end());
-        const auto conflict = guard == ModGuard::Names
-                                  ? std::optional<Conflict>{}
-                                  : FirstConflict(zones, text_location, ranges);
+        const auto conflict = FirstConflict(checked, text_location, ranges);
         const size_t first = ranges.empty() ? 0 : ranges.front().first;
         const auto block = [&](Blocker::Why why, size_t offset, std::string_view what) {
             decision.blockers.push_back({.why = why,
@@ -528,6 +629,8 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
             block(Blocker::Why::Zone, conflict->offset, conflict->what);
         } else if (guard != ModGuard::Zones && FpsLikeMod(change.mod, change.file)) {
             block(Blocker::Why::Name, first, {});
+        } else if (ranges.empty()) {
+            // wrote nothing new: neither "any mod changing main" nor named in the log
         } else if (guard == ModGuard::All) {
             block(Blocker::Why::AnyMod, first, {});
         } else {
@@ -536,10 +639,12 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
         }
     }
     if (guard != ModGuard::Zones) {
-        for (const std::string_view cheat : cheat_names) {
-            if (FpsLikeName(cheat)) {
-                decision.blockers.push_back(
-                    {.why = Blocker::Why::Cheat, .mod = std::string{cheat}, .kind = "cheat"});
+        for (const CheatName& cheat : cheats) {
+            if (FpsLikeName(cheat.name)) {
+                decision.blockers.push_back({.why = Blocker::Why::Cheat,
+                                             .mod = cheat.source,
+                                             .kind = "cheat",
+                                             .file = cheat.name});
             }
         }
     }

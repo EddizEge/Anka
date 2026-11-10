@@ -81,15 +81,15 @@ std::atomic<bool> g_nx2_dk_dyn_applied{};
 
 namespace {
 std::mutex g_nx2_dk_dyn_conflict_mutex;
-std::string g_nx2_dk_dyn_conflict;
+Nx2DkDynConflictInfo g_nx2_dk_dyn_conflict;
 } // Anonymous namespace
 
-void SetNx2DkDynConflict(std::string mod) {
+void SetNx2DkDynConflict(Nx2DkDynConflictInfo conflict) {
     std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
-    g_nx2_dk_dyn_conflict = std::move(mod);
+    g_nx2_dk_dyn_conflict = std::move(conflict);
 }
 
-std::string Nx2DkDynConflict() {
+Nx2DkDynConflictInfo Nx2DkDynConflict() {
     std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
     return g_nx2_dk_dyn_conflict;
 }
