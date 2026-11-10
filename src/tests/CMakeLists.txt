@@ -10,6 +10,7 @@ add_executable(tests
     common/container_hash.cpp
     common/fibers.cpp
     common/host_memory.cpp
+    common/nx2_ab.cpp
     common/nx2_rtss_osd.cpp
     common/page_table.cpp
     common/param_package.cpp
