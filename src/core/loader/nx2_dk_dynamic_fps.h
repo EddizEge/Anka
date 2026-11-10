@@ -311,7 +311,8 @@ inline std::vector<Zone> FpsZones(std::span<const u8> text, u32 text_size) {
 // the mods' folder and file names and the cheats' names are read, never what they change):
 //   unset / "auto": Auto, a mod in the zones (Anka 1.1.1's rule), or one whose folder or file
 //                   name reads like a frame rate mod (FpsLikeName), turns the patch off for that
-//                   boot; so does an enabled cheat named like one. The others are named in the log.
+//                   boot; so does an enabled cheat named like one, or from a mod folder / cheat
+//                   file named like one. The others are named in the log.
 //   "all" / "1":    All, any exefs mod changing main, and a cheat named like a frame rate one.
 //   "name":         Names, only the names (mods and cheats); the zones are not looked at.
 //   "0":            Zones, Anka 1.1.1's rule: only a mod in the zones; cheats only named in the log.
@@ -640,7 +641,8 @@ inline Decision Decide(ModGuard guard, const std::vector<Zone>& zones, size_t te
     }
     if (guard != ModGuard::Zones) {
         for (const CheatName& cheat : cheats) {
-            if (FpsLikeName(cheat.name)) {
+            // Its entry or where it came from ("60 FPS Cheats", cheat_60fps.txt)
+            if (FpsLikeName(cheat.name) || FpsLikeName(cheat.source)) {
                 decision.blockers.push_back({.why = Blocker::Why::Cheat,
                                              .mod = cheat.source,
                                              .kind = "cheat",

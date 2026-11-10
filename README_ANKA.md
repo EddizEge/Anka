@@ -316,7 +316,8 @@ patches (or the free space it writes to), when a mod's folder or file name reads
 rate mod ("fps", "vsync", "framerate", "framepacing" anywhere in a word, as in "FPSunlock" or
 "novsync"; the words "hz", "frame rate", "frame pacing"; "60" next to fps / hz / frames or alone,
 as in "60 FPS" or "60.pchtxt"; not "2160p", "Season 60", "v1.60" or "Framebuffer"), or when an
-enabled cheat is named like one. Other mods (resolution, FXAA, camera) keep it; the log names
+enabled cheat is named like one or comes from a mod folder or `cheat_*.txt` file named
+like one. Other mods (resolution, FXAA, camera) keep it; the log names
 them. When it stays off, the log says why, the Anka tab names the mod (or the cheat and its mod
 folder or cheat file) and, with `OSD=1`, the OSD shows a line for 30 s from the first game frame:
 turn that mod off in Add-Ons (Properties) to get dynamic FPS back. A frame rate mod with a neutral

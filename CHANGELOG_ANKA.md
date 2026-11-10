@@ -12,7 +12,7 @@ and `=0` brings back the 2.0.0 code path.
   free rates stop at 40; 30 measured 4-5% slower); `DK_DYN_MIN_FPS_LOW=1` lets 1-39 in for tests.
   The range is now `<40-60>`.
 - DK-DYN and mods: `DK_DYN_MOD_GUARD` (unset = `auto`). Besides a mod in the frame rate code
-  (Anka 1.1.1), a mod named like a frame rate mod and an enabled cheat named like one turn the
+  (Anka 1.1.1), a mod named like a frame rate mod and an enabled cheat named like one (or in a folder / cheat file named like one) turn the
   patch off for that boot; resolution and graphics mods keep it. The log, the Anka tab and the
   OSD (30 s from the first frame) say so; for a cheat they name its mod folder or cheat file.
   `all` (or `1`), `name` and `0` (1.1.1's rule) for other choices; the launchers clear it. A mod

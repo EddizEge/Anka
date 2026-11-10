@@ -247,7 +247,7 @@
 # rate mod (fps / vsync / framerate / framepacing anywhere in a word: "FPSunlock", "novsync";
 # the words hz, frame rate, frame pacing; 60 next to fps / hz / frames or alone: "60 FPS",
 # "60.pchtxt"; not "2160p", "Season 60", "v1.60" or "Framebuffer"; a build id file name is not
-# read), or a cheat named like one. Other mods (resolution, FXAA, camera) keep DK_DYN and are
+# read), or an enabled cheat named like one or from a folder / cheat file named like one. Other mods (resolution, FXAA, camera) keep DK_DYN and are
 # named in the log. A "60 FPS" mod plus DK_DYN ran the game twice as fast above 30 fps: a frame
 # rate mod with a neutral name in a build id file is not caught, nor a mod replacing exefs/main
 # whole (LayeredFS) in any mode; turn those off in Add-Ons yourself.

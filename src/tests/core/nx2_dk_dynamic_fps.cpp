@@ -820,6 +820,18 @@ TEST_CASE("Nx2DkDynamicFps: Decide, several mods and cheats", "[core]") {
         REQUIRE(d.blockers[0].kind == "cheat");
     }
     REQUIRE_FALSE(f.Run(ModGuard::Zones, {}, cheats).Blocked());
+    // The source's name counts too: a neutral entry from a folder or cheat file named like FPS
+    for (const std::string_view source : {"DKB 60FPS Cheats", "cheat_60fps.txt", "Unlock FPS"}) {
+        const auto d = f.Run(ModGuard::Auto, {}, {{"[On]", std::string{source}}});
+        REQUIRE(d.blockers.size() == 1);
+        REQUIRE(d.blockers[0].why == Why::Cheat);
+        REQUIRE(d.blockers[0].mod == source);
+        REQUIRE(d.blockers[0].file == "[On]");
+    }
+    REQUIRE_FALSE(f.Run(ModGuard::Auto, {}, {{"Moon Jump", "DKB Cheats"},
+                                             {"Infinite Health", "cheat_dkb.txt"}})
+                      .Blocked());
+    REQUIRE_FALSE(f.Run(ModGuard::Zones, {}, {{"[On]", "cheat_60fps.txt"}}).Blocked());
     REQUIRE_FALSE(
         f.Run(ModGuard::Auto, {}, {{"Infinite Health", "x"}, {"Moon Jump", "cheat_dk.txt"}})
             .Blocked());
