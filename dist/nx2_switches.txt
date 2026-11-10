@@ -353,6 +353,11 @@
 # SHUTDOWN_TRACE=1: a timed line before and after each step of the emulation shutdown (to find
 # where it hangs; the menu exe stops waiting after 10 s). The steps and their order unchanged.
 #EDEN_NX2_SHUTDOWN_TRACE=1
+# AB_TOGGLE=<N>: A/B within one run (docs/nx2-ab-toggle.md): every N presents a phase flips
+# between A and B and a switch set to "ab" ("ab:<value>") is off in A, on in B; each phase's
+# presents give one "NX2_AB blok=" line. AB_DISCARD=<K> (default 60): presents after a flip in
+# no block. AB_START=B: the first phase is B. Unset: no counting, "ab" switches stay off.
+#EDEN_NX2_AB_TOGGLE=600
 #EDEN_NX2_HID_DIAG=1
 #EDEN_NX2_INDIRECT_DIAG=1
 #EDEN_NX2_FRONT_DIAG=0
