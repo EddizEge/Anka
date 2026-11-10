@@ -11,6 +11,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/nx2_ab.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -60,14 +61,11 @@ namespace {
 // function-local static's initialization check on every read.
 std::atomic<s8> g_nx2_desc_xlat_mode{-1};
 
+// =ab: =0 in the A/B test's phase A, on in B (common/nx2_ab.h). Each read decides alone; the
+// remembered pointers are dropped by mapping epoch and translation generation, not by the mode,
+// so entries from an earlier B phase are as valid as fresh ones.
 int DescXlatMode() {
-    s8 value = g_nx2_desc_xlat_mode.load(std::memory_order_relaxed);
-    if (value < 0) [[unlikely]] {
-        const char* env = std::getenv("EDEN_NX2_DESC_XLAT");
-        value = static_cast<s8>(env == nullptr ? 1 : env[0] == '0' ? 0 : env[0] == '2' ? 2 : 1);
-        g_nx2_desc_xlat_mode.store(value, std::memory_order_relaxed);
-    }
-    return value;
+    return Common::Nx2Ab::ReadMode(g_nx2_desc_xlat_mode, "EDEN_NX2_DESC_XLAT");
 }
 
 // Small writes within one 4 KiB page (macros' constant buffer words: four per draw in title 1,

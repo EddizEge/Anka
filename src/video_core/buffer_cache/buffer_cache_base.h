@@ -27,6 +27,7 @@
 #include "common/div_ceil.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
+#include "common/nx2_ab.h"
 #include "common/range_sets.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -116,10 +117,12 @@ inline int Nx2StorageKeep() {
 /// EDEN_NX2_UBO_BIND_SKIP (elBart0 0015): BindGraphicsUniformBuffer keeps a binding resolved to
 /// the same device address and size whose buffer FindBuffer would return again, instead of
 /// clearing it for UpdateUniformBuffers to find; an unmapped address binds NULL_BINDING. =0 as
-/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds).
+/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds). =ab: =0 in the A/B
+/// test's phase A, on in B (common/nx2_ab.h): each bind decides alone, and the binding it keeps
+/// is checked against page_table and the buffer's bounds whichever phase left it there.
 inline int Nx2UboBindSkip() {
     static std::atomic<s8> mode{-1};
-    return ReadNx2Mode(mode, "EDEN_NX2_UBO_BIND_SKIP");
+    return Common::Nx2Ab::ReadMode(mode, "EDEN_NX2_UBO_BIND_SKIP");
 }
 /// EDEN_NX2_INLINE_FIX (Duck912 4a6b890171): the inline index buffer, when it grows or the
 /// collector takes it, is deleted as any other buffer (DeleteBuffer: unregistered from page_table
