@@ -119,6 +119,9 @@ struct ImageBase {
         u64 seq;
         DAddr addr;
         u64 size;
+        /// Sequence of the upload that put these bytes in the image (RefreshContents); none yet:
+        /// the maximum. A copy recorded after it already holds them.
+        u64 in_image = ~u64{0};
     };
     std::vector<CpuWriteRecord> cpu_writes_since_download;
     u64 download_queued_seq = 0;      ///< Sequence of the last swizzled download queued, 0: none.

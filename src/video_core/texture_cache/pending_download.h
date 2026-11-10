@@ -18,8 +18,11 @@ struct PendingImageDownload {
     size_t async_buffer_id;
     Common::SlotId object_id;
     std::shared_ptr<Image> retired_image{};
-    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: the texture cache's CPU write sequence when it was queued.
+    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: the texture cache's CPU write sequence when it was queued
+    /// (the largest of the duplicates merged into it at commit).
     u64 queued_seq{};
+    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: the sequence when its copy was recorded (commit).
+    u64 copy_seq{};
 
     Image& GetImage(Common::SlotVector<Image>& images) const {
         return retired_image ? *retired_image : images[object_id];

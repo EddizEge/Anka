@@ -42,8 +42,9 @@
 # DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range (their pop writes
 # nothing there), as rdenno's 15126fbdc1 did. By default those bytes are still written.
 #EDEN_NX2_DL_GPU_CANCEL=1
-# TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the image after
-# the download was queued (records up to 64 writes, else as before). Off by default.
+# TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the image that
+# were not in it when its copy was recorded (records up to 64 writes, else as before). Experimental,
+# off by default.
 #EDEN_NX2_TEX_FLUSH_KEEP_CPU=1
 # TEX_FLUSH_HELD=1 (needs TEX_FLUSH_KEEP_CPU=1): CPU writes the buffer cache holds until their flush
 # are recorded too, so an async texture flush keeps their bytes as well. Off by default.

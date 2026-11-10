@@ -1271,7 +1271,26 @@ void TextureCache<P>::CommitAsyncFlushes() {
     // This is intentionally passing the value by copy
     if constexpr (IMPLEMENTS_ASYNC_DOWNLOADS) {
         auto& download_ids = uncommitted_downloads;
+        std::unordered_map<const Image*, u64> latest_queued;
+        if (Nx2TexFlushKeepCpu()) [[unlikely]] {
+            // Duplicates are dropped below: the kept entry stands for the latest one queued.
+            for (const PendingDownload& download : download_ids) {
+                if (download.is_swizzle) {
+                    u64& latest = latest_queued[&download.GetImage(slot_images)];
+                    latest = (std::max)(latest, download.queued_seq);
+                }
+            }
+        }
         const size_t redundant_images = DeduplicatePendingImageDownloads(download_ids, slot_images);
+        if (!latest_queued.empty()) [[unlikely]] {
+            for (PendingDownload& download : download_ids) {
+                if (download.is_swizzle && download.queued_seq != 0) {
+                    download.queued_seq = latest_queued[&download.GetImage(slot_images)];
+                    // Its copy is recorded now: CPU writes not in the image by now are newer.
+                    download.copy_seq = NextCpuWriteSeq();
+                }
+            }
+        }
         if (download_ids.empty()) {
             committed_downloads.emplace_back(std::move(uncommitted_downloads));
             uncommitted_downloads.clear();
@@ -1404,14 +1423,15 @@ void TextureCache<P>::PopAsyncFlushes() {
     // Writes the GPU's bytes back to guest memory. EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: what the CPU
     // wrote over the image since the download was queued is newer, so its bytes are kept (read
     // before, written back after). Without a record (overflow, or the switch off) as before.
-    const auto swizzle = [this](ImageBase& image, u64 queued_seq,
+    const auto swizzle = [this](ImageBase& image, u64 queued_seq, u64 copy_seq,
                                 std::span<const BufferImageCopy> copies, std::span<u8> span) {
         boost::container::small_vector<std::pair<const ImageBase::CpuWriteRecord*, std::vector<u8>>, 4>
             kept;
-        const bool use_record = queued_seq != 0 && !image.cpu_writes_overflow;
+        const bool use_record = copy_seq != 0 && !image.cpu_writes_overflow;
         if (use_record) {
             for (const auto& write : image.cpu_writes_since_download) {
-                if (write.seq > queued_seq) {
+                // Not in the image when the copy was recorded: guest memory's bytes are newer.
+                if (write.in_image > copy_seq) {
                     std::vector<u8> bytes(write.size);
                     device_memory.ReadBlockUnsafe(write.addr, bytes.data(), bytes.size());
                     kept.emplace_back(&write, std::move(bytes));
@@ -1425,9 +1445,9 @@ void TextureCache<P>::PopAsyncFlushes() {
         if (queued_seq == 0) {
             return;
         }
-        // Later downloads were queued after this one: older records are not needed any more.
+        // In the image before this copy: every later copy holds them too.
         std::erase_if(image.cpu_writes_since_download,
-                      [queued_seq](const auto& write) { return write.seq <= queued_seq; });
+                      [copy_seq](const auto& write) { return write.in_image <= copy_seq; });
         if (image.download_queued_seq <= queued_seq) {
             image.download_queued_seq = 0;
             image.cpu_writes_since_download.clear();
@@ -1451,7 +1471,7 @@ void TextureCache<P>::PopAsyncFlushes() {
                 download_buffer.offset -= Common::AlignUp(image.unswizzled_size_bytes, 64);
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
-                swizzle(image, download_info.queued_seq, copies, download_span);
+                swizzle(image, download_info.queued_seq, download_info.copy_seq, copies, download_span);
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
@@ -1480,6 +1500,8 @@ void TextureCache<P>::PopAsyncFlushes() {
         }
         auto download_map = runtime.DownloadStagingBuffer(total_size_bytes);
         const size_t original_offset = download_map.offset;
+        // The copies are recorded here (no async downloads): one sequence for all of them.
+        const u64 copy_seq = Nx2TexFlushKeepCpu() ? NextCpuWriteSeq() : 0;
         for (const PendingDownload& download_info : download_ids) {
             if (!download_info.is_swizzle) {
                 continue;
@@ -1499,7 +1521,8 @@ void TextureCache<P>::PopAsyncFlushes() {
             }
             ImageBase& image = download_info.GetImage(slot_images);
             const auto copies = FullDownloadCopies(image.info);
-            swizzle(image, download_info.queued_seq, copies, download_span);
+            swizzle(image, download_info.queued_seq, download_info.queued_seq != 0 ? copy_seq : 0,
+                    copies, download_span);
             download_map.offset += image.unswizzled_size_bytes;
             download_span = download_span.subspan(image.unswizzled_size_bytes);
         }
@@ -1784,6 +1807,14 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     if (False(image.flags & ImageFlagBits::CpuModified)) {
         // Only upload modified images
         return;
+    }
+    if (!image.cpu_writes_since_download.empty()) [[unlikely]] {
+        // EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: the CPU's bytes go into the image now; a copy recorded
+        // after this holds them (and what the GPU draws over them later).
+        const u64 uploaded_seq = NextCpuWriteSeq();
+        for (auto& write : image.cpu_writes_since_download) {
+            write.in_image = (std::min)(write.in_image, uploaded_seq);
+        }
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureUpload};
 
