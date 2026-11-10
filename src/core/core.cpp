@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <atomic>
 #include <memory>
@@ -499,30 +500,53 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
-        if (gpu_core)
-            gpu_core->NotifyShutdown();
+        // EDEN_NX2_SHUTDOWN_TRACE=1 (off by default): a log line before and after each step below,
+        // with its time, to find where a shutdown hangs (the steps and their order unchanged).
+        static const bool trace = [] {
+            const char* value = std::getenv("EDEN_NX2_SHUTDOWN_TRACE");
+            return value != nullptr && value[0] == '1';
+        }();
+        const auto shutdown_start = std::chrono::steady_clock::now();
+        const auto step = [&](const char* what, auto&& run) {
+            if (!trace) {
+                run();
+                return;
+            }
+            LOG_INFO(Core, "nx2 shutdown: {} ...", what);
+            const auto start = std::chrono::steady_clock::now();
+            run();
+            const auto end = std::chrono::steady_clock::now();
+            LOG_INFO(Core, "nx2 shutdown: {} done in {} ms ({} ms in)", what,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - shutdown_start)
+                         .count());
+        };
+        step("gpu NotifyShutdown", [&] {
+            if (gpu_core)
+                gpu_core->NotifyShutdown();
+        });
 
         stop_event.request_stop();
-        core_timing.SyncPause(false);
+        step("core_timing SyncPause", [&] { core_timing.SyncPause(false); });
         Network::CancelPendingSocketOperations();
-        kernel.SuspendEmulation(true);
-        kernel.CloseServices();
-        kernel.ShutdownCores();
-        services.reset();
-        service_manager.reset();
-        fs_controller.Reset();
+        step("kernel SuspendEmulation", [&] { kernel.SuspendEmulation(true); });
+        step("kernel CloseServices", [&] { kernel.CloseServices(); });
+        step("kernel ShutdownCores", [&] { kernel.ShutdownCores(); });
+        step("services reset", [&] { services.reset(); });
+        step("service_manager reset", [&] { service_manager.reset(); });
+        step("fs_controller Reset", [&] { fs_controller.Reset(); });
         FileSys::SetLooseAOC({});
         SetNx2DkDynConflict({});
-        cheat_engine.reset();
+        step("cheat_engine reset", [&] { cheat_engine.reset(); });
         core_timing.ClearPendingEvents();
-        app_loader.reset();
-        audio_core.reset();
-        gpu_core.reset();
-        host1x_core.reset();
+        step("app_loader reset", [&] { app_loader.reset(); });
+        step("audio_core reset", [&] { audio_core.reset(); });
+        step("gpu_core reset", [&] { gpu_core.reset(); });
+        step("host1x_core reset", [&] { host1x_core.reset(); });
         perf_stats.reset();
-        cpu_manager.Shutdown();
+        step("cpu_manager Shutdown", [&] { cpu_manager.Shutdown(); });
         debugger.reset();
-        kernel.Shutdown();
+        step("kernel Shutdown", [&] { kernel.Shutdown(); });
         stop_event = {};
         Network::RestartSocketOperations();
 

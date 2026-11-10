@@ -964,11 +964,23 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     // SDL calls this even when SDL_AppInit never powered the system on (no ROM given, --help or
     // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would
     // dereference it.
+    // EDEN_NX2_SHUTDOWN_TRACE=1 (core.cpp): the frontend's steps around the core's shutdown too
+    const char* const trace_value = std::getenv("EDEN_NX2_SHUTDOWN_TRACE");
+    const bool trace = trace_value != nullptr && trace_value[0] == '1';
     if (state->system.IsPoweredOn()) {
+        if (trace) {
+            LOG_INFO(Frontend, "nx2 shutdown: Pause ...");
+        }
         void(state->system.Pause());
         state->system.ShutdownMainProcess();
     }
+    if (trace) {
+        LOG_INFO(Frontend, "nx2 shutdown: frontend state (window, system) delete ...");
+    }
     delete state;
+    if (trace) {
+        LOG_INFO(Frontend, "nx2 shutdown: frontend state deleted; leaving SDL_AppQuit");
+    }
 }
 
 #define VMA_IMPLEMENTATION
