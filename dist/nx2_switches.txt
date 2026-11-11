@@ -277,7 +277,7 @@
 #EDEN_NX2_DK_DYN_MIN_FPS_LOW=1
 # DK_DYN_MOD_GUARD: with DK_DYN, what an exefs mod (IPS / pchtxt) changing Bananza's main, or
 # an enabled cheat, does. Unset / auto: DK_DYN is off for that boot only for a mod in the frame
-# rate code it patches (Anka 1.1.1's rule), a mod whose folder or file name reads like a frame
+# rate code it patches (1.1.1's rule), a mod whose folder or file name reads like a frame
 # rate mod (fps / vsync / framerate / framepacing anywhere in a word: "FPSunlock", "novsync";
 # the words hz, frame rate, frame pacing; 60 next to fps / hz / frames or alone: "60 FPS",
 # "60.pchtxt"; not "2160p", "Season 60", "v1.60" or "Framebuffer"; a build id file name is not
@@ -288,7 +288,7 @@
 # rate mod with a neutral name in a build id file is not caught, nor a mod replacing exefs/main
 # whole (LayeredFS) in any mode; turn those off in Add-Ons yourself.
 # all (or 1): any such mod. name: the names only (mods and cheats) and the free space DK_DYN
-# writes to, not the rest of the code. 0: the frame rate code only (Anka 1.1.1); enabled cheats
+# writes to, not the rest of the code. 0: the frame rate code only (as 1.1.1); enabled cheats
 # only counted in a log warning. Other values: auto, with a warning (only for Bananza with DK_DYN on).
 # When it turns DK_DYN off: the log, the Anka tab, and with OSD=1 a line for 30 s from the first
 # game frame. The launchers clear it (auto).
@@ -297,7 +297,7 @@
 # --- menu program (anka.exe) only ---
 # QT_INPUT_MS=<1-16>: the GUI thread pumps SDL and the input engines every N ms (default 1, as
 # Anka 1.0.1). QT_GAME_INPUT_MS=<1-8>: the interval from a game's boot to its stop, the pause
-# and the settings dialog included; outside a game QT_INPUT_MS (unset: the same, as Anka 1.1.1).
+# and the settings dialog included; outside a game QT_INPUT_MS (unset: the same, as in 1.1.1).
 # It adds (N-1)/2 ms of input latency on average (a controller read waits for the next pump);
 # no frame rate gain was measured (09.11: 35.90 fps with 1 ms, 35.07 with 4, within the noise).
 # It does nothing for a game on the second core (core2): that process pumps its own input.

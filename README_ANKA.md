@@ -394,7 +394,7 @@ folder name and a build id file name, outside the frame rate code, is not caught
 yourself. Nor is a mod that replaces `exefs/main` whole (LayeredFS) rather than patching it with
 IPS / pchtxt: no mode sees it. `DK_DYN_MOD_GUARD=all` (or `1`): any exefs IPS / pchtxt mod
 changing the game's code turns it off; `name`: the names only (and the free space it writes to);
-`0`: Anka 1.1.1's rule (the frame rate code only). The names and the bytes a mod changes are
+`0`: 1.1.1's rule (the frame rate code only). The names and the bytes a mod changes are
 compared; what the change does is never read. The launchers (`anka-cli --profile`) clear
 `DK_DYN_MOD_GUARD` (auto); to set it, start anka-cli without `--profile` with your own
 variables (above), or put it in the menu program's `nx2_switches.txt`.
