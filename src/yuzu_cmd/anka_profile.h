@@ -271,7 +271,7 @@ struct Var {
 
 /// The launchers' opt-in switches that none of them uses, cleared by recommended and reactive
 /// (safe clears them too). EDEN_NX2_RX_RT_FIT is reactive's own and not here.
-inline constexpr std::array<std::string_view, 31> UnusedOptIns{
+inline constexpr std::array<std::string_view, 32> UnusedOptIns{
     "EDEN_NX2_PRESENT_INTERVAL", "EDEN_NX2_MODE_GOV",         "EDEN_NX2_DK_DYN_MIN_FPS",
     "EDEN_NX2_BACK_CPU",         "EDEN_NX2_SEMEXEC_DEFER",    "EDEN_NX2_SKIP_EMPTY_DRAWS",
     "EDEN_NX2_ASYNC_SKIP",       "EDEN_NX2_VBLANK_GRID",      "EDEN_NX2_VRR_VSYNC",
@@ -282,7 +282,7 @@ inline constexpr std::array<std::string_view, 31> UnusedOptIns{
     "EDEN_NX2_FLUSH_FIRST_READ", "EDEN_NX2_READ_LATCH_AGE",   "EDEN_NX2_RX_ONE_SUBMIT",
     "EDEN_NX2_RX_COALESCE",      "EDEN_NX2_RX_PITCH_FORCED",  "EDEN_NX2_RX_MASKED_TARGETS",
     "EDEN_NX2_REACTIVE_STATS",   "EDEN_NX2_RX_NO_COPYBACK",   "EDEN_NX2_RX_NO_RT_LATCH",
-    "EDEN_NX2_RX_COALESCE_LOOSE",
+    "EDEN_NX2_RX_COALESCE_LOOSE", "EDEN_NX2_DK_DYN_MOD_GUARD",
 };
 
 /// The switches recommended and reactive turn on (safe clears them).

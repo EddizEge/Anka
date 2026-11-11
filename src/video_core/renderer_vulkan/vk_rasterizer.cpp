@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <vector>
 #include <bit>
 #include <memory>
 #include <cstdio>
@@ -59,6 +61,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_b_pad.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stage_api.h"
 #include "video_core/renderer_vulkan/nx2_record_list.h"
@@ -214,6 +217,65 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
             (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsPatchListPrimitiveRestartSupported()));
 }
+
+// Counts every skipped draw (the per-shader warnings stop after the first few) and logs one line
+// for each 10 s that had any, by reason and render target 0 size:
+// "Draw skips [10s]: 412 (total 3051) | no pipeline 1920x1080=300, no pipeline 480x270=112".
+class DrawSkipStats {
+public:
+    static DrawSkipStats& Get() {
+        static DrawSkipStats stats;
+        return stats;
+    }
+
+    void Note(std::string_view reason, u32 width, u32 height) {
+        std::scoped_lock lock{mutex};
+        if (window.empty()) {
+            window_start = std::chrono::steady_clock::now();
+        }
+        ++window[fmt::format("{} {}x{}", reason, width, height)];
+        ++total;
+        pending.store(true, std::memory_order_relaxed);
+        ReportLocked();
+    }
+
+    // Called once a frame: reports a window that ended while no draw was being skipped.
+    void Tick() {
+        if (pending.load(std::memory_order_relaxed)) {
+            std::scoped_lock lock{mutex};
+            ReportLocked();
+        }
+    }
+
+private:
+    void ReportLocked() {
+        const auto now = std::chrono::steady_clock::now();
+        if (window.empty() || now - window_start < std::chrono::seconds{10}) {
+            return;
+        }
+        std::vector<std::pair<std::string, u64>> sorted(window.begin(), window.end());
+        std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+        u64 window_total = 0;
+        std::string detail;
+        for (const auto& [key, count] : sorted) {
+            window_total += count;
+            if (detail.size() < 600) {
+                detail += fmt::format("{}{}={}", detail.empty() ? "" : ", ", key, count);
+            }
+        }
+        LOG_WARNING(HW_GPU, "Draw skips [{:.0f}s]: {} (total {}) | {}",
+                    std::chrono::duration<double>(now - window_start).count(), window_total, total,
+                    detail);
+        window.clear();
+        pending.store(false, std::memory_order_relaxed);
+    }
+
+    std::mutex mutex;
+    std::unordered_map<std::string, u64> window;
+    std::chrono::steady_clock::time_point window_start{};
+    u64 total = 0;
+    std::atomic<bool> pending{false};
+};
 
 // EDEN_NX2_LIGHT_DRAW=0: every draw goes through the full setup (PrepareDraw).
 bool LightDrawEnabled() {
@@ -420,6 +482,8 @@ RasterizerVulkan::~RasterizerVulkan() {
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_func) {
+    // EDEN_NX2_B_PAD_NS: the virtual slowdown of the thread setting draws up (off by default).
+    VideoCommon::Nx2BPad::Pad();
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -491,6 +555,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool indirect, Func&& draw_f
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
+        DrawSkipStats::Get().Note(reason, regs.rt[0].width, regs.rt[0].height);
         if (seen.size() < 64 && seen.emplace(vs, ps, reason).second) {
             LOG_WARNING(HW_GPU, "Draw skipped ({}): vs={:#x} ps={:#x} rt0={:#x} {}x{}", reason, vs, ps,
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
@@ -2300,6 +2365,10 @@ bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     {
         std::scoped_lock lock{buffer_cache.mutex};
         if (buffer_cache.OnCPUWrite(addr, size)) {
+            if (VideoCommon::Nx2TexFlushHeld()) [[unlikely]] {
+                // Held until its flush: an async texture flush before then must keep its bytes.
+                texture_cache.NoteHeldCpuWrite(addr, size);
+            }
             return true;
         }
     }
@@ -2589,6 +2658,7 @@ void RasterizerVulkan::FlushCommands() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    DrawSkipStats::Get().Tick();
     if (split_draws) [[unlikely]] {
         if (SplitOnB()) {
             // Never split (F4 / F5): Composite's TickFrame runs on C inside a ParkB (GPU::TickWork)
@@ -4930,6 +5000,7 @@ void RasterizerVulkan::PrepareDrawB(bool is_indexed, bool indirect, bool shape_o
         return pipeline_cache.CurrentGraphicsPipeline();
     }()};
     if (!pipeline) {
+        DrawSkipStats::Get().Note("no pipeline (memory stage)", 0, 0);
         thread_local u32 logged{};
         if (logged < 16) {
             ++logged;
@@ -5577,6 +5648,7 @@ void RasterizerVulkan::PrepareDrawC(const StageDrawReader& in, const StageDrawPa
         break;
     }
     if (!configured) {
+        DrawSkipStats::Get().Note("configure failed (recording stage)", 0, 0);
         thread_local u32 logged{};
         if (logged < 16) {
             ++logged;

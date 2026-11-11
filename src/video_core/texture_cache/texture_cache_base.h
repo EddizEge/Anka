@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <map>
@@ -54,6 +55,27 @@ struct ChannelState;
 } // namespace Tegra
 
 namespace VideoCommon {
+
+/// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the
+/// image that were not in it when its copy was recorded (ImageBase::cpu_writes_since_download).
+/// Off: as before.
+inline bool Nx2TexFlushKeepCpu() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_TEX_FLUSH_KEEP_CPU");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_TEX_FLUSH_HELD=1 (with EDEN_NX2_TEX_FLUSH_KEEP_CPU=1): CPU writes the buffer cache holds
+/// (OnCPUWrite returning true) are recorded too, so an async flush keeps their bytes. Off: as before.
+inline bool Nx2TexFlushHeld() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_TEX_FLUSH_HELD");
+        return Nx2TexFlushKeepCpu() && value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
@@ -251,6 +273,10 @@ public:
 
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
+
+    /// EDEN_NX2_TEX_FLUSH_HELD=1: a CPU write the buffer cache held, recorded without the texture
+    /// cache's lock; PopAsyncFlushes applies it to the images' CPU write records first.
+    void NoteHeldCpuWrite(DAddr cpu_addr, size_t size);
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
@@ -608,6 +634,23 @@ private:
     // TODO: This data structure is not optimal and it should be reworked
 
     std::vector<PendingDownload> uncommitted_downloads;
+    /// EDEN_NX2_TEX_FLUSH_KEEP_CPU=1: CPU write sequence (ImageBase::cpu_writes_since_download).
+    std::atomic<u64> cpu_write_seq{0};
+    u64 NextCpuWriteSeq() {
+        return cpu_write_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    /// Records a CPU write (sequence seq) on an image with a pending swizzled download.
+    void RecordCpuWrite(ImageBase& image, u64 seq, DAddr cpu_addr, size_t size);
+    /// Applies the held CPU writes (NoteHeldCpuWrite) to the images' records.
+    void DrainHeldCpuWrites();
+    struct HeldCpuWrite {
+        u64 seq;
+        DAddr addr;
+        size_t size;
+    };
+    std::mutex held_cpu_writes_mutex;
+    std::vector<HeldCpuWrite> held_cpu_writes;
+    std::atomic<bool> held_cpu_writes_pending{false};
     std::deque<std::vector<PendingDownload>> committed_downloads;
     std::vector<AsyncBuffer> uncommitted_async_buffers;
     std::deque<std::vector<AsyncBuffer>> async_buffers;

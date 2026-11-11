@@ -19,6 +19,7 @@
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/nx2_ab.h"
 
 namespace Kernel {
 
@@ -29,13 +30,17 @@ class KThread;
 // the word each turn), every scheduler update, under the scheduler lock.
 // Unset or 1: one count-trailing-zeros on the 64-bit word. 0: the bit-by-bit scan, as before.
 // 2: both; a difference logs "EDEN_NX2_FAST_PRIORITY_SCAN: ..." (first 16) and the bit-by-bit
-// result is used.
+// result is used. ab: the A/B test's phase A scans bit by bit, B counts (common/nx2_ab.h); both
+// give the same bit, so a scan may take either at any call.
 inline int FastPriorityScanMode() {
-    static const int mode = [] {
+    static const Common::Nx2Ab::Switch mode = [] {
         const char* const value = std::getenv("EDEN_NX2_FAST_PRIORITY_SCAN");
-        return value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1;
+        const auto s = Common::Nx2Ab::Switch::Parse(
+            value, value == nullptr ? 1 : value[0] == '0' ? 0 : value[0] == '2' ? 2 : 1);
+        Common::Nx2Ab::LogBinding("EDEN_NX2_FAST_PRIORITY_SCAN", s);
+        return s;
     }();
-    return mode;
+    return static_cast<int>(mode.Now());
 }
 
 inline void ReportPriorityScanDifference(size_t from, size_t found, size_t scanned) {

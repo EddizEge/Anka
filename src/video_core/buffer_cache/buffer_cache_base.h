@@ -27,11 +27,13 @@
 #include "common/div_ceil.h"
 #include "common/literals.h"
 #include "common/lru_cache.h"
+#include "common/nx2_ab.h"
 #include "common/range_sets.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/slot_vector.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/held_cpu_writes.h"
 #include "video_core/buffer_cache/nx2_draw_memo.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
@@ -89,6 +91,27 @@ inline int Nx2SsboFast() {
     static std::atomic<s8> mode{-1};
     return ReadNx2Mode(mode, "EDEN_NX2_SSBO_FAST");
 }
+/// EDEN_NX2_DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range, as
+/// 15126fbdc1 did (their pop writes nothing there). By default the pop still writes those bytes
+/// and only keeps the range marked GPU-modified.
+inline bool Nx2DownloadGpuCancel() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_DL_GPU_CANCEL");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+/// EDEN_NX2_SSBO_CAP_DIAG=1: count the storage buffer bindings cut to 8 MiB (no size in the next
+/// qword, a larger memory layout) and log them every 10 s with the largest layout asked for.
+/// Diagnosis only (GitHub #13; Lichii #351 bound such pools in full). Off unless set to 1.
+inline bool Nx2SsboCapDiag() {
+    // Off unless set to 1 (ReadNx2Mode reads an unset switch as on).
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_SSBO_CAP_DIAG");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 /// EDEN_NX2_GPU_WRITTEN_FILTER: the GPU-written ranges and the download range sets answer queries
 /// far from their ranges from a summary instead of their trees (SummarizedRangeSet: hull, and for
 /// gpu_modified_ranges a 4 KiB page bitmap). =0 as before; =2 also asks the trees and counts any
@@ -116,10 +139,12 @@ inline int Nx2StorageKeep() {
 /// EDEN_NX2_UBO_BIND_SKIP (elBart0 0015): BindGraphicsUniformBuffer keeps a binding resolved to
 /// the same device address and size whose buffer FindBuffer would return again, instead of
 /// clearing it for UpdateUniformBuffers to find; an unmapped address binds NULL_BINDING. =0 as
-/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds).
+/// before; =2 only counts them ("Uniform buffer binds" line, every 2^22 binds). =ab: =0 in the A/B
+/// test's phase A, on in B (common/nx2_ab.h): each bind decides alone, and the binding it keeps
+/// is checked against page_table and the buffer's bounds whichever phase left it there.
 inline int Nx2UboBindSkip() {
     static std::atomic<s8> mode{-1};
-    return ReadNx2Mode(mode, "EDEN_NX2_UBO_BIND_SKIP");
+    return Common::Nx2Ab::ReadMode(mode, "EDEN_NX2_UBO_BIND_SKIP");
 }
 /// EDEN_NX2_INLINE_FIX (Duck912 4a6b890171): the inline index buffer, when it grows or the
 /// collector takes it, is deleted as any other buffer (DeleteBuffer: unregistered from page_table
@@ -680,6 +705,9 @@ private:
     /// Downloads the GPU-written data of several buffers with one wait for the GPU.
     void DownloadBuffersMemory(std::span<const BufferId> buffer_ids);
 
+    /// A synchronous download's bytes to guest memory, but for held CPU writes (K1b).
+    void WriteDownloadAroundCpuWrites(DAddr device_addr, const u8* data, u64 size);
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
@@ -914,9 +942,22 @@ private:
     }
 
     // Async Buffers
-    Common::OverlapRangeSet<DAddr> async_downloads;
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
+    /// For each entry of pending_downloads: the ranges it still writes to guest memory when its
+    /// fence pops. A CPU write after a download was taken removes its range from every pending
+    /// download (WriteMemory / ClearDownload; a held write its pages, HeldCpuWrites, which queues
+    /// the GPU's other bytes there again): those bytes are older than guest memory. So do the DMA
+    /// engine's copies and clears into it (DMACopy / DMAClear: ClearDownload). Another GPU write
+    /// does not (pending_download_superseded), unless EDEN_NX2_DL_GPU_CANCEL=1.
+    std::deque<Common::RangeSet<DAddr>> pending_download_ranges;
+    /// For each entry of pending_downloads: the parts of its ranges the GPU wrote again after it
+    /// was taken (only what the download covers). Its
+    /// pop still writes their bytes (newer than guest memory, which a guest waiting on the fence
+    /// reads) but leaves them in gpu_modified_ranges: the next download brings the newer bytes.
+    std::deque<Common::RangeSet<DAddr>> pending_download_superseded;
+    /// Held CPU writes not uploaded yet: no download writes their pages back (see the type).
+    HeldCpuWrites<Core::DEVICE_PAGESIZE> held_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;

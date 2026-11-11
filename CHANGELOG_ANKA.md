@@ -30,6 +30,18 @@ and `=0` brings back the 2.0.0 code path.
   the reactive launcher now stops with a message. In that case 1.1.1 started the game with
   `sdl2-config.ini` as it was (reactive flushing as set there) and `EDEN_NX2_RX_RT_FIT=3`.
 - In `anka.exe` (the menu program) `nx2_switches.txt` now also sets the eight switches below.
+- Donkey Kong Bananza's dynamic frame rate (DK_DYN) and mods: a "60 FPS" mod or cheat together
+  with DK_DYN made the game run too fast (twice as fast above 30 fps in a user's report). Now,
+  besides a mod in the frame rate code (1.1.1), a mod or an enabled cheat named like a frame rate
+  mod turns DK_DYN off for that boot; resolution and graphics mods keep it. The log, the Anka tab
+  and the OSD say which mod. A frame rate mod with a neutral name is not caught: turn it off in
+  Add-Ons. `EDEN_NX2_DK_DYN_MOD_GUARD` chooses the rule (README, "Dynamic frame rate").
+- DK_DYN also stays off, with a line in the log, when a mod already uses the free space past the
+  game's code that DK_DYN would write to.
+- `EDEN_NX2_DK_DYN_MIN_FPS` below 40 is refused with a warning in the log (the game's own free
+  rates stop at 40, and 30 measured slower); `EDEN_NX2_DK_DYN_MIN_FPS_LOW=1` lets it in for tests.
+- `EDEN_NX2_QT_INPUT_MS` is read strictly: a whole number from 1 to 16; a value like "4ms" is
+  ignored with a warning in the log (before, it was taken as 4).
 
 ### Fixed
 
@@ -40,6 +52,44 @@ and `=0` brings back the 2.0.0 code path.
   unless they were set outside the program. `start-safe.bat` (anka-cli) was not affected. The
   menu program now reads them again after setting its Anka settings, before the first game
   starts.
+- Controller rumble in Switch 2 games: the games' vibration command (HID 214) was accepted and
+  dropped, so the controller stayed still; it now reaches the controller (bc06c148f6, by Mvii7,
+  from the Selevet fork by néo Luigi). Values a controller cannot take (NaN, negative, out of
+  range) are clamped.
+- AMD GPUs: green / blue patches near glowing objects. A shader register read before it is
+  written now reads zero, as on NVIDIA (e974318be3, by arisqz; `EDEN_NX2_UNDEF_ZERO=0` turns it off).
+- CPUs with AVX-512 (Zen 4 / Zen 5, some Intel): one vector instruction of the CPU JIT (count
+  leading zeros on 16-bit lanes) gave wrong results in half of its lanes (222f65e372, by Antonio
+  Arenas, from Lichii). `EDEN_NX2_JIT_AVX512=0` turns the JIT's AVX-512 paths off, if a game
+  misbehaves on such a CPU.
+- Shader cache: a record cut short (a crash or a full disk while it was written) made Anka delete
+  the whole cache file, so every shader was built again during play. The complete records before
+  the damaged one are now kept (0b5fe35375, by Zortos, from #815; 5cbc35a67c).
+- Memory layout below 12 GB in the settings (6, 8 or 10 GB): Switch 2 games use 12 GB, but the
+  emulated GPU's view of memory stayed at the configured size while the game was given memory
+  past its end (7f03d480ff, by sylvieistaken).
+- A GPU channel could wait on itself forever (the game freezes): a flag set on the fence thread
+  overwrote one the GPU thread had just cleared (1ab1fb8a5a, by janvitos).
+- A bad syncpoint number in the game's GPU commands no longer reads or writes past the syncpoint
+  table (a crash seen in another fork; 89ae049661 by sylvieistaken, e7985e3670).
+- Stale data on the GPU: textures, storage buffers and shaders could keep old data after a GPU
+  write that did not start on a 32-byte boundary (362ac77492, by Zortos, from nemyu), and texture
+  uploads and copies did not wait for every shader stage that reads them (839cd6037b, by
+  MythosOfs; 270f309a1d).
+- Internal fixes with no known visible effect of their own: CPU writes and GPU downloads of the
+  same memory (a CPU write kept over a pending download, each download's own ranges; d091f2e357 by
+  rdenno, df5189d1c6, 3cee9c9591, 1bd4ff6a7b and related commits), device memory bookkeeping (f63c2457bd, 7d4557fd6e, 5bee2c479b by Zortos),
+  shader translation (IADD32 overflow 464059f4ee, AMD demotes 50f19e91c6, a clip distance data
+  race bb505ec06e), the buffer usage tracker (908b503e07 by failaip12), the query counter bound
+  (35bb18d69a), the software 2D blit's Switch 2 tiling order (e69b3bd502, from Orchid), cheats
+  read twice on Windows, and the unit tests (8e48af4591 by Antonio Arenas).
+
+### Diagnostics
+
+- Off unless set (`nx2_switches_ANKA.txt`): `EDEN_NX2_AB_TOGGLE` (A/B phases within one run, for
+  measuring), `SHUTDOWN_TRACE`, `SSBO_CAP_DIAG`, `SHADOW_DATA_REGS`, `FORCE_GS_LOWER`, `B_PAD_NS`,
+  `QT_GAME_INPUT_MS` (the menu program's input interval during a game; no frame rate gain measured),
+  and a log line every 10 s that counts skipped draws.
 
 ## Anka 1.1.1 (`anka-v1.1.1`)
 
@@ -349,7 +399,8 @@ in Donkey Kong Bananza on one PC. About 400 commits, made between 31 October and
   main module loads, its frame rate controller is patched in memory to run anywhere from 40 to
   60 fps with the clock stepped by the real frame time. vi2 then reports VRR support and paces
   presents to every vblank (`PACE_ONE`). The check words are read inside the text segment only.
-- `DK_DYN_MIN_FPS=<1-60>` moves the controller's 40 fps limit.
+- `DK_DYN_MIN_FPS=<1-60>` moves the controller's 40 fps limit (since 1.1.2 `<40-60>`, below 40
+  only with `DK_DYN_MIN_FPS_LOW=1`).
 
 ### Frame generation
 

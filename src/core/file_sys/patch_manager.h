@@ -58,7 +58,9 @@ struct Patch {
 struct NsoModChange {
     std::string mod;  ///< the mod's folder name
     std::string kind; ///< "IPS" or "IPSwitch"
+    std::string file; ///< the patch file's name (EDEN_NX2_DK_DYN_MOD_GUARD=name reads it)
     /// [begin, end) offsets into the module's code (after the NSO header), merged and sorted.
+    /// Empty: the patch applied but wrote only bytes already there (an earlier mod wrote them).
     std::vector<std::pair<size_t, size_t>> ranges;
 };
 
@@ -67,6 +69,20 @@ struct NsoModChange {
 [[nodiscard]] std::vector<std::pair<size_t, size_t>> ChangedRanges(std::span<const u8> before,
                                                                    std::span<const u8> after,
                                                                    size_t skip);
+
+/// The exefs patch files (.ips named by the build id, .pchtxt with it in its @nsobid) for
+/// `build_id` (hex, trailing zeros cut) in the mod folders `patch_dirs`, skipping the folders in
+/// `disabled`, in the folders' order (PatchManager::CollectPatches).
+[[nodiscard]] std::vector<VirtualFile> CollectNsoPatches(const std::vector<VirtualDir>& patch_dirs,
+                                                         const std::string& build_id,
+                                                         const std::vector<std::string>& disabled);
+
+/// `nso` (its header included) with `patches` applied in order; with `mod_changes`, what each
+/// one changed past the header, its mod being the patch file's folder's parent
+/// (<mod>/exefs/<file>). PatchManager::PatchNSO's loop.
+[[nodiscard]] std::vector<u8> ApplyNsoPatches(const std::vector<u8>& nso,
+                                              const std::vector<VirtualFile>& patches,
+                                              std::vector<NsoModChange>* mod_changes);
 
 // A centralized class to manage patches to games.
 class PatchManager {
@@ -98,8 +114,10 @@ public:
     [[nodiscard]] bool HasNSOPatch(const BuildID& build_id, std::string_view name) const;
 
     // Creates a CheatList object with all
+    // `sources` (optional): one per entry, where it came from: the mod folder holding
+    // cheats/<build id>.txt, or the cheat_*.txt file (EDEN_NX2_DK_DYN names it).
     [[nodiscard]] std::vector<Core::Memory::CheatEntry> CreateCheatList(
-        const BuildID& build_id) const;
+        const BuildID& build_id, std::vector<std::string>* sources = nullptr) const;
 
     // Currently tracked RomFS patches:
     // - Game Updates

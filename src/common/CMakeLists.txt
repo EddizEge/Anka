@@ -81,6 +81,7 @@ add_library(
     memory_detect.h
     multi_level_page_table.cpp
     multi_level_page_table.h
+    nx2_ab.h
     nx2_early_switches.h
     nx2_rtss_osd.h
     overflow.h

@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
+#include "common/logging.h"
 #include "common/scratch_buffer.h"
 #include "video_core/engines/sw_blitter/blitter.h"
 #include "video_core/engines/sw_blitter/converter.h"
@@ -198,13 +202,44 @@ bool SoftwareBlitEngine::Blit(Fermi2D::Surface& src, Fermi2D::Surface& dst,
         output_converter->ConvertFrom(impl->intermediate_dst, impl->dst_buffer);
     };
 
+    // Switch 2 titles use a different GOB order; EDEN_NX2_BLIT_NATIVE_TILING=0 restores the old one.
+    const auto UseNativeTiling = [this] {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_BLIT_NATIVE_TILING");
+            return value == nullptr || value[0] != '0';
+        }();
+        return enabled && memory_manager.UsesNativeTiling();
+    };
+
     // Do actual Blit
+
+    // Whether Switch 2 titles reach this software path at all (the GPU path handles most blits):
+    // the first 4 blits and then the 8th, 16th, 32nd... are logged with their surfaces.
+    static std::atomic<u64> blits{};
+    const u64 blit = blits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (blit <= 4 || std::has_single_bit(blit)) {
+        const auto describe = [](const Fermi2D::Surface& surface) {
+            return fmt::format("{}x{}x{} format {:#x} {} block height {} depth {}", surface.width,
+                               surface.height, surface.depth, static_cast<u32>(surface.format),
+                               surface.linear == Fermi2D::MemoryLayout::BlockLinear ? "block linear"
+                                                                                    : "pitch",
+                               static_cast<u32>(surface.block_height),
+                               static_cast<u32>(surface.block_depth));
+        };
+        LOG_INFO(HW_GPU,
+                 "Software 2D blit {}: native tiling {} (EDEN_NX2_BLIT_NATIVE_TILING) | src {} "
+                 "rect {}x{} | dst {} rect {}x{} | filter {}",
+                 blit, UseNativeTiling() ? "on" : "off", describe(src), src_extent_x,
+                 src_extent_y, describe(dst), dst_extent_x, dst_extent_y,
+                 config.filter == Fermi2D::Filter::Bilinear ? "bilinear" : "point");
+    }
 
     impl->dst_buffer.resize_destructive(dst_copy_size);
     if (src.linear == Fermi2D::MemoryLayout::BlockLinear) {
         UnswizzleSubrect(impl->src_buffer, tmp_buffer, src_bytes_per_pixel, src.width, src.height,
                          src.depth, config.src_x0, config.src_y0, src_extent_x, src_extent_y,
-                         src.block_height, src.block_depth, src_extent_x * src_bytes_per_pixel);
+                         src.block_height, src.block_depth, src_extent_x * src_bytes_per_pixel,
+                         UseNativeTiling());
     } else {
         ProcessPitchLinear<false>(tmp_buffer, impl->src_buffer, src_extent_x, src_extent_y,
                                   src.pitch, config.src_x0, config.src_y0, src_bytes_per_pixel);
@@ -228,7 +263,8 @@ bool SoftwareBlitEngine::Blit(Fermi2D::Surface& src, Fermi2D::Surface& dst,
     if (dst.linear == Fermi2D::MemoryLayout::BlockLinear) {
         SwizzleSubrect(tmp_buffer2, impl->dst_buffer, dst_bytes_per_pixel, dst.width, dst.height,
                        dst.depth, config.dst_x0, config.dst_y0, dst_extent_x, dst_extent_y,
-                       dst.block_height, dst.block_depth, dst_extent_x * dst_bytes_per_pixel);
+                       dst.block_height, dst.block_depth, dst_extent_x * dst_bytes_per_pixel,
+                       UseNativeTiling());
     } else {
         ProcessPitchLinear<true>(impl->dst_buffer, tmp_buffer2, dst_extent_x, dst_extent_y,
                                  dst.pitch, config.dst_x0, config.dst_y0,

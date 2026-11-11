@@ -47,6 +47,37 @@ public:
                                                 std::memory_order_relaxed));
     }
 
+    /// Calls callback(address, size) for the collected, not yet uploaded writes (64-byte runs, as
+    /// Gather hands them out) that touch [begin, end), without consuming them: those still
+    /// collecting and those a Gather is handing out (front_buffer stays until it has handed out
+    /// all of them). A synchronous download skips their bytes (K1b, HeldCpuWrites): guest memory
+    /// holds the CPU's newer bytes there, which their upload reads. The callback must not lock.
+    template <typename Func>
+    void ForEachPending(PAddr begin, PAddr end, Func&& callback) {
+        std::scoped_lock lk(guard);
+        const auto visit = [&](const TransformAddress& transform) {
+            if (!IsValid(transform.address)) {
+                return;
+            }
+            const PAddr page = static_cast<PAddr>(transform.address) << page_bits;
+            if (page >= end || page + page_size <= begin) {
+                return;
+            }
+            ForEachRun(transform, [&](PAddr address, size_t size) {
+                if (address < end && address + size > begin) {
+                    callback(address, size);
+                }
+            });
+        };
+        for (const auto& transform : back_buffer) {
+            visit(transform);
+        }
+        for (const auto& transform : front_buffer) {
+            visit(transform);
+        }
+        visit(current.load(std::memory_order_acquire));
+    }
+
     void Gather(std::function<void(PAddr, size_t)>& callback) {
         {
             std::scoped_lock lk(guard);
@@ -56,21 +87,11 @@ public:
                 front_buffer.emplace_back(t);
             }
         }
+        // Read without the lock: ForEachPending only reads it too; it changes under the lock.
         for (auto& transform : front_buffer) {
-            size_t offset = 0;
-            u64 mask = transform.mask;
-            while (mask != 0) {
-                const size_t empty_bits = std::countr_zero(mask);
-                offset += empty_bits << align_bits;
-                mask = mask >> empty_bits;
-
-                const size_t continuous_bits = std::countr_one(mask);
-                callback((static_cast<PAddr>(transform.address) << page_bits) + offset,
-                         continuous_bits << align_bits);
-                mask = continuous_bits < align_size ? (mask >> continuous_bits) : 0;
-                offset += continuous_bits << align_bits;
-            }
+            ForEachRun(transform, callback);
         }
+        std::scoped_lock lk(guard);
         front_buffer.clear();
     }
 
@@ -79,6 +100,24 @@ private:
         u32 address;
         u32 mask;
     };
+
+    /// The transform's mask as runs of 64-byte blocks.
+    template <typename Func>
+    static void ForEachRun(const TransformAddress& transform, Func&& callback) {
+        size_t offset = 0;
+        u64 mask = transform.mask;
+        while (mask != 0) {
+            const size_t empty_bits = std::countr_zero(mask);
+            offset += empty_bits << align_bits;
+            mask = mask >> empty_bits;
+
+            const size_t continuous_bits = std::countr_one(mask);
+            callback((static_cast<PAddr>(transform.address) << page_bits) + offset,
+                     continuous_bits << align_bits);
+            mask = continuous_bits < align_size ? (mask >> continuous_bits) : 0;
+            offset += continuous_bits << align_bits;
+        }
+    }
 
     constexpr static size_t page_bits = DEVICE_PAGEBITS - 1;
     constexpr static size_t page_size = 1ULL << page_bits;
@@ -89,7 +128,7 @@ private:
     constexpr static size_t align_mask = align_size - 1;
     constexpr static TransformAddress default_transform = {.address = ~0U, .mask = 0U};
 
-    bool IsValid(PAddr address) {
+    static bool IsValid(PAddr address) {
         return address < (1ULL << 39);
     }
 

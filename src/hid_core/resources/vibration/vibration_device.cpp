@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <cmath>
+
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_result.h"
 #include "hid_core/resources/npad/npad_types.h"
@@ -8,6 +11,25 @@
 #include "hid_core/resources/vibration/vibration_device.h"
 
 namespace Service::HID {
+namespace {
+// A guest value (HID 214's layout is only known from captures) can be anything: NaN never equals
+// itself, so the controller's duplicate filter never matched it, and the controller driver got
+// it as is. Amplitudes are kept in [0, 1]; a frequency that is not a finite positive number
+// becomes the default one.
+Core::HID::VibrationValue SanitizeVibration(Core::HID::VibrationValue value) {
+    const auto amplitude = [](f32 a) { return std::isfinite(a) ? std::clamp(a, 0.0f, 1.0f) : 0.0f; };
+    const auto frequency = [](f32 f, f32 fallback) {
+        return std::isfinite(f) && f > 0.0f ? f : fallback;
+    };
+    value.low_amplitude = amplitude(value.low_amplitude);
+    value.high_amplitude = amplitude(value.high_amplitude);
+    value.low_frequency =
+        frequency(value.low_frequency, Core::HID::DEFAULT_VIBRATION_VALUE.low_frequency);
+    value.high_frequency =
+        frequency(value.high_frequency, Core::HID::DEFAULT_VIBRATION_VALUE.high_frequency);
+    return value;
+}
+} // Anonymous namespace
 
 NpadVibrationDevice::NpadVibrationDevice() {}
 
@@ -99,7 +121,7 @@ Result NpadVibrationDevice::SendVibrationValue(const Core::HID::VibrationValue& 
         return ResultSuccess;
     }
 
-    Core::HID::VibrationValue vibration_value = value;
+    Core::HID::VibrationValue vibration_value = SanitizeVibration(value);
     vibration_value.high_amplitude *= volume;
     vibration_value.low_amplitude *= volume;
 

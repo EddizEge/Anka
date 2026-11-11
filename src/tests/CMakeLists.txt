@@ -10,7 +10,9 @@ add_executable(tests
     common/container_hash.cpp
     common/fibers.cpp
     common/host_memory.cpp
+    common/nx2_ab.cpp
     common/nx2_rtss_osd.cpp
+    common/multi_level_page_table.cpp
     common/page_table.cpp
     common/param_package.cpp
     common/range_map.cpp
@@ -33,7 +35,10 @@ add_executable(tests
     core/nx2_vi2_reply.cpp
     core/nx2_vi2_events.cpp
     video_core/memory_tracker.cpp
+    video_core/held_cpu_writes.cpp
     video_core/native_qmd.cpp
+    video_core/invalidation_accumulator.cpp
+    video_core/pipeline_cache_load.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_hsetp2.cpp
     video_core/ampere_hmma.cpp
@@ -58,6 +63,7 @@ add_executable(tests
     video_core/nx2_upscale_pick.cpp
     video_core/native_macro_fifo.cpp
     video_core/nx2_write_history.cpp
+    video_core/usage_tracker.cpp
     input_common/calibration_configuration_job.cpp
     yuzu_cmd/nx2_auto_script.cpp
     ../yuzu_cmd/nx2_auto_script.cpp

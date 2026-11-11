@@ -27,6 +27,35 @@
 #EDEN_NX2_INLINE_DEFER=0
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
+# JIT_AVX512=0: the CPU JIT leaves out its AVX-512 paths (AVX2 code instead); try it on a
+# CPU with AVX-512 (Zen 4/5, some Intel) that crashes or misbehaves in game code.
+#EDEN_NX2_JIT_AVX512=0
+# UNDEF_ZERO=0: shader registers read before any write are OpUndef again instead of zero
+# (zero is what NVIDIA gives; AMD showed garbage, e.g. green patches near glowing objects).
+#EDEN_NX2_UNDEF_ZERO=0
+# SHADOW_DATA_REGS=1: native programs whose RED / ATOMG / global store data register sits in the
+# lowering's high registers are rejected (logged with their own reason) instead of reading the
+# uniform mirror there. Diagnosis for white halos (NaN + bloom); off by default.
+#EDEN_NX2_SHADOW_DATA_REGS=1
+# SSBO_CAP_DIAG=1: every 10 s, how many storage buffer bindings were cut to 8 MiB and the largest
+# memory layout asked for (diagnosis only; off unless set to 1).
+#EDEN_NX2_SSBO_CAP_DIAG=1
+# DL_GPU_CANCEL=1: a GPU write cancels the pending fence downloads of its range (their pop writes
+# nothing there), as rdenno's 15126fbdc1 did. By default those bytes are still written.
+#EDEN_NX2_DL_GPU_CANCEL=1
+# TEX_FLUSH_KEEP_CPU=1: an async texture flush keeps the bytes the CPU wrote over the image that
+# were not in it when its copy was recorded (records up to 64 writes, else as before). Experimental,
+# off by default.
+#EDEN_NX2_TEX_FLUSH_KEEP_CPU=1
+# TEX_FLUSH_HELD=1 (needs TEX_FLUSH_KEEP_CPU=1): CPU writes the buffer cache holds until their flush
+# are recorded too, so an async texture flush keeps their bytes as well. Off by default. Known bugs:
+# a held write's record never learns when its bytes reached the image (it is kept as "never"), so
+# a later GPU draw over those bytes is overwritten by the CPU's older ones when a download pops;
+# only the first write to a page is recorded (later ones to it skip OnCPUWrite). Experimental.
+#EDEN_NX2_TEX_FLUSH_HELD=1
+# FORCE_GS_LOWER=1: geometry passthrough programs are lowered as on GPUs without
+# VK_NV_geometry_shader_passthrough (AMD); to reproduce AMD-only shader paths on NVIDIA.
+#EDEN_NX2_FORCE_GS_LOWER=1
 
 # --- GPU thread shortcuts (on by default; =0 as before; added by Anka) ---
 # =2 keeps them on and logs what they would get wrong: VERTEX_CLEAN, LIGHT_SYNC_SKIP,
@@ -39,6 +68,7 @@
 #EDEN_NX2_FAST_PRIORITY_SCAN=0
 #EDEN_NX2_DESC_XLAT=0
 #EDEN_NX2_DIRTY_THUNK_SKIP=0
+# (FAST_PRIORITY_SCAN=ab, DIRTY_THUNK_SKIP=ab, DESC_XLAT=ab: =0 in the A/B test's phase A, on in B.)
 
 # --- limits / tuning ---
 #EDEN_NX2_VRAM_LIMIT_MIB=8192
@@ -95,12 +125,14 @@
 # BATCH_DIRECT=0: a batch entry's writes reach the engine one virtual call each (default:
 # CallMethodBatch).
 #EDEN_NX2_BATCH_DIRECT=0
+# (BATCH_DIRECT=ab: =0 in the A/B test's phase A, on in B.)
 # CB_RUNS=0: the back runs the constant buffer words a macro writes one at a time (default:
 # in runs).
 #EDEN_NX2_CB_RUNS=0
 # TICK_SKIP=0: the GPU tick looks at its queue under the lock every time (default: skipped
 # when empty).
 #EDEN_NX2_TICK_SKIP=0
+# (TICK_SKIP=ab: =0 in the A/B test's phase A, on in B; see AB_TOGGLE below.)
 
 # --- split GPU thread: front (video_core/engines/maxwell_3d.cpp, puller.cpp, macro JIT) ---
 # ACQUIRE_PEEK: a semaphore acquire whose value memory already holds goes on without
@@ -145,6 +177,7 @@
 #EDEN_NX2_UBO_DIRECT=0
 #EDEN_NX2_UBO_STAGE=0
 #EDEN_NX2_UBO_BIND_SKIP=0
+# (UBO_BIND_SKIP=ab: =0 in the A/B test's phase A, on in B.)
 #EDEN_NX2_SSBO_FAST=0
 #EDEN_NX2_SSBO_MEMO=0
 #EDEN_NX2_SYNC_SETS=0
@@ -175,6 +208,10 @@
 #EDEN_NX2_RESET_LAST=0
 #EDEN_NX2_RESET_RUNS=0
 #EDEN_NX2_RESET_SORT=0
+# BLIT_NATIVE_TILING=0: the software 2D blit (small mip copies) untiles and tiles in the Tegra X1
+# GOB order, as before (default: the Switch 2 order, from the Orchid fork). The old order wrote
+# small mips as a weave of misplaced 4x4 blocks, which shows as stripes on far, minified terrain.
+#EDEN_NX2_BLIT_NATIVE_TILING=0
 # ASYNC_SKIP=1: skip draws whose pipeline is still compiling (things pop in; off).
 #EDEN_NX2_ASYNC_SKIP=1
 
@@ -233,9 +270,39 @@
 # 60 or 30, with the game clock stepped by the real frame time. Off by default; off, no
 # module is touched. Nothing is written to disk.
 #EDEN_NX2_DK_DYN=1
-# DK_DYN_MIN_FPS=<1-60>: with DK_DYN, move the game's 40 fps floor (unset: 40; 30 measured
-# worse on our machine).
+# DK_DYN_MIN_FPS=<40-60>: with DK_DYN, move the game's 40 fps floor (unset: 40). Below 40 is
+# refused (40 kept): the game's free rates stop at 40, so it only held the game longer in slow
+# frames (30 measured 4-5% slower). DK_DYN_MIN_FPS_LOW=1 lets 1-39 in anyway, for tests.
 #EDEN_NX2_DK_DYN_MIN_FPS=40
+#EDEN_NX2_DK_DYN_MIN_FPS_LOW=1
+# DK_DYN_MOD_GUARD: with DK_DYN, what an exefs mod (IPS / pchtxt) changing Bananza's main, or
+# an enabled cheat, does. Unset / auto: DK_DYN is off for that boot only for a mod in the frame
+# rate code it patches (Anka 1.1.1's rule), a mod whose folder or file name reads like a frame
+# rate mod (fps / vsync / framerate / framepacing anywhere in a word: "FPSunlock", "novsync";
+# the words hz, frame rate, frame pacing; 60 next to fps / hz / frames or alone: "60 FPS",
+# "60.pchtxt"; not "2160p", "Season 60", "v1.60" or "Framebuffer"; a build id file name is not
+# read), or an enabled cheat named like one or from a mod folder / cheat file named like one
+# (a cheat_*.txt file's cheat_ prefix not read: cheat_60.txt counts; then the whole source is
+# named once, not its entries). Other mods (resolution, FXAA, camera) keep DK_DYN and are
+# named in the log. A "60 FPS" mod plus DK_DYN ran the game twice as fast above 30 fps: a frame
+# rate mod with a neutral name in a build id file is not caught, nor a mod replacing exefs/main
+# whole (LayeredFS) in any mode; turn those off in Add-Ons yourself.
+# all (or 1): any such mod. name: the names only (mods and cheats) and the free space DK_DYN
+# writes to, not the rest of the code. 0: the frame rate code only (Anka 1.1.1); enabled cheats
+# only counted in a log warning. Other values: auto, with a warning (only for Bananza with DK_DYN on).
+# When it turns DK_DYN off: the log, the Anka tab, and with OSD=1 a line for 30 s from the first
+# game frame. The launchers clear it (auto).
+#EDEN_NX2_DK_DYN_MOD_GUARD=all
+
+# --- menu program (anka.exe) only ---
+# QT_INPUT_MS=<1-16>: the GUI thread pumps SDL and the input engines every N ms (default 1, as
+# Anka 1.0.1). QT_GAME_INPUT_MS=<1-8>: the interval from a game's boot to its stop, the pause
+# and the settings dialog included; outside a game QT_INPUT_MS (unset: the same, as Anka 1.1.1).
+# It adds (N-1)/2 ms of input latency on average (a controller read waits for the next pump);
+# no frame rate gain was measured (09.11: 35.90 fps with 1 ms, 35.07 with 4, within the noise).
+# It does nothing for a game on the second core (core2): that process pumps its own input.
+# A value that is not a whole number in range is ignored with a warning in the log.
+#EDEN_NX2_QT_GAME_INPUT_MS=4
 
 # --- reactive flushing (video_core/nx2_reactive_flush.h, common/nx2_reactive.h) ---
 # All off by default. Most matter only with use_reactive_flushing=true in the config;
@@ -317,6 +384,14 @@
 #EDEN_NX2_MODE_DIAG_MAX=48
 #EDEN_NX2_VI2_DIAG=1
 #EDEN_NX2_VDEC_TRACE=1
+# SHUTDOWN_TRACE=1: a timed line before and after each step of the emulation shutdown (to find
+# where it hangs; the menu exe stops waiting after 10 s). The steps and their order unchanged.
+#EDEN_NX2_SHUTDOWN_TRACE=1
+# AB_TOGGLE=<N>: A/B within one run (docs/nx2-ab-toggle.md): every N presents a phase flips
+# between A and B and a switch set to "ab" ("ab:<value>") is off in A, on in B; each phase's
+# presents give one "NX2_AB blok=" line. AB_DISCARD=<K> (default 60): presents after a flip in
+# no block. AB_START=B: the first phase is B. Unset: no counting, "ab" switches stay off.
+#EDEN_NX2_AB_TOGGLE=600
 #EDEN_NX2_HID_DIAG=1
 #EDEN_NX2_INDIRECT_DIAG=1
 #EDEN_NX2_FRONT_DIAG=0

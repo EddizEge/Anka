@@ -312,4 +312,55 @@ inline std::string Format(const Rates& rates) {
     return text;
 }
 
+// EDEN_NX2_DK_DYN kept off by a mod or a cheat (core.h, Nx2DkDynConflictInfo): a second OSD line,
+// shown for 30 s from the first game frame after RTSS took our text (a cold shader cache may hold
+// the first frame back longer than that).
+constexpr double ConflictShownSeconds = 30.0;
+
+/// Whether the line is shown: `since_first_frame` is the time since that first frame, nullopt
+/// before it (the 30 s have not started).
+constexpr bool ConflictLineShown(std::optional<double> since_first_frame) {
+    return !since_first_frame || *since_first_frame < ConflictShownSeconds;
+}
+
+/// A name for RTSS (ANSI): each UTF-8 sequence, control byte and '<' / '>' (colour tags) becomes
+/// one '?', so a cut never splits a character; longer than `max`: cut to `max - 3` and "...".
+inline std::string OsdName(std::string_view name, size_t max = 40) {
+    std::string out;
+    for (size_t i = 0; i < name.size();) {
+        const auto c = static_cast<unsigned char>(name[i]);
+        if (c < 0x80) {
+            out.push_back(c < 0x20 || c == 0x7F || c == '<' || c == '>' ? '?'
+                                                                        : static_cast<char>(c));
+            ++i;
+            continue;
+        }
+        // A lead byte and its continuation bytes (or a stray continuation byte): one '?'
+        out.push_back('?');
+        ++i;
+        while (i < name.size() && (static_cast<unsigned char>(name[i]) & 0xC0) == 0x80) {
+            ++i;
+        }
+    }
+    if (out.size() > max && max >= 3) {
+        out.resize(max - 3);
+        out += "...";
+    }
+    return out;
+}
+
+/// The line: for a mod, `Dynamic FPS off: turn off "<mod>" in Add-Ons`; for a cheat (`cheat` its
+/// entry, `mod` its source), `Dynamic FPS off: cheat [<cheat>] in "<source>" (Add-Ons)`; with
+/// neither (the free space it writes to was in use), `Dynamic FPS off: code space in use (log)`.
+inline std::string ConflictLine(std::string_view mod, std::string_view cheat) {
+    if (mod.empty() && cheat.empty()) {
+        return "Dynamic FPS off: code space in use (see the log)";
+    }
+    if (cheat.empty()) {
+        return fmt::format("Dynamic FPS off: turn off \"{}\" in Add-Ons", OsdName(mod));
+    }
+    return fmt::format("Dynamic FPS off: cheat [{}] in \"{}\" (Add-Ons)", OsdName(cheat, 32),
+                       OsdName(mod, 32));
+}
+
 } // namespace Common::Nx2RtssOsd

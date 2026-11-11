@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <atomic>
 #include <memory>
@@ -81,15 +82,15 @@ std::atomic<bool> g_nx2_dk_dyn_applied{};
 
 namespace {
 std::mutex g_nx2_dk_dyn_conflict_mutex;
-std::string g_nx2_dk_dyn_conflict;
+Nx2DkDynConflictInfo g_nx2_dk_dyn_conflict;
 } // Anonymous namespace
 
-void SetNx2DkDynConflict(std::string mod) {
+void SetNx2DkDynConflict(Nx2DkDynConflictInfo conflict) {
     std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
-    g_nx2_dk_dyn_conflict = std::move(mod);
+    g_nx2_dk_dyn_conflict = std::move(conflict);
 }
 
-std::string Nx2DkDynConflict() {
+Nx2DkDynConflictInfo Nx2DkDynConflict() {
     std::scoped_lock lock{g_nx2_dk_dyn_conflict_mutex};
     return g_nx2_dk_dyn_conflict;
 }
@@ -183,7 +184,7 @@ struct System::Impl {
         device_memory.emplace();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
-        extended_memory_layout = Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_4Gb;
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
 
         core_timing.SetMulticore(is_multicore);
         core_timing.Initialize([&system]() { system.RegisterHostThread(); });
@@ -210,8 +211,9 @@ struct System::Impl {
         const bool must_reinitialize =
             !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
-            extended_memory_layout != (Settings::values.memory_layout_mode.GetValue() !=
-                                       Settings::MemoryLayout::Memory_4Gb);
+            // Any change of size: the device memory was made for the old one. Switch 2 titles force
+            // 12 GiB, and with 6-10 GiB configured the kernel handed out memory past its end.
+            memory_layout != Settings::values.memory_layout_mode.GetValue();
 
         if (!must_reinitialize) {
             return;
@@ -220,8 +222,7 @@ struct System::Impl {
         LOG_DEBUG(Kernel, "Re-initializing");
 
         is_multicore = Settings::values.use_multi_core.GetValue();
-        extended_memory_layout =
-            Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_4Gb;
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
 
         Initialize(system);
     }
@@ -499,30 +500,53 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
-        if (gpu_core)
-            gpu_core->NotifyShutdown();
+        // EDEN_NX2_SHUTDOWN_TRACE=1 (off by default): a log line before and after each step below,
+        // with its time, to find where a shutdown hangs (the steps and their order unchanged).
+        static const bool trace = [] {
+            const char* value = std::getenv("EDEN_NX2_SHUTDOWN_TRACE");
+            return value != nullptr && value[0] == '1';
+        }();
+        const auto shutdown_start = std::chrono::steady_clock::now();
+        const auto step = [&](const char* what, auto&& run) {
+            if (!trace) {
+                run();
+                return;
+            }
+            LOG_INFO(Core, "nx2 shutdown: {} ...", what);
+            const auto start = std::chrono::steady_clock::now();
+            run();
+            const auto end = std::chrono::steady_clock::now();
+            LOG_INFO(Core, "nx2 shutdown: {} done in {} ms ({} ms in)", what,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(end - shutdown_start)
+                         .count());
+        };
+        step("gpu NotifyShutdown", [&] {
+            if (gpu_core)
+                gpu_core->NotifyShutdown();
+        });
 
         stop_event.request_stop();
-        core_timing.SyncPause(false);
+        step("core_timing SyncPause", [&] { core_timing.SyncPause(false); });
         Network::CancelPendingSocketOperations();
-        kernel.SuspendEmulation(true);
-        kernel.CloseServices();
-        kernel.ShutdownCores();
-        services.reset();
-        service_manager.reset();
-        fs_controller.Reset();
+        step("kernel SuspendEmulation", [&] { kernel.SuspendEmulation(true); });
+        step("kernel CloseServices", [&] { kernel.CloseServices(); });
+        step("kernel ShutdownCores", [&] { kernel.ShutdownCores(); });
+        step("services reset", [&] { services.reset(); });
+        step("service_manager reset", [&] { service_manager.reset(); });
+        step("fs_controller Reset", [&] { fs_controller.Reset(); });
         FileSys::SetLooseAOC({});
         SetNx2DkDynConflict({});
-        cheat_engine.reset();
+        step("cheat_engine reset", [&] { cheat_engine.reset(); });
         core_timing.ClearPendingEvents();
-        app_loader.reset();
-        audio_core.reset();
-        gpu_core.reset();
-        host1x_core.reset();
+        step("app_loader reset", [&] { app_loader.reset(); });
+        step("audio_core reset", [&] { audio_core.reset(); });
+        step("gpu_core reset", [&] { gpu_core.reset(); });
+        step("host1x_core reset", [&] { host1x_core.reset(); });
         perf_stats.reset();
-        cpu_manager.Shutdown();
+        step("cpu_manager Shutdown", [&] { cpu_manager.Shutdown(); });
         debugger.reset();
-        kernel.Shutdown();
+        step("kernel Shutdown", [&] { kernel.Shutdown(); });
         stop_event = {};
         Network::RestartSocketOperations();
 
@@ -615,7 +639,7 @@ struct System::Impl {
     std::atomic_bool is_shutting_down{};
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
-    bool extended_memory_layout : 1 = false;
+    Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
     bool nvdec_active : 1 = false;

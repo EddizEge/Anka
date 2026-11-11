@@ -18,11 +18,27 @@ namespace Host1x {
 
 class SyncpointManager {
 public:
+    static constexpr size_t NUM_MAX_SYNCPOINTS = 192;
+
+    /// Ids come from guest command lists and ioctls: one past the table reads 0, is ready, and
+    /// increments, waits and registrations on it do nothing (an action runs at once), logged.
+    static bool IsValid(u32 id) {
+        return id < NUM_MAX_SYNCPOINTS;
+    }
+
     u32 GetGuestSyncpointValue(u32 id) const {
+        if (!IsValid(id)) [[unlikely]] {
+            ReportInvalid("read", id);
+            return 0;
+        }
         return syncpoints_guest[id].load(std::memory_order_acquire);
     }
 
     u32 GetHostSyncpointValue(u32 id) const {
+        if (!IsValid(id)) [[unlikely]] {
+            ReportInvalid("read", id);
+            return 0;
+        }
         return syncpoints_host[id].load(std::memory_order_acquire);
     }
 
@@ -36,12 +52,22 @@ public:
 
     template <typename Func>
     ActionHandle RegisterGuestAction(u32 syncpoint_id, u32 expected_value, Func&& action) {
+        if (!IsValid(syncpoint_id)) [[unlikely]] {
+            ReportInvalid("action", syncpoint_id);
+            action();
+            return {};
+        }
         return RegisterAction(syncpoints_guest[syncpoint_id], guest_action_storage[syncpoint_id],
                               expected_value, std::move(action));
     }
 
     template <typename Func>
     ActionHandle RegisterHostAction(u32 syncpoint_id, u32 expected_value, Func&& action) {
+        if (!IsValid(syncpoint_id)) [[unlikely]] {
+            ReportInvalid("action", syncpoint_id);
+            action();
+            return {};
+        }
         return RegisterAction(syncpoints_host[syncpoint_id], host_action_storage[syncpoint_id],
                               expected_value, std::move(action));
     }
@@ -59,14 +85,24 @@ public:
     void WaitHost(u32 syncpoint_id, u32 expected_value);
 
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
+        if (!IsValid(syncpoint_id)) [[unlikely]] {
+            ReportInvalid("query", syncpoint_id);
+            return true;
+        }
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }
 
     bool IsReadyHost(u32 syncpoint_id, u32 expected_value) const {
+        if (!IsValid(syncpoint_id)) [[unlikely]] {
+            ReportInvalid("query", syncpoint_id);
+            return true;
+        }
         return syncpoints_host[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }
 
 private:
+    static void ReportInvalid(const char* what, u32 id);
+
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                    std::list<RegisteredAction>& action_storage);
 
@@ -77,8 +113,6 @@ private:
     void DeregisterAction(std::list<RegisteredAction>& action_storage, const ActionHandle& handle);
 
     void Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, u32 expected_value);
-
-    static constexpr size_t NUM_MAX_SYNCPOINTS = 192;
 
     std::array<std::atomic<u32>, NUM_MAX_SYNCPOINTS> syncpoints_guest{};
     std::array<std::atomic<u32>, NUM_MAX_SYNCPOINTS> syncpoints_host{};

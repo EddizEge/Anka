@@ -19,6 +19,7 @@
 #include <queue>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -157,6 +158,17 @@ public:
     }
 
     void SignalSyncPoint(u32 value) {
+        // The id comes from a command list (the 3D engine's sync method, the puller's fence
+        // action). Past the syncpoint table, the increment would walk memory after it as an
+        // action list; command words read wrong carry any id (Splatoon Raiders on Linux).
+        if (value >= Tegra::Host1x::SyncpointManager::NUM_MAX_SYNCPOINTS) {
+            // The first 16 are logged: a broken list repeats it per word.
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_ERROR(HW_GPU, "Signal of syncpoint {} past the table, ignored", value);
+            }
+            return;
+        }
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
         SignalFence(std::move(func));
@@ -264,7 +276,7 @@ private:
         }();
         struct Released {
             TFence fence;
-            std::deque<std::function<void()>> operations;
+            OperationList operations;
             u8 flushes;
         };
         std::vector<Released> batch;
@@ -483,8 +495,13 @@ private:
     }
 
     std::queue<TFence> fences;
-    std::deque<std::function<void()>> uncommitted_operations;
-    std::deque<std::deque<std::function<void()>>> pending_operations;
+    // Vectors, not deques (Lichii 140f2b71aa): MSVC's deque of std::function holds one element per
+    // block, so every queued operation (one per query report; ~1000 a frame in one title's busy
+    // scenes) allocated a block. The moved-from list grows again from its first operation: no
+    // capacity is reserved under uncommitted_guard for fences that queue none.
+    using OperationList = std::vector<std::function<void()>>;
+    OperationList uncommitted_operations;
+    std::deque<OperationList> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
     /// EDEN_NX2_RX_ONE_SUBMIT: no FlushCommands after a real fence's own submission

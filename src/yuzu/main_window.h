@@ -570,6 +570,8 @@ private:
     bool auto_muted = false;
     QTimer mouse_hide_timer;
     QTimer update_input_timer;
+    int input_update_ms = 1;      ///< the pump's interval outside a game (EDEN_NX2_QT_INPUT_MS)
+    int game_input_update_ms = 0; ///< while a game runs, 0: the same (EDEN_NX2_QT_GAME_INPUT_MS)
 
     QString startup_icon_theme;
 

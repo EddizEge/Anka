@@ -17,6 +17,7 @@
 #include <cstdio>
 
 #include "common/logging.h"
+#include "common/nx2_ab.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -32,6 +33,11 @@
 namespace VideoCommon {
 
 namespace {
+
+/// EDEN_NX2_BATCH_DIRECT, set in Start. =ab: the A/B test's phase A goes write by write (=0), B
+/// through CallMethodBatch (common/nx2_ab.h); the same writes in the same order either way, and
+/// nothing carried from one Batch entry to the next, so each entry takes the phase on its own.
+Common::Nx2Ab::Switch g_batch_direct;
 
 void Pause() {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -126,11 +132,13 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     batch_writes = batch;
     // EDEN_NX2_BATCH_DIRECT=0: a Batch entry's writes go to the engine one virtual call each
     // (Execute); otherwise through its CallMethodBatch, the same loop with its own calls.
-    static const bool direct = [] {
+    static const Common::Nx2Ab::Switch direct = [] {
         const char* value = std::getenv("EDEN_NX2_BATCH_DIRECT");
-        return value == nullptr || value[0] != '0';
+        const auto s = Common::Nx2Ab::Switch::Parse(value, value == nullptr || value[0] != '0');
+        Common::Nx2Ab::LogBinding("EDEN_NX2_BATCH_DIRECT", s);
+        return s;
     }();
-    batch_direct = direct;
+    g_batch_direct = direct;
     pending_count = 0;
     ring = std::make_unique<u64[]>(RingWords);
     // EDEN_NX2_BACK_STAGES: the stages below the back start first (nothing runs behind the
@@ -394,7 +402,7 @@ size_t GpuSplit::Execute(const u64* entry, u64 published_left) {
         auto* const engine = back_engine;
         Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         engine->ConsumeSink(*system);
-        if (batch_direct) {
+        if (g_batch_direct.Now() != 0) {
             engine->CallMethodBatch(*system, writes, count);
             return 1 + size_t{count};
         }
@@ -680,7 +688,7 @@ size_t GpuSplit::ExecuteStagedA(const u64* entry, u64 published_left) {
         auto* const engine = back_engine;
         Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
         engine->ConsumeSink(*system);
-        if (batch_direct) {
+        if (g_batch_direct.Now() != 0) {
             engine->CallMethodBatch(*system, writes, count);
             return 1 + size_t{count};
         }

@@ -374,8 +374,9 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     return exefs;
 }
 
-std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualDir>& patch_dirs, const std::string& build_id) const {
-    const auto disabled = GetDisabledAddons();
+std::vector<VirtualFile> CollectNsoPatches(const std::vector<VirtualDir>& patch_dirs,
+                                           const std::string& build_id,
+                                           const std::vector<std::string>& disabled) {
     const auto nso_build_id = fmt::format("{:0<64}", build_id);
 
     std::vector<VirtualFile> out;
@@ -404,6 +405,11 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
     return out;
 }
 
+std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualDir>& patch_dirs,
+                                                      const std::string& build_id) const {
+    return CollectNsoPatches(patch_dirs, build_id, GetDisabledAddons());
+}
+
 std::vector<std::pair<size_t, size_t>> ChangedRanges(std::span<const u8> before,
                                                      std::span<const u8> after, size_t skip) {
     std::vector<std::pair<size_t, size_t>> ranges;
@@ -422,6 +428,48 @@ std::vector<std::pair<size_t, size_t>> ChangedRanges(std::span<const u8> before,
         ranges.emplace_back(begin - skip, i - skip);
     }
     return ranges;
+}
+
+std::vector<u8> ApplyNsoPatches(const std::vector<u8>& nso,
+                                const std::vector<VirtualFile>& patches,
+                                std::vector<NsoModChange>* mod_changes) {
+    auto out = nso;
+    for (const auto& patch_file : patches) {
+        const std::string mod =
+            patch_file->GetContainingDirectory()->GetParentDirectory()->GetName();
+        VirtualFile patched;
+        std::string_view kind;
+        if (patch_file->GetExtension() == "ips") {
+            LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"", mod);
+            patched = PatchIPS(std::make_shared<VectorVfsFile>(out), patch_file);
+            kind = "IPS";
+        } else if (patch_file->GetExtension() == "pchtxt") {
+            const IPSwitchCompiler compiler{patch_file};
+            if (!compiler.HasEnabledPatch()) {
+                // Every block @disabled: nothing to apply, and not reported (EDEN_NX2_DK_DYN
+                // reads the names of the patches that apply)
+                LOG_INFO(Loader, "    - IPSwitch patch of mod \"{}\": no @enabled block", mod);
+                continue;
+            }
+            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"", mod);
+            patched = compiler.Apply(std::make_shared<VectorVfsFile>(out));
+            kind = "IPSwitch";
+        }
+        if (patched == nullptr) {
+            continue;
+        }
+        auto bytes = patched->ReadAllBytes();
+        if (mod_changes != nullptr) {
+            // Also with no bytes changed (an earlier mod wrote the same): its names still count
+            auto ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader));
+            mod_changes->push_back({.mod = mod,
+                                    .kind = std::string{kind},
+                                    .file = patch_file->GetName(),
+                                    .ranges = std::move(ranges)});
+        }
+        out = std::move(bytes);
+    }
+    return out;
 }
 
 std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name,
@@ -466,35 +514,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
     const auto patches = CollectPatches(patch_dirs, build_id);
 
-    auto out = nso;
-    for (const auto& patch_file : patches) {
-        const std::string mod =
-            patch_file->GetContainingDirectory()->GetParentDirectory()->GetName();
-        VirtualFile patched;
-        std::string_view kind;
-        if (patch_file->GetExtension() == "ips") {
-            LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"", mod);
-            patched = PatchIPS(std::make_shared<VectorVfsFile>(out), patch_file);
-            kind = "IPS";
-        } else if (patch_file->GetExtension() == "pchtxt") {
-            LOG_INFO(Loader, "    - Applying IPSwitch patch from mod \"{}\"", mod);
-            const IPSwitchCompiler compiler{patch_file};
-            patched = compiler.Apply(std::make_shared<VectorVfsFile>(out));
-            kind = "IPSwitch";
-        }
-        if (patched == nullptr) {
-            continue;
-        }
-        auto bytes = patched->ReadAllBytes();
-        if (mod_changes != nullptr) {
-            auto ranges = ChangedRanges(out, bytes, sizeof(Loader::NSOHeader));
-            if (!ranges.empty()) {
-                mod_changes->push_back(
-                    {.mod = mod, .kind = std::string{kind}, .ranges = std::move(ranges)});
-            }
-        }
-        out = std::move(bytes);
-    }
+    auto out = ApplyNsoPatches(nso, patches, mod_changes);
 
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
@@ -523,7 +543,8 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     return !CollectPatches(patch_dirs, build_id).empty();
 }
 
-std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildID& build_id_) const {
+std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(
+    const BuildID& build_id_, std::vector<std::string>* sources) const {
     const auto load_dir = GetModificationLoadRoot();
     if (load_dir == nullptr) {
         LOG_ERROR(Loader, "Cannot load mods for invalid title_id={:016X}", title_id);
@@ -536,13 +557,25 @@ std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildI
 
     // <mod dir> / <folder> / cheats / <build id>.txt
     std::vector<Core::Memory::CheatEntry> out;
+    const auto add = [&out, sources](const std::vector<Core::Memory::CheatEntry>& entries,
+                                     const std::string& source) {
+        std::copy(entries.begin(), entries.end(), std::back_inserter(out));
+        if (sources != nullptr) {
+            sources->resize(out.size(), source);
+        }
+    };
     for (const auto& subdir : patch_dirs) {
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) == disabled.cend()) {
             if (auto cheats_dir = FindSubdirectoryCaseless(subdir, "cheats"); cheats_dir != nullptr) {
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
+                // The upper case file name, else the lower case one: on a case-insensitive file
+                // system (Windows) both names open the same file, and its cheats came twice.
+                auto res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true);
+                if (!res) {
+                    res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false);
+                }
+                if (res) {
+                    add(*res, subdir->GetName());
+                }
             }
         }
     }
@@ -555,7 +588,7 @@ std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildI
             if (f->Read(data.data(), data.size()) == data.size()) {
                 const Core::Memory::TextCheatParser parser;
                 auto const res = parser.Parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
-                std::copy(res.begin(), res.end(), std::back_inserter(out));
+                add(res, name);
             } else {
                 LOG_INFO(Common_Filesystem, "Failed to read cheats file for title_id={:016X}", title_id);
             }

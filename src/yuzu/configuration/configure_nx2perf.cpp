@@ -110,15 +110,56 @@ void ConfigureNx2Perf::RetranslateUI() {
 }
 
 void ConfigureNx2Perf::ShowDkDynConflict() {
-    const std::string mod = Core::Nx2DkDynConflict();
-    if (mod.empty()) {
+    using Reason = Core::Nx2DkDynConflictInfo::Reason;
+    const auto conflict = Core::Nx2DkDynConflict();
+    const QString mod = QString::fromStdString(conflict.mod);
+    QString why;
+    switch (conflict.reason) {
+    case Reason::None:
         return;
+    case Reason::Zone:
+        why = tr("Off in the running game: the mod \"%1\" changes the frame rate code it patches; "
+                 "both at once run the game too fast. Turn the mod off in Add-Ons (Properties) to "
+                 "use it.")
+                  .arg(mod);
+        break;
+    case Reason::Cave:
+        why = tr("Off in the running game: the mod \"%1\" puts its own code in the free space past "
+                 "the game's code that dynamic FPS writes to; using it would break the mod. Turn "
+                 "the mod off in Add-Ons (Properties) to use it.")
+                  .arg(mod);
+        break;
+    case Reason::CaveInUse:
+        why = tr("Off in the running game: the free space past the game's code that dynamic FPS "
+                 "writes to is not empty (a mod replacing the game's code, e.g. its exefs/main?). "
+                 "The log has the address. Turn such mods off in Add-Ons (Properties) to use it.");
+        break;
+    case Reason::Name:
+        why = tr("Off in the running game: the mod \"%1\" is named like a frame rate mod; both at "
+                 "once run the game too fast. Turn the mod off in Add-Ons (Properties) to use it.")
+                  .arg(mod);
+        break;
+    case Reason::AnyMod:
+        why = tr("Off in the running game: EDEN_NX2_DK_DYN_MOD_GUARD=all turns it off with any mod "
+                 "that changes the game's code, here \"%1\". Turn the mod off in Add-Ons "
+                 "(Properties), or unset MOD_GUARD (auto), to use it.")
+                  .arg(mod);
+        break;
+    case Reason::CheatSource:
+        why = tr("Off in the running game: the cheats from \"%1\" are on and its name reads like "
+                 "a frame rate cheat; both at once run the game too fast. Turn \"%1\" off in "
+                 "Add-Ons (Properties), or rename it, to use it.")
+                  .arg(mod);
+        break;
+    case Reason::Cheat:
+        why = tr("Off in the running game: the cheat [%1] in \"%2\" reads like a frame rate cheat; "
+                 "both at once run the game too fast. Turn \"%2\" off in Add-Ons (Properties; its "
+                 "other cheats go off too) or delete the [%1] entry from its cheats file to use "
+                 "it.")
+                  .arg(QString::fromStdString(conflict.cheat), mod);
+        break;
     }
-    ui->dk_dyn_text->setText(
-        ui->dk_dyn_text->text() + QStringLiteral("\n") +
-        tr("Off in the running game: the mod \"%1\" changes the same frame rate code, and both "
-           "at once run the game too fast. Turn the mod off in Add-Ons (Properties) to use it.")
-            .arg(QString::fromStdString(mod)));
+    ui->dk_dyn_text->setText(ui->dk_dyn_text->text() + QStringLiteral("\n") + why);
 }
 
 void ConfigureNx2Perf::SetConfiguration() {

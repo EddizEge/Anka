@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/nx2_ab.h"
 #include "common/nx2_reactive.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -23,6 +24,7 @@
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/perf_stats.h"
+#include "video_core/buffer_cache/held_cpu_writes.h"
 #include "video_core/cdma_pusher.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/control/scheduler.h"
@@ -67,9 +69,14 @@ struct GPU::Impl {
         , use_nvdec{use_nvdec_}
         , shader_notify()
         , is_async{is_async_}
-    {}
+    {
+        // Synchronous buffer downloads leave out the held CPU writes these collect (K1b).
+        VideoCommon::g_cpu_write_collectors = system.GetGPUDirtyMemoryManager();
+    }
 
-    ~Impl() = default;
+    ~Impl() {
+        VideoCommon::g_cpu_write_collectors = {};
+    }
 
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);
@@ -165,7 +172,7 @@ struct GPU::Impl {
         // far has run when the two counts are equal (one is counted as queued before its lock is
         // released, as run after it ran); then the lock would find nothing. A request queued
         // meanwhile runs at the next tick, as one queued just after the lock was taken does.
-        if (tick_skip && requested_sync_fence.load(std::memory_order_acquire) ==
+        if (tick_skip.Now() != 0 && requested_sync_fence.load(std::memory_order_acquire) ==
                              current_sync_fence.load(std::memory_order_acquire)) {
             return;
         }
@@ -462,9 +469,14 @@ struct GPU::Impl {
     /// last_sync_fence, for TickWork to read without the lock (EDEN_NX2_TICK_SKIP).
     std::atomic<u64> requested_sync_fence{};
     /// EDEN_NX2_TICK_SKIP (default on), read once per session: no guarded static per TickWork.
-    const bool tick_skip = [] {
+    /// =ab: off in the A/B test's phase A, on in B (common/nx2_ab.h). Both ways are right at any
+    /// tick (requested_sync_fence is stored under the lock with every request), so each TickWork
+    /// takes the phase on its own.
+    const Common::Nx2Ab::Switch tick_skip = [] {
         const char* value = std::getenv("EDEN_NX2_TICK_SKIP");
-        return value == nullptr || value[0] != '0';
+        const auto s = Common::Nx2Ab::Switch::Parse(value, value == nullptr || value[0] != '0');
+        Common::Nx2Ab::LogBinding("EDEN_NX2_TICK_SKIP", s);
+        return s;
     }();
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;

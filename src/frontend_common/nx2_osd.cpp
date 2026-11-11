@@ -3,6 +3,7 @@
 
 #include "frontend_common/nx2_osd.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +19,7 @@
 #include "common/logging.h"
 #include "common/nx2_rtss_osd.h"
 #include "common/thread.h"
+#include "core/core.h"
 #include "core/hle/service/nx2_osd_speed.h"
 #include "core/perf_stats.h"
 
@@ -162,6 +164,9 @@ private:
         bool connected = false;
         bool missing_logged = false;
         std::optional<Osd::Status> problem; // the last one logged
+        // The DK_DYN conflict line: game frames when the conflict was seen, its first frame after
+        std::optional<u64> conflict_frames;
+        std::optional<Clock::time_point> conflict_since;
         while (!stop.stop_requested()) {
             {
                 std::unique_lock lock{mutex};
@@ -179,12 +184,38 @@ private:
             if (count < 2 || now < next_try) {
                 continue;
             }
-            const std::string text = Osd::Format(Osd::Compute(samples[0], samples[count - 1]));
+            std::string text = Osd::Format(Osd::Compute(samples[0], samples[count - 1]));
             std::optional<Access> access;
             {
                 std::scoped_lock lock{g_slot_mutex};
                 if (g_slot_closed) {
                     break; // emptied by ReleaseSlotNow: the process is ending
+                }
+                // EDEN_NX2_DK_DYN kept off by a mod or cheat (nso.cpp): a second line for 30 s from
+                // the first game frame RTSS can show, so a player without the log sees why the
+                // frame rate stays at 30. Read after the check above: not past ReleaseSlotNow.
+                const auto conflict = Core::Nx2DkDynConflict();
+                if (conflict.reason != Core::Nx2DkDynConflictInfo::Reason::None) {
+                    const u64 frames = samples[count - 1].game_frames;
+                    if (!conflict_frames) {
+                        conflict_frames = frames;
+                    }
+                    if (!conflict_since && connected && frames > *conflict_frames) {
+                        conflict_since = now;
+                    }
+                    const auto since =
+                        conflict_since
+                            ? std::optional<double>{std::chrono::duration<double>(
+                                                        now - *conflict_since)
+                                                        .count()}
+                            : std::nullopt;
+                    if (Osd::ConflictLineShown(since)) {
+                        text += '\n';
+                        text += Osd::ConflictLine(conflict.mod, conflict.cheat);
+                    }
+                } else {
+                    conflict_frames.reset();
+                    conflict_since.reset();
                 }
                 access = WithSharedMemory(
                     [&text](std::span<u8> memory) { return Osd::Update(memory, text); });
@@ -205,8 +236,10 @@ private:
             switch (access->status) {
             case Osd::Status::Written:
                 if (!connected) {
+                    std::string shown = text;
+                    std::replace(shown.begin(), shown.end(), '\n', '|');
                     LOG_INFO(Frontend, "nx2 osd: writing to RTSS's OSD (shared memory v{}.{}): {}",
-                             access->version >> 16, access->version & 0xffff, text);
+                             access->version >> 16, access->version & 0xffff, shown);
                 }
                 connected = true;
                 problem.reset();

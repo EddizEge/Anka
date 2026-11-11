@@ -121,13 +121,26 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
                                     opcode == 0xb69 || opcode == 0xb6c || opcode == 0xb97 ||
                                     opcode == 0xb9b || opcode == 0x83b || opcode == 0x321 ||
                                     opcode == 0x322;
+        // EDEN_NX2_SHADOW_DATA_REGS=1: the data register (bits 32-39) of RED, ATOMG and the global
+        // stores is checked too. Unchecked, one at or above the uniform bank reads the UR mirror
+        // instead of the guest value (Lichii a150d69ab8 / b328477840 shadow these registers; here
+        // the program is rejected with its own reason, so a log shows whether a title hits it).
+        static const bool check_data_regs = [] {
+            const char* const value = std::getenv("EDEN_NX2_SHADOW_DATA_REGS");
+            return value != nullptr && value[0] == '1';
+        }();
+        const bool data_at_32 = check_data_regs && (opcode == 0x98e || opcode == 0x9a8 ||
+                                                    opcode == 0x986 || opcode == 0x386);
         // Scratch values and emulated uniform state occupy reserved high GPRs.
         // Reject native accesses that could alias that state.
         for (u32 bit : {16U, 24U, 32U, 64U}) {
             if (unaligned_list && insn.Bits(bit, 8) >= 237 && insn.Bits(bit, 8) < 240)
                 touches_hmma_scratch = true;
-            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66) continue;
+            const bool data_only = bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66;
+            if (data_only && !data_at_32) continue;
             const u32 reg = insn.Bits(bit, 8);
+            if (data_only && reg >= (uses_uniform_bank ? 216U : 246U) && reg < 255)
+                return fail(index, "native data register in the lowering's high registers");
             if (reg >= (uses_uniform_bank ? 216U : 246U) && reg < 255) return fail(index, "native program uses lowering scratch registers");
             if (reg >= 240 && reg < 246) touches_hmma_scratch = true;
         }

@@ -24,6 +24,8 @@ public:
 
     std::array<u8, 0x20> GetBuildID() const;
     VirtualFile Apply(const VirtualFile& in) const;
+    /// Whether an @enabled block writes anything (all blocks @disabled: Apply changes nothing).
+    bool HasEnabledPatch() const;
 
 private:
     struct IPSwitchPatch;

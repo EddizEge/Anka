@@ -72,6 +72,7 @@
 #include "core/hle/service/nx2_dk_dyn_pace.h"
 #include "core/hle/service/nx2_osd_speed.h"
 #include "core/hle/service/nx2_frame_stats.h"
+#include "common/nx2_ab.h"
 #include "core/hle/service/nx2_ipc_trace.h"
 #include "core/hle/service/nx2_present_crop.h"
 #include "core/hle/service/nx2_present_rate.h"
@@ -1283,6 +1284,11 @@ private:
             } else {
                 m_stats.output_frames = Core::g_output_frames.load(std::memory_order_relaxed);
             }
+            // EDEN_NX2_AB_TOGGLE: the A/B phase flips here, between two of the game's frames, and
+            // each phase's block gets its "NX2_AB blok=" line (common/nx2_ab.h).
+            if (Common::Nx2Ab::Enabled()) [[unlikely]] {
+                AbPresent(to_us(entered.time_since_epoch()));
+            }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
                 // EDEN_NX2_PACE_GUEST_SLEEP: of the pacing, the guest kernel sleeps (the core free)
@@ -1364,6 +1370,29 @@ private:
         u32 samples{};       // frame times in m_frame_samples
     } m_stats{};
     std::array<u32, 600> m_frame_samples{}; // this block's frame times, us
+
+    // EDEN_NX2_AB_TOGGLE (common/nx2_ab.h): the A/B blocks, counted per present.
+    Common::Nx2Ab::Blocks m_ab{Common::Nx2Ab::GetConfig()};
+    void AbPresent(long long now_us) {
+        if (!m_ab_started) {
+            m_ab_started = true;
+            const auto& config = Common::Nx2Ab::GetConfig();
+            LOG_INFO(Service,
+                     "NX2_AB on (EDEN_NX2_AB_TOGGLE): the phase flips every {} presents, the {} "
+                     "after a flip in no block; first phase {}",
+                     config.toggle, config.discard, Common::Nx2Ab::PhaseName(config.start));
+        }
+        const auto step = m_ab.Present(now_us);
+        if (step.flipped) {
+            // Labelled by the global flips (what the features read), then flipped.
+            const auto block = Common::Nx2Ab::Globally(
+                *step.block, Common::Nx2Ab::GetConfig().start,
+                Common::Nx2Ab::g_flips.load(std::memory_order_relaxed));
+            Common::Nx2Ab::Flip();
+            LOG_INFO(Service, "{}", Common::Nx2Ab::FormatLine(block));
+        }
+    }
+    bool m_ab_started{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
     u32 m_rate{};       // EDEN_NX2_PRESENT_RATE: the last present's rate, 0: 60 Hz
@@ -1647,6 +1676,10 @@ private:
         std::array<std::pair<u32, u32>, 4> interval_words{}; // value, presents
         u32 interval_word_kinds{};
         u32 interval_word_other{};
+        // (b) with EDEN_NX2_DK_DYN applied: the lowest free target ((1 << 16) | n) this second,
+        // and the presents asking for a free target below 40 (EDEN_NX2_DK_DYN_MIN_FPS's band).
+        u32 free_target_min{};
+        u32 free_below_40{};
         // (e) every value words 6-21 took so far (at most 32 each).
         std::array<std::vector<u32>, 22> seen{};
         u32 unwatched{}; // bit i: word i took more than 32 values
@@ -1793,6 +1826,12 @@ private:
             } else {
                 ++d.interval_word_other;
             }
+            if (m_dk_dyn_applied && ((value >> 16) & 0xf) == 1) {
+                const u32 target = value & 0xffff;
+                d.free_target_min =
+                    d.free_target_min == 0 ? target : (std::min)(d.free_target_min, target);
+                d.free_below_40 += target < 40 ? 1 : 0;
+            }
         }
         d.fence_us += to_us(waited - entered);
         d.pace_us += to_us(paced - composited);
@@ -1821,6 +1860,15 @@ private:
             if (d.interval_word_other != 0) {
                 interval_words += fmt::format(" other:{}", d.interval_word_other);
             }
+            if (m_dk_dyn_applied) {
+                // "-": no free target this second (only whole intervals)
+                interval_words += fmt::format(
+                    ", free target min {} (below 40: {})",
+                    d.free_target_min == 0 ? std::string{"-"} : std::to_string(d.free_target_min),
+                    d.free_below_40);
+            }
+            d.free_target_min = 0;
+            d.free_below_40 = 0;
             LOG_INFO(Service,
                      "nx2:vi2 diag {:.2f} s: {} presents, shown <17 ms {}, 17-25 {}, 25-34 {}, 34-50 {}, "
                      ">50 {} (min {:.1f}, max {:.1f} ms), fence wait {:.2f} ms, pacing {:.2f} ms avg, "

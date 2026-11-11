@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstdio>
 
+#include "common/nx2_ab.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/memory.h"
@@ -155,7 +156,7 @@ bool DmaPusher::Step() {
 
     if (signal_sync && !synced) {
         std::unique_lock lk(sync_mutex);
-        sync_cv.wait(lk, [this]() { return synced; });
+        sync_cv.wait(lk, [this]() { return synced.load(); });
         signal_sync = false;
         synced = false;
     }
@@ -235,12 +236,17 @@ bool DmaPusher::Step() {
                     // macros: CallMethod / CallMultiMethod below hand it FrontCallMethod):
                     // Maxwell3D's current_dirty is read by ProcessMacro on the back only, which
                     // never sees these words; with the back stages or without them.
-                    // EDEN_NX2_DIRTY_THUNK_SKIP=0 sends it all the same.
-                    static const bool skip_front_macros = [] {
+                    // EDEN_NX2_DIRTY_THUNK_SKIP=0 sends it all the same. =ab: sent in the A/B
+                    // test's phase A, skipped in B (common/nx2_ab.h); nobody reads the value
+                    // either way, so each entry may take the phase on its own.
+                    static const Common::Nx2Ab::Switch skip_front_macros = [] {
                         const char* value = std::getenv("EDEN_NX2_DIRTY_THUNK_SKIP");
-                        return value == nullptr || value[0] != '0';
+                        const auto s = Common::Nx2Ab::Switch::Parse(
+                            value, value == nullptr || value[0] != '0');
+                        Common::Nx2Ab::LogBinding("EDEN_NX2_DIRTY_THUNK_SKIP", s);
+                        return s;
                     }();
-                    if (skip_front_macros && macro_payload && split.FrontMacros() &&
+                    if (skip_front_macros.Now() != 0 && macro_payload && split.FrontMacros() &&
                         static_cast<Engines::Maxwell3D*>(engine_state)
                             ->GetNativeMacroEngine()
                             .native_turing) {

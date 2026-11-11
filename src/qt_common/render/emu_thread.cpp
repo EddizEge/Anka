@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <qdebug.h>
 #include "core/core.h"
 #include "core/cpu_manager.h"
@@ -76,6 +77,10 @@ void EmuThread::run() {
     // Shutdown the main emulated process
     QtCommon::system->DetachDebugger();
     QtCommon::system->ShutdownMainProcess();
+    // EDEN_NX2_SHUTDOWN_TRACE=1 (core.cpp): the emulation thread got past the core's shutdown
+    if (const char* trace = std::getenv("EDEN_NX2_SHUTDOWN_TRACE"); trace && trace[0] == '1') {
+        LOG_INFO(Frontend, "nx2 shutdown: EmuThread leaving run()");
+    }
 }
 
 void EmuThread::ReloadDiskShaderCache(u64 program_id) {

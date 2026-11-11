@@ -412,6 +412,21 @@ bool IsShaderReuseAllowed() {
     return value == nullptr || value[0] != '0';
 }
 
+// EDEN_NX2_FORCE_GS_LOWER=1: geometry passthrough programs are lowered to plain geometry shaders
+// even where VK_NV_geometry_shader_passthrough exists, as on AMD (GitHub #5: an AMD crash while
+// building pipelines right after "Geometry shader passthrough used with no support").
+bool GeometryPassthroughSupported(const Device& device) {
+    static const bool forced = [] {
+        const char* const value = std::getenv("EDEN_NX2_FORCE_GS_LOWER");
+        const bool force = value != nullptr && value[0] == '1';
+        if (force) {
+            LOG_INFO(Render_Vulkan, "EDEN_NX2_FORCE_GS_LOWER: geometry passthrough lowered");
+        }
+        return force;
+    }();
+    return !forced && device.IsNvGeometryShaderPassthroughSupported();
+}
+
 size_t GetTotalPipelineWorkers() {
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
@@ -595,7 +610,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_int64_atomics = device.IsExtShaderAtomicInt64Supported(),
         .support_shared_int64_atomics = device.IsSharedInt64AtomicsSupported(),
         .support_derivative_control = true,
-        .support_geometry_shader_passthrough = device.IsNvGeometryShaderPassthroughSupported(),
+        .support_geometry_shader_passthrough = GeometryPassthroughSupported(device),
         .support_native_ndc = device.IsExtDepthClipControlSupported(),
         .support_scaled_attributes = !device.MustEmulateScaledFormats(),
         .support_multi_viewport = device.SupportsMultiViewport(),
@@ -660,7 +675,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_snorm_render_buffer = true,
         .support_viewport_index_layer = device.IsExtShaderViewportIndexLayerSupported(),
         .support_viewport_mask = device.IsNvViewportArray2Supported(),
-        .support_geometry_shader_passthrough = device.IsNvGeometryShaderPassthroughSupported(),
+        .support_geometry_shader_passthrough = GeometryPassthroughSupported(device),
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
     };
@@ -839,6 +854,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        // A record holds one environment per stage its key names (SerializePipeline). Thrown
+        // here, inside LoadPipelines, a mismatch drops this record and the ones after it.
+        if (static_cast<size_t>(std::ranges::count_if(key.unique_hashes, [](u64 hash) {
+                return hash != 0;
+            })) != envs.size()) {
+            throw std::ios_base::failure("Pipeline cache key and environments disagree");
+        }
 
         if ((key.state.extended_dynamic_state != 0) !=
                 dynamic_features.has_extended_dynamic_state ||
@@ -871,7 +893,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
             const PipelineStats::ScopedRole stats_role{PipelineStats::Role::Boot};
             ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }
