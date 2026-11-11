@@ -8,6 +8,35 @@ and `=0` brings back the 2.0.0 code path.
 
 ## Anka 1.1.2 (`anka-v1.1.2`)
 
+### Zelda: Ocarina of Time (core 2)
+
+The second core moves to a newer [Lichii](https://github.com/zortos293/Lichii) `nx2` base (commit `879b616b1b`, 10 Nov 2026: Lichii build 150 without its last five changes). 1.1.0 and 1.1.1 used build 117 plus 30 changes. The window title and log now say "Anka 1.1.2 Core 2".
+
+**Faster in our test.** On an RTX 4060 Ti with a Ryzen 7 5700X at 2560x1440, along the same Kokiri Forest route (4 runs each, 5 minutes), core 2 averaged 36.0 FPS against 31.7 FPS in 1.1.1 (+14%). 1% lows went from 13.6 to 16.7 FPS, and the slowest 1% of frames from 61 to 48 ms. Your numbers will differ with your PC and where you are in the game.
+
+**The first start after updating takes longer:** your core 2 shader cache is converted to Lichii's new format and some shaders are built again. You do not need to delete anything.
+
+From the newer Lichii base (fixes as described in Lichii's notes; we only checked Kokiri Forest on screen):
+- White wash / blown-out lighting from GPU memory the game had freed.
+- An out-of-memory crash: the texture cache stays within Windows' memory limit.
+- The ocarina crackle.
+- Black fairy fountain and Water Temple walls on dumps with damaged texture members.
+- A texture cache crash and missing geometry after a deferred clear.
+- Cutscene movies stay in sync with their audio; AV1 video is decoded with libdav1d.
+- No crash when a buffer allocation goes over the memory budget.
+- Malformed game files no longer crash the loader; shutdown no longer hangs.
+- Unused all-zero memory pages are given back to Windows.
+- The GPU threads are pinned to their own CPU cores (new default). To turn it off: `pin_gpu_threads\default=false` and `pin_gpu_threads=false` under `[Renderer]` in `user\config\sdl2-config-core2.ini`.
+
+Anka changes in core 2:
+- Kakariko graveyard: two objects the game draws were skipped (from Fritchii). Not checked on screen.
+- Hyrule Field tall grass and reeds use the draw's own parameters (from Fritchii). On by default; `[Renderer] anka_nvn_draw_params=false` turns it off. Not checked on screen.
+- No multi-second freeze when the game swaps a compute shader mid-play.
+- Shader and GPU command fixes shared with Anka's Bananza core (integer overflow, out-of-range sync points, texture upload barriers).
+- Shader cache import now also reads Lichii and Fritchii installs in `%APPDATA%\lichii` and `%APPDATA%\fritchii`, and Lichii's new `lichii-cache.v2.bin`. Other emulators' files are only read, never changed. `EDEN_NX2_IMPORT_CACHE_AUTO=0` turns the automatic sources off.
+- The water flicker fix is now Lichii's own and always on; `EDEN_NX2_WATER_FIX=0` from the 1.1.0 notes no longer does anything.
+- Unchanged: core 2's own config / cache / log folders, one instance at a time, its own NVIDIA shader cache, the built-in patches and their menu switches, and RivaTuner's Vulkan layer turned off at start (`EDEN_NX2_RTSS_LAYER=1` keeps it).
+
 ### Changed
 
 - The launchers (`start-*.bat`) no longer call PowerShell, and `anka-config.ps1` is gone.
@@ -52,9 +81,9 @@ and `=0` brings back the 2.0.0 code path.
   unless they were set outside the program. `start-safe.bat` (anka-cli) was not affected. The
   menu program now reads them again after setting its Anka settings, before the first game
   starts.
-- Controller rumble in Switch 2 games: the games' vibration command (HID 214) was accepted and
-  dropped, so the controller stayed still; it now reaches the controller (bc06c148f6, by Mvii7,
-  from the Selevet fork by néo Luigi). Values a controller cannot take (NaN, negative, out of
+- Controller rumble in Switch 2 games (GitHub issue #11): the games' vibration command (HID 214)
+  was accepted and dropped, so the controller stayed still; it now reaches the controller
+  (bc06c148f6, by Mvii7, from the Selevet fork by néo Luigi). Values a controller cannot take (NaN, negative, out of
   range) are clamped.
 - AMD GPUs: green / blue patches near glowing objects. A shader register read before it is
   written now reads zero, as on NVIDIA (e974318be3, by arisqz; `EDEN_NX2_UNDEF_ZERO=0` turns it off).
